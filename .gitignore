@@ -1,0 +1,42 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.db
+*.log
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Local configuration and secrets. Keep only safe templates.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Virtual environments and dependency/build output.
+venv/
+env/
+node_modules/
+dist/
+frontend/tsconfig.tsbuildinfo
+
+# Local runtime state and generated GIS data.
+/state/
+/workspace/
+
+# Local editor and agent metadata.
+.idea/
+.vscode/
+.codex/
+
+# Local project design notes are kept outside the source repository.
+docs/
+!/docs/
+docs/*
+!/docs/rebuild/
+!/docs/rebuild/**
+
+# The project design README stays local until the project is complete.
+README.md
