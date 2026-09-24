@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from app.core.models import RiskLevel, ToolMetadata
 
@@ -16,6 +18,14 @@ class PermissionDecision:
     allowed: bool
     needs_approval: bool = False
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class ToolDiscoveryContext:
+    """由服务端基于认证身份和实际服务构造，不接受模型提供。"""
+
+    granted_scopes: frozenset[str] = frozenset()
+    available_envs: frozenset[str] = frozenset()
 
 
 class PermissionPolicy:
@@ -30,4 +40,41 @@ class PermissionPolicy:
         if self.allow_approval:
             return PermissionDecision(True)
         return PermissionDecision(False, True, f"工具 {metadata.name} 的风险等级为 {metadata.risk_level}，需要审批。")
+
+    def is_discoverable(self, metadata: ToolMetadata, context: ToolDiscoveryContext) -> bool:
+        """只判断是否可向模型展示；真实执行仍由 authorize 和资源服务再次校验。"""
+
+        return (
+            set(metadata.required_scopes).issubset(context.granted_scopes)
+            and set(metadata.required_envs).issubset(context.available_envs)
+        )
+
+    @staticmethod
+    def discovery_context(*, authenticated_user: bool, services: Mapping[str, Any]) -> ToolDiscoveryContext:
+        """根据可信认证结果和实际注入服务构造目录上下文。"""
+
+        scopes = (
+            frozenset({"dataset.read", "dataset.write", "workspace.read", "workspace.write", "artifact.create"})
+            if authenticated_user
+            else frozenset()
+        )
+        environments: set[str] = set()
+        if services.get("registry") is not None and services.get("inspector") is not None:
+            environments.add("gis.dataset")
+        for service, environment in (
+            ("vectors", "gis.vector"),
+            ("rasters", "gis.raster"),
+            ("crs", "gis.crs"),
+            ("renderer", "gis.visualization"),
+            ("workspace", "workspace"),
+        ):
+            if services.get(service) is not None:
+                environments.add(environment)
+        # 普通 Python/Shell 执行器不等于隔离环境；只有宿主明确注入经过验证的
+        # 隔离运行时标记时才允许目录发现这两类工具。
+        if services.get("isolated_python") is True:
+            environments.add("isolated_python")
+        if services.get("isolated_shell") is True:
+            environments.add("isolated_shell")
+        return ToolDiscoveryContext(scopes, frozenset(environments))
 

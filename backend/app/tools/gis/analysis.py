@@ -12,7 +12,7 @@ from .common import dataset_from_context
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("analysis.zonal_statistics", "计算多边形分区内栅格的均值、最小值和最大值", tags=["gis", "analysis", "raster"]), zonal)
+    registry.register(metadata("analysis.zonal_statistics", "计算分区栅格均值、最小值和最大值 / Calculate zonal raster statistics", tags=["gis", "analysis", "raster"], required_envs=["gis.vector", "gis.raster"]), zonal, deferred=True)
 
 
 def zonal(arguments: dict[str, Any], context: ToolContext) -> dict:

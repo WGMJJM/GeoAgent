@@ -13,7 +13,9 @@ def register_runtime_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolMetadata(
             name="python.execute",
-            description="在受信任的本地运行时执行 Python GIS 代码（默认关闭）",
+            description="在隔离运行环境中执行 Python GIS 代码（当前无已验证隔离环境） / Execute Python GIS code in an isolated runtime",
+            required_scopes=["runtime.python.execute", "workspace.read", "workspace.write"],
+            required_envs=["isolated_python", "workspace"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -29,11 +31,14 @@ def register_runtime_tools(registry: ToolRegistry) -> None:
             tags=["runtime", "python", "gis"],
         ),
         python_execute,
+        deferred=True,
     )
     registry.register(
         ToolMetadata(
             name="shell.execute",
-            description="在 workspace 中执行白名单 GIS CLI",
+            description="在隔离工作区中执行 GIS 命令（当前无已验证隔离环境） / Run GIS commands in an isolated workspace",
+            required_scopes=["runtime.shell.execute", "workspace.read", "workspace.write"],
+            required_envs=["isolated_shell", "workspace"],
             input_schema={
                 "type": "object",
                 "properties": {
@@ -49,6 +54,7 @@ def register_runtime_tools(registry: ToolRegistry) -> None:
             tags=["runtime", "shell", "gis"],
         ),
         shell_execute,
+        deferred=True,
     )
 
 

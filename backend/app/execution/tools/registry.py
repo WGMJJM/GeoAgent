@@ -12,11 +12,21 @@ from .model import RegisteredTool, ToolHandler
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, RegisteredTool] = {}
+        self._deferred: set[str] = set()
 
-    def register(self, metadata: ToolMetadata, handler: ToolHandler) -> None:
+    def register(self, metadata: ToolMetadata, handler: ToolHandler, *, deferred: bool = False) -> None:
         if metadata.name in self._tools:
             raise ValueError(f"Tool 已注册：{metadata.name}")
         self._tools[metadata.name] = RegisteredTool(metadata, handler)
+        if deferred:
+            self._deferred.add(metadata.name)
+
+    def unregister(self, name: str) -> bool:
+        if name not in self._tools:
+            return False
+        del self._tools[name]
+        self._deferred.discard(name)
+        return True
 
     def get(self, name: str) -> RegisteredTool:
         try:
@@ -26,6 +36,12 @@ class ToolRegistry:
 
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._tools))
+
+    def deferred_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._deferred))
+
+    def is_deferred(self, name: str) -> bool:
+        return name in self._deferred
 
     def definitions(self, *, tags: Iterable[str] | None = None) -> list[ToolMetadata]:
         requested = set(tags or ())

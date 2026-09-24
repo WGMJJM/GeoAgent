@@ -11,13 +11,13 @@ from .common import dataset_from_context, output_path, register_derived
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("vector.validate", "检查矢量 geometry 合法性和要素数量", tags=["gis", "vector"]), validate)
-    registry.register(metadata("vector.repair", "修复无效矢量 geometry", write=True, tags=["gis", "vector"]), repair)
-    registry.register(metadata("vector.buffer", "按线性单位生成矢量缓冲区", write=True, tags=["gis", "vector"]), buffer)
-    registry.register(metadata("vector.clip", "使用矢量边界裁剪数据", write=True, tags=["gis", "vector"]), clip)
-    registry.register(metadata("vector.intersection", "计算两个矢量数据集的相交区域", write=True, tags=["gis", "vector"]), intersection)
-    registry.register(metadata("vector.dissolve", "按字段或整体融合矢量要素", write=True, tags=["gis", "vector"]), dissolve)
-    registry.register(metadata("vector.spatial_join", "按空间关系连接两个矢量数据集", write=True, tags=["gis", "vector"]), spatial_join)
+    registry.register(metadata("vector.validate", "检查矢量几何有效性和要素数 / Validate vector geometry and feature count", tags=["gis", "vector"], required_envs=["gis.vector"]), validate, deferred=True)
+    registry.register(metadata("vector.repair", "修复无效矢量几何 / Repair invalid vector geometries", write=True, tags=["gis", "vector"], required_envs=["gis.vector", "workspace"]), repair, deferred=True)
+    registry.register(metadata("vector.buffer", "按距离生成矢量缓冲区 / Create vector buffers by distance", write=True, tags=["gis", "vector"], required_envs=["gis.vector", "workspace"]), buffer, deferred=True)
+    registry.register(metadata("vector.clip", "使用矢量边界裁剪数据 / Clip vector data with a boundary", write=True, tags=["gis", "vector"], required_envs=["gis.vector", "workspace"]), clip, deferred=True)
+    registry.register(metadata("vector.intersection", "计算两个矢量数据集的相交区域 / Intersect two vector datasets", write=True, tags=["gis", "vector"], required_envs=["gis.vector", "workspace"]), intersection, deferred=True)
+    registry.register(metadata("vector.dissolve", "按字段或整体融合矢量要素 / Dissolve vector features by field", write=True, tags=["gis", "vector"], required_envs=["gis.vector", "workspace"]), dissolve, deferred=True)
+    registry.register(metadata("vector.spatial_join", "按空间关系连接矢量数据 / Spatially join vector datasets", write=True, tags=["gis", "vector"], required_envs=["gis.vector", "workspace"]), spatial_join, deferred=True)
 
 
 def validate(arguments: dict[str, Any], context: ToolContext) -> dict:

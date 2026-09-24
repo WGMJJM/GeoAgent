@@ -294,6 +294,8 @@ class ToolMetadata(StrictModel):
     name: str
     description: str
     input_schema: dict[str, Any] = Field(default_factory=dict)
+    required_scopes: list[str] = Field(default_factory=list)
+    required_envs: list[str] = Field(default_factory=list)
     risk_level: RiskLevel = RiskLevel.READ
     supports_retry: bool = False
     dataset_output_policy: DatasetOutputPolicy = DatasetOutputPolicy.NONE

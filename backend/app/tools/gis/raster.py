@@ -11,10 +11,10 @@ from .common import dataset_from_context, output_path, register_derived
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("raster.inspect", "检查栅格尺寸、分辨率、NoData 和统计摘要", tags=["gis", "raster"]), inspect)
-    registry.register(metadata("raster.clip", "使用矢量边界裁剪栅格", write=True, tags=["gis", "raster"]), clip)
-    registry.register(metadata("raster.reproject", "重投影栅格数据", write=True, tags=["gis", "raster"]), reproject)
-    registry.register(metadata("raster.slope", "从 DEM 计算坡度栅格", write=True, tags=["gis", "raster", "terrain"]), slope)
+    registry.register(metadata("raster.inspect", "检查栅格尺寸、分辨率和 NoData / Inspect raster dimensions, resolution and NoData", tags=["gis", "raster"], required_envs=["gis.raster"]), inspect, deferred=True)
+    registry.register(metadata("raster.clip", "使用矢量边界裁剪栅格 / Clip a raster with a vector boundary", write=True, tags=["gis", "raster"], required_envs=["gis.raster", "workspace"]), clip, deferred=True)
+    registry.register(metadata("raster.reproject", "重投影栅格数据 / Reproject raster data", write=True, tags=["gis", "raster"], required_envs=["gis.raster", "workspace"]), reproject, deferred=True)
+    registry.register(metadata("raster.slope", "从 DEM 计算坡度 / Calculate slope from a DEM", write=True, tags=["gis", "raster", "terrain"], required_envs=["gis.raster", "workspace"]), slope, deferred=True)
 
 
 def inspect(arguments: dict[str, Any], context: ToolContext) -> dict:

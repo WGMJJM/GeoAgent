@@ -13,8 +13,8 @@ from .common import dataset_from_context, output_path, register_derived
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("crs.inspect", "检查数据集坐标参考系和距离单位", tags=["gis", "crs"]), inspect_crs)
-    registry.register(metadata("crs.reproject", "将矢量或栅格数据重投影到指定 CRS", write=True, tags=["gis", "crs"]), reproject)
+    registry.register(metadata("crs.inspect", "检查坐标参考系、CRS 和距离单位 / Inspect CRS and distance units", tags=["gis", "crs"], required_envs=["gis.crs"]), inspect_crs, deferred=True)
+    registry.register(metadata("crs.reproject", "将矢量或栅格重投影到目标 CRS / Reproject vector or raster data", write=True, tags=["gis", "crs"], required_envs=["gis.crs", "workspace"]), reproject, deferred=True)
 
 
 def inspect_crs(arguments: dict[str, Any], context: ToolContext) -> dict:

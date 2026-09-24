@@ -12,9 +12,9 @@ from .common import dataset_from_context
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("dataset.list", "列出已注册的空间数据集", tags=["gis", "dataset"]), list_datasets)
-    registry.register(metadata("dataset.inspect", "检查数据集的 CRS、范围、字段和统计摘要", tags=["gis", "dataset"]), inspect_dataset)
-    registry.register(metadata("dataset.register", "把 workspace 中的数据文件登记到 Dataset Registry", write=True, tags=["gis", "dataset"]), register_dataset)
+    registry.register(metadata("dataset.list", "列出已注册的空间数据集 / List registered spatial datasets", tags=["gis", "dataset"], required_scopes=["dataset.read"], required_envs=["gis.dataset"]), list_datasets)
+    registry.register(metadata("dataset.inspect", "检查数据集 CRS、范围、字段和摘要 / Inspect dataset CRS, extent, fields and summary", tags=["gis", "dataset"], required_scopes=["dataset.read", "dataset.write", "workspace.read"], required_envs=["gis.dataset", "workspace"]), inspect_dataset)
+    registry.register(metadata("dataset.register", "登记工作区中的数据文件 / Register a data file from the workspace", write=True, tags=["gis", "dataset"], required_scopes=["workspace.read", "dataset.write"], required_envs=["gis.dataset", "workspace"]), register_dataset, deferred=True)
 
 
 def list_datasets(arguments: dict[str, Any], context: ToolContext) -> dict:

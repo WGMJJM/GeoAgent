@@ -24,6 +24,8 @@ def metadata(
     tags: list[str] | None = None,
     input_schema: dict[str, Any] | None = None,
     dataset_output_policy: DatasetOutputPolicy | None = None,
+    required_scopes: list[str] | None = None,
+    required_envs: list[str] | None = None,
 ) -> ToolMetadata:
     output_policy = dataset_output_policy
     if output_policy is None:
@@ -32,6 +34,8 @@ def metadata(
         name=name,
         description=description,
         input_schema=input_schema or _SCHEMAS.get(name, _schema({})),
+        required_scopes=required_scopes if required_scopes is not None else (["dataset.read", "dataset.write", "workspace.write"] if write else ["dataset.read"]),
+        required_envs=required_envs or [],
         risk_level=RiskLevel.WRITE if write else RiskLevel.READ,
         supports_retry=name.startswith(("dataset.inspect", "raster.inspect")),
         dataset_output_policy=output_policy,

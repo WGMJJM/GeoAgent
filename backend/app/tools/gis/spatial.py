@@ -12,7 +12,7 @@ from .common import dataset_from_context
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("analysis.distance", "计算要素到目标的距离分布和阈值覆盖数", tags=["gis", "analysis"]), distance)
+    registry.register(metadata("analysis.distance", "计算要素到目标的距离分布 / Summarize distances to target features", tags=["gis", "analysis"], required_envs=["gis.vector"]), distance, deferred=True)
 
 
 def distance(arguments: dict[str, Any], context: ToolContext) -> dict:

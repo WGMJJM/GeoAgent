@@ -12,7 +12,7 @@ from .common import dataset_from_context, output_path
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("map.render", "将矢量结果渲染为可下载的 GeoJSON HTML 产物", write=True, artifact=True, tags=["gis", "visualization"]), render)
+    registry.register(metadata("map.render", "将矢量数据渲染为可下载地图 / Render vector data as a downloadable map", write=True, artifact=True, tags=["gis", "visualization"], required_scopes=["dataset.read", "workspace.write", "artifact.create"], required_envs=["gis.vector", "gis.visualization", "workspace"]), render, deferred=True)
 
 
 def render(arguments: dict[str, Any], context: ToolContext) -> dict:
