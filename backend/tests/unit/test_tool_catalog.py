@@ -120,6 +120,9 @@ def test_no_match_returns_empty_list_without_falling_back_to_registry_contents()
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
 
     assert catalog.search("unrelated capability", _context()) == []
+    response = catalog.tool_search({"query": "unrelated capability"}, _context())
+    assert response["tools"] == []
+    assert "重新搜索" in response["message"]
 
 
 def test_exact_name_does_not_bypass_scope_or_environment_filtering():

@@ -95,6 +95,15 @@ class ToolCatalog:
         matches.sort(key=lambda item: (-item.score, item.name))
         return matches[: min(limit, MAX_RESULTS)]
 
+    def tool_search(self, arguments: dict[str, Any], context: ToolDiscoveryContext) -> dict[str, Any]:
+        """tool.search 的轻量响应包装；AgentLoop 接入留到下一阶段。"""
+
+        cards = self.search(arguments.get("query"), context, arguments.get("limit", MAX_RESULTS))
+        response: dict[str, Any] = {"tools": [item.public() for item in cards]}
+        if not cards:
+            response["message"] = "未找到匹配工具，可改用工具名称或简短中文/英文能力词重新搜索。"
+        return response
+
 
 def tokenize(query: str) -> tuple[str, ...]:
     terms = list(_ASCII_TOKEN.findall(query.casefold()))
