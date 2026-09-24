@@ -96,7 +96,7 @@ class ToolCatalog:
         return matches[: min(limit, MAX_RESULTS)]
 
     def tool_search(self, arguments: dict[str, Any], context: ToolDiscoveryContext) -> dict[str, Any]:
-        """tool.search 的轻量响应包装；AgentLoop 接入留到下一阶段。"""
+        """tool.search 的轻量响应包装，供 AgentLoop 作为标准工具观察返回。"""
 
         cards = self.search(arguments.get("query"), context, arguments.get("limit", MAX_RESULTS))
         response: dict[str, Any] = {"tools": [item.public() for item in cards]}

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from app.auth.policy import ToolDiscoveryContext
+from app.config import Settings
 from app.core.models import (
     AgentRequest,
     AgentResult,
@@ -21,11 +23,16 @@ from app.core.models import (
     ToolStatus,
     new_id,
 )
-from app.execution.tools import ToolExecutor, ToolRegistry
+from app.execution.tools import (
+    TOOL_SEARCH_DEFINITION,
+    ToolCatalog,
+    ToolExecutor,
+    ToolRegistry,
+    validate_arguments,
+)
 from app.models import ModelAdapter, ModelRequest
 from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
-from app.config import Settings
 from app.state import StateStore
 
 from .context import ContextBuilder
@@ -61,9 +68,6 @@ SEARCH_HISTORY_TOOL = {
     },
 }
 
-FIRST_STAGE_TOOLS = frozenset({"dataset.list", "dataset.inspect"})
-
-
 @dataclass(slots=True)
 class LoopPreparedRequest:
     """统一模型循环运行时的不可变请求绑定。"""
@@ -89,6 +93,8 @@ class AgentLoop:
         self.store = store
         self.registry = registry
         self.executor = executor
+        self.catalog = ToolCatalog(registry, executor.policy.is_discoverable)
+        self.policy = executor.policy
         self.trace = trace
         self.settings = settings
         self.model_provider = model_provider
@@ -141,7 +147,6 @@ class AgentLoop:
         continuation: dict[str, object] | None = None,
         on_model_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> AgentResult:
-        del continuation
         run = prepared.run
         model = self.model_provider(request.model_profile)
         if model is None:
@@ -157,10 +162,52 @@ class AgentLoop:
                 ),
             )
 
-        messages, cursor_id = self._initial_messages(request, resume_from, run)
-        tools = self._tool_definitions()
+        messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
+        activated_names = self._restore_activated_names(resume_from, request)
+        pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
+
+        if pending_approvals:
+            if isinstance(continuation, dict) and continuation.get("type") == "user_input":
+                self._save_checkpoint(
+                    request,
+                    run,
+                    messages,
+                    cursor_id,
+                    "waiting_approval",
+                    activated_names,
+                    pending_approvals,
+                )
+                first = pending_approvals[0]
+                return await self._finish(
+                    run,
+                    request=request,
+                    result=AgentResult(
+                        agent_id=run.agent_id,
+                        status=AgentResultStatus.BLOCKED,
+                        summary=f"已记录补充信息；工具 {first.get('tool_name', '')} 仍在等待审批。",
+                        error="APPROVAL_REQUIRED",
+                        needs_input={"approval_id": first.get("approval_id"), "tool": first.get("tool_name")},
+                        trace_id=run.id,
+                    ),
+                )
+            resumed = await self._resume_approval(
+                request,
+                run,
+                messages,
+                cursor_id,
+                activated_names,
+                pending_approvals,
+                continuation,
+            )
+            if resumed is not None:
+                return resumed
+
         for turn in range(1, self.settings.max_agent_turns + 1):
+            services = self.services_factory(request.user_id)
+            runtime_context = self._discovery_context(request, services)
+            activated_names = self._available_activations(activated_names, runtime_context)
+            tools = self._tool_definitions(runtime_context, activated_names)
             current = self.store.get_run(run.id) or run
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + 1})
             self.store.save_run(current)
@@ -186,18 +233,6 @@ class AgentLoop:
                 )
 
             if response.tool_calls:
-                if tool_call_count >= self.settings.max_tool_calls:
-                    return await self._finish(
-                        current,
-                        request=request,
-                        result=AgentResult(
-                            agent_id=current.agent_id,
-                            status=AgentResultStatus.BLOCKED,
-                            summary="已达到本次运行的工具调用上限，运行已安全停止。",
-                            error="BUDGET_EXCEEDED",
-                            trace_id=current.id,
-                        ),
-                    )
                 assistant_calls, pending = _decode_tool_calls(response.tool_calls, current.id)
                 messages.append(
                     {
@@ -207,28 +242,57 @@ class AgentLoop:
                     }
                 )
                 ask_question: str | None = None
+                next_activations: set[str] | None = None
+                permitted_this_batch = frozenset(activated_names)
+                available_names_this_batch = self._available_tool_names(
+                    self._discovery_context(request, self.services_factory(request.user_id)),
+                    permitted_this_batch,
+                )
                 for provider_call_id, name, arguments, decode_error, persisted_id in pending:
-                    if decode_error:
+                    within_budget = tool_call_count < self.settings.max_tool_calls
+                    if not within_budget:
+                        result = _blocked_result(
+                            persisted_id,
+                            "BUDGET_EXCEEDED",
+                            "已达到本次运行的工具调用上限。",
+                        )
+                    else:
+                        tool_call_count += 1
+                        latest = self.store.get_run(current.id) or current
+                        current = latest.model_copy(update={"tool_call_count": tool_call_count})
+                        self.store.save_run(current)
+
+                    if not within_budget:
+                        pass
+                    elif decode_error:
                         result = ToolResult(
                             call_id=persisted_id,
                             status=ToolStatus.FAILED,
                             error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=decode_error),
                         )
                     elif name == "agent.ask_user":
-                        problem = _validate_arguments(arguments, ASK_USER_TOOL["function"]["parameters"])
+                        problem = validate_arguments(arguments, ASK_USER_TOOL["function"]["parameters"])
                         if problem:
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.FAILED, error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=problem))
                         else:
                             ask_question = str(arguments["question"]).strip()
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.BLOCKED, output={"waiting_for_user": True, "question": ask_question})
-                    elif tool_call_count >= self.settings.max_tool_calls:
-                        result = ToolResult(
-                            call_id=persisted_id,
-                            status=ToolStatus.BLOCKED,
-                            error=ToolError(code="BUDGET_EXCEEDED", message="已达到本次运行的工具调用上限。"),
-                        )
+                    elif name == "tool.search":
+                        problem = validate_arguments(arguments, TOOL_SEARCH_DEFINITION["function"]["parameters"])
+                        if problem:
+                            result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
+                        else:
+                            search_services = self.services_factory(request.user_id)
+                            search_context = self._discovery_context(request, search_services)
+                            try:
+                                search_output = self.catalog.tool_search(arguments, search_context)
+                            except ValueError as exc:
+                                result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", str(exc))
+                            else:
+                                result = ToolResult(call_id=persisted_id, status=ToolStatus.SUCCESS, output=search_output)
+                                next_activations = {item["name"] for item in search_output["tools"]}
                     elif name == "conversation.search_history":
-                        problem = _validate_arguments(arguments, SEARCH_HISTORY_TOOL["function"]["parameters"])
+                        problem = validate_arguments(arguments, SEARCH_HISTORY_TOOL["function"]["parameters"])
                         if problem:
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.FAILED, error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=problem))
                         else:
@@ -247,32 +311,52 @@ class AgentLoop:
                                 status=ToolStatus.SUCCESS,
                                 output=[{"message_id": item.id, "role": item.role, "content": item.content[:3000]} for item in found],
                             )
-                            tool_call_count += 1
-                            latest = self.store.get_run(current.id) or current
-                            current = latest.model_copy(update={"tool_call_count": tool_call_count})
-                            self.store.save_run(current)
                     else:
                         try:
                             registered = self.registry.get(name)
                         except KeyError:
-                            result = ToolResult(call_id=persisted_id, status=ToolStatus.FAILED, error=ToolError(code="UNKNOWN_TOOL", message=f"未注册工具：{name}"))
+                            result = _failed_result(persisted_id, "UNKNOWN_TOOL", f"未注册工具：{name}")
                         else:
-                            problem = _validate_arguments(arguments, _exposed_tool_schema(name, registered.metadata.input_schema))
-                            if name not in FIRST_STAGE_TOOLS:
-                                problem = "该能力尚未在当前阶段开放。"
-                            if problem:
-                                result = ToolResult(call_id=persisted_id, status=ToolStatus.FAILED, error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=problem))
-                            else:
-                                call = ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id, agent_id=current.agent_id)
-                                result = await self.executor.execute(
-                                    call,
-                                    agent_id=current.agent_id,
-                                    services=self.services_factory(request.user_id),
+                            if self.registry.is_deferred(name) and name not in permitted_this_batch:
+                                result = _blocked_result(
+                                    persisted_id,
+                                    "DEFERRED_TOOL_NOT_ACTIVE",
+                                    "该延迟工具未在当前 Run 中激活，请先使用 tool.search。",
                                 )
-                                tool_call_count += 1
-                                latest = self.store.get_run(current.id) or current
-                                current = latest.model_copy(update={"tool_call_count": tool_call_count})
-                                self.store.save_run(current)
+                            elif name not in available_names_this_batch:
+                                result = _blocked_result(
+                                    persisted_id,
+                                    "TOOL_NOT_AVAILABLE",
+                                    "当前用户权限或运行环境不允许使用该工具。",
+                                )
+                            else:
+                                problem = validate_arguments(arguments, registered.metadata.input_schema)
+                                if problem:
+                                    result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
+                                else:
+                                    execution_services = self.services_factory(request.user_id)
+                                    execution_context = self._discovery_context(request, execution_services)
+                                    allowed_now = self._available_tool_names(execution_context, permitted_this_batch)
+                                    call = ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id, agent_id=current.agent_id)
+                                    result = await self.executor.execute(
+                                        call,
+                                        agent_id=current.agent_id,
+                                        services=execution_services,
+                                        active_tool_names=allowed_now,
+                                        discovery_context=execution_context,
+                                    )
+                                    if result.error and result.error.code == "APPROVAL_REQUIRED":
+                                        approval_id = result.error.details.get("approval_id")
+                                        if approval_id:
+                                            approval = {
+                                                "approval_id": str(approval_id),
+                                                "run_id": current.id,
+                                                "provider_call_id": provider_call_id,
+                                                "call_id": persisted_id,
+                                                "tool_name": name,
+                                                "arguments": arguments,
+                                            }
+                                            pending_approvals.append(approval)
                     messages.append(
                         {
                             "role": "tool",
@@ -280,22 +364,17 @@ class AgentLoop:
                             "content": _tool_observation(result),
                         }
                     )
-                    if ask_question:
-                        self._save_checkpoint(request, current, messages, cursor_id, "waiting_user")
-                        return await self._finish(
-                            current,
-                            request=request,
-                            result=AgentResult(
-                                agent_id=current.agent_id,
-                                status=AgentResultStatus.BLOCKED,
-                                summary=ask_question,
-                                error="WAITING_USER",
-                                needs_input={"question": ask_question},
-                                trace_id=current.id,
-                            ),
-                        )
-
-                self._save_checkpoint(request, current, messages, cursor_id, f"tool_observation_{turn}")
+                if next_activations is not None:
+                    activated_names = next_activations
+                self._save_checkpoint(
+                    request,
+                    current,
+                    messages,
+                    cursor_id,
+                    "tool_observation",
+                    activated_names,
+                    pending_approvals,
+                )
                 await self.trace.emit(
                     current.id,
                     EventType.DECISION_MADE,
@@ -303,6 +382,33 @@ class AgentLoop:
                     payload={"action": "tool_call", "tool_count": len(pending)},
                     agent_id=current.agent_id,
                 )
+                if ask_question:
+                    return await self._finish(
+                        current,
+                        request=request,
+                        result=AgentResult(
+                            agent_id=current.agent_id,
+                            status=AgentResultStatus.BLOCKED,
+                            summary=ask_question,
+                            error="WAITING_USER",
+                            needs_input={"question": ask_question},
+                            trace_id=current.id,
+                        ),
+                    )
+                if pending_approvals:
+                    first = pending_approvals[0]
+                    return await self._finish(
+                        current,
+                        request=request,
+                        result=AgentResult(
+                            agent_id=current.agent_id,
+                            status=AgentResultStatus.BLOCKED,
+                            summary=f"工具 {first['tool_name']} 等待审批后才能继续。",
+                            error="APPROVAL_REQUIRED",
+                            needs_input={"approval_id": first["approval_id"], "tool": first["tool_name"]},
+                            trace_id=current.id,
+                        ),
+                    )
                 continue
 
             answer = response.content.strip()
@@ -344,39 +450,192 @@ class AgentLoop:
             ),
         )
 
-    def _tool_definitions(self) -> list[dict[str, Any]]:
-        definitions = []
+    def _tool_definitions(
+        self,
+        context: ToolDiscoveryContext | None = None,
+        activated_names: set[str] | frozenset[str] = frozenset(),
+    ) -> list[dict[str, Any]]:
+        context = context or ToolDiscoveryContext()
+        definitions = [TOOL_SEARCH_DEFINITION, ASK_USER_TOOL, SEARCH_HISTORY_TOOL]
+        available = self._available_tool_names(context, activated_names)
         for item in self.registry.definitions():
-            if item.name not in FIRST_STAGE_TOOLS:
+            if item.name not in available:
                 continue
-            parameters = _exposed_tool_schema(item.name, item.input_schema)
-            definitions.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": item.name,
-                        "description": item.description,
-                        "parameters": parameters,
-                    },
-                }
-            )
-        return [*definitions, ASK_USER_TOOL, SEARCH_HISTORY_TOOL]
+            definitions.append(_tool_definition(item.name, item.description, item.input_schema))
+        return definitions
 
-    def _initial_messages(self, request: AgentRequest, checkpoint: Checkpoint | None, run: Run) -> tuple[list[dict[str, Any]], str | None]:
+    def _discovery_context(self, request: AgentRequest, services: dict[str, Any]) -> ToolDiscoveryContext:
+        return self.policy.discovery_context(authenticated_user=bool(request.user_id), services=services)
+
+    def _available_activations(
+        self,
+        activated_names: set[str] | frozenset[str],
+        context: ToolDiscoveryContext,
+    ) -> set[str]:
+        available = set()
+        for name in activated_names:
+            if not self.registry.is_deferred(name):
+                continue
+            try:
+                metadata = self.registry.get(name).metadata
+            except KeyError:
+                continue
+            if self.policy.is_discoverable(metadata, context):
+                available.add(name)
+        return available
+
+    def _available_tool_names(
+        self,
+        context: ToolDiscoveryContext,
+        activated_names: set[str] | frozenset[str],
+    ) -> frozenset[str]:
+        names = set()
+        for metadata in self.registry.definitions():
+            if self.registry.is_deferred(metadata.name) and metadata.name not in activated_names:
+                continue
+            if self.policy.is_discoverable(metadata, context):
+                names.add(metadata.name)
+        return frozenset(names)
+
+    def _restore_activated_names(self, checkpoint: Checkpoint | None, request: AgentRequest) -> set[str]:
+        if checkpoint is None:
+            return set()
+        raw = checkpoint.state.get("activated_tool_names")
+        if not isinstance(raw, list):
+            return set()
+        services = self.services_factory(request.user_id)
+        context = self._discovery_context(request, services)
+        return self._available_activations({name for name in raw if isinstance(name, str)}, context)
+
+    @staticmethod
+    def _pending_approvals(checkpoint: Checkpoint | None) -> list[dict[str, Any]]:
+        if checkpoint is None:
+            return []
+        raw = checkpoint.state.get("pending_approvals")
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    async def _resume_approval(
+        self,
+        request: AgentRequest,
+        run: Run,
+        messages: list[dict[str, Any]],
+        cursor_id: str | None,
+        activated_names: set[str],
+        pending_approvals: list[dict[str, Any]],
+        continuation: dict[str, object] | None,
+    ) -> AgentResult | None:
+        if not isinstance(continuation, dict) or continuation.get("type") != "approval_result":
+            first = pending_approvals[0]
+            return await self._finish(
+                run,
+                request=request,
+                result=AgentResult(
+                    agent_id=run.agent_id,
+                    status=AgentResultStatus.BLOCKED,
+                    summary=f"工具 {first.get('tool_name', '')} 仍在等待审批。",
+                    error="APPROVAL_REQUIRED",
+                    needs_input={"approval_id": first.get("approval_id"), "tool": first.get("tool_name")},
+                    trace_id=run.id,
+                ),
+            )
+
+        approval_id = continuation.get("approval_id")
+        index = next((i for i, item in enumerate(pending_approvals) if item.get("approval_id") == approval_id), None)
+        if index is None:
+            return await self._finish(
+                run,
+                request=request,
+                result=AgentResult(
+                    agent_id=run.agent_id,
+                    status=AgentResultStatus.FAILED,
+                    summary="审批恢复上下文与当前运行不匹配，工具没有执行。",
+                    error="APPROVAL_MISMATCH",
+                    trace_id=run.id,
+                ),
+            )
+        pending = pending_approvals.pop(index)
+        if pending.get("run_id") != run.id:
+            return await self._finish(
+                run,
+                request=request,
+                result=AgentResult(agent_id=run.agent_id, status=AgentResultStatus.FAILED, summary="审批绑定的运行不匹配。", error="APPROVAL_MISMATCH", trace_id=run.id),
+            )
+
+        call_id = pending.get("call_id")
+        provider_call_id = pending.get("provider_call_id")
+        name = pending.get("tool_name")
+        arguments = pending.get("arguments")
+        if not isinstance(call_id, str) or not isinstance(provider_call_id, str) or not isinstance(name, str) or not isinstance(arguments, dict):
+            return await self._finish(
+                run,
+                request=request,
+                result=AgentResult(agent_id=run.agent_id, status=AgentResultStatus.FAILED, summary="审批保存的工具调用数据无效。", error="APPROVAL_MISMATCH", trace_id=run.id),
+            )
+
+        if continuation.get("approved") is True:
+            services = self.services_factory(request.user_id)
+            context = self._discovery_context(request, services)
+            available = self._available_tool_names(context, activated_names)
+            result = await self.executor.execute(
+                ToolCall(id=call_id, name=name, arguments=arguments, run_id=run.id, agent_id=run.agent_id),
+                agent_id=run.agent_id,
+                services=services,
+                approval_id=str(approval_id),
+                active_tool_names=available,
+                discovery_context=context,
+            )
+        elif continuation.get("approved") is False:
+            result = _blocked_result(call_id, "APPROVAL_DENIED", "用户拒绝了此工具操作；工具没有执行。")
+        else:
+            return await self._finish(
+                run,
+                request=request,
+                result=AgentResult(agent_id=run.agent_id, status=AgentResultStatus.FAILED, summary="审批结果无效，工具没有执行。", error="APPROVAL_MISMATCH", trace_id=run.id),
+            )
+
+        _replace_tool_observation(messages, provider_call_id, _tool_observation(result))
+        if pending_approvals:
+            self._save_checkpoint(request, run, messages, cursor_id, "waiting_approval", activated_names, pending_approvals)
+            first = pending_approvals[0]
+            return await self._finish(
+                run,
+                request=request,
+                result=AgentResult(
+                    agent_id=run.agent_id,
+                    status=AgentResultStatus.BLOCKED,
+                    summary=f"工具 {first.get('tool_name', '')} 仍在等待审批。",
+                    error="APPROVAL_REQUIRED",
+                    needs_input={"approval_id": first.get("approval_id"), "tool": first.get("tool_name")},
+                    trace_id=run.id,
+                ),
+            )
+        self._save_checkpoint(request, run, messages, cursor_id, "approval_resolved", activated_names, [])
+        return None
+
+    def _initial_messages(
+        self,
+        request: AgentRequest,
+        checkpoint: Checkpoint | None,
+        run: Run,
+        continuation: dict[str, object] | None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         if checkpoint is None:
             return self.context.build(request, run=run), _latest_user_message_id(self.store, request.conversation_id)
 
         state = checkpoint.state
         saved = state.get("protocol_messages")
-        protocol = [item for item in saved if isinstance(item, dict)] if isinstance(saved, list) else []
+        protocol = [dict(item) for item in saved if isinstance(item, dict)] if isinstance(saved, list) else []
         cursor_id = state.get("message_cursor_id") if isinstance(state.get("message_cursor_id"), str) else None
-        new_messages = self.store.list_messages_after(request.conversation_id, cursor_id)
-        appended = [{"role": item.role, "content": item.content} for item in new_messages if item.role in {"user", "assistant"}]
-        if not appended and not protocol:
+        if isinstance(continuation, dict) and continuation.get("type") == "user_input":
+            content = continuation.get("content")
+            if isinstance(content, str) and content.strip():
+                protocol.append({"role": "user", "content": content.strip()})
+        if not protocol:
             return self.context.build(request, run=run), _latest_user_message_id(self.store, request.conversation_id)
-        protocol.extend(appended)
         built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
-        return built, _latest_user_message_id(self.store, request.conversation_id) or cursor_id
+        return built, cursor_id
 
     def _save_checkpoint(
         self,
@@ -385,6 +644,8 @@ class AgentLoop:
         messages: list[dict[str, Any]],
         cursor_id: str | None,
         phase: str,
+        activated_names: set[str] | frozenset[str],
+        pending_approvals: list[dict[str, Any]],
     ) -> None:
         protocol_messages = [
             item
@@ -399,7 +660,10 @@ class AgentLoop:
                     "schema_version": 1,
                     "request": request.model_dump(mode="json"),
                     "protocol_messages": protocol_messages,
-                    "message_cursor_id": _latest_user_message_id(self.store, request.conversation_id) or cursor_id,
+                    "message_cursor_id": cursor_id,
+                    "activated_tool_names": sorted(activated_names),
+                    "pending_approvals": pending_approvals,
+                    "tool_call_count": run.tool_call_count,
                 },
             )
         )
@@ -419,7 +683,15 @@ class AgentLoop:
         state.update({"schema_version": 1, "request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
         phase = "waiting_user" if status is RunStatus.WAITING_USER else "waiting_approval" if status is RunStatus.WAITING_APPROVAL else "run_completed"
         self.store.save_checkpoint(Checkpoint(run_id=current.id, phase=phase, state=state))
-        event_type = EventType.RUN_COMPLETED if result.status is AgentResultStatus.SUCCESS else EventType.RUN_WAITING_USER if result.error == "WAITING_USER" else EventType.RUN_FAILED
+        event_type = (
+            EventType.RUN_COMPLETED
+            if result.status is AgentResultStatus.SUCCESS
+            else EventType.RUN_WAITING_USER
+            if result.error == "WAITING_USER"
+            else EventType.RUN_WAITING_APPROVAL
+            if result.error == "APPROVAL_REQUIRED"
+            else EventType.RUN_FAILED
+        )
         await self.trace.emit(current.id, event_type, result.summary, payload={"status": status.value, "error": result.error}, agent_id=current.agent_id)
         return result
 
@@ -435,79 +707,53 @@ def _decode_tool_calls(raw_calls: list[dict[str, Any]], run_id: str):
         raw_arguments = function.get("arguments", "{}")
         error = None
         try:
-            arguments = raw_arguments if isinstance(raw_arguments, dict) else json.loads(raw_arguments)
+            if isinstance(raw_arguments, dict):
+                arguments = raw_arguments
+                protocol_arguments = json.dumps(raw_arguments, ensure_ascii=False)
+            elif isinstance(raw_arguments, str):
+                protocol_arguments = raw_arguments
+                arguments = json.loads(raw_arguments)
+            else:
+                protocol_arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                arguments = json.loads(protocol_arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("工具参数必须是 JSON 对象")
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             arguments = {}
+            protocol_arguments = raw_arguments if isinstance(raw_arguments, str) else json.dumps(raw_arguments, ensure_ascii=False)
             error = f"工具参数不是有效 JSON 对象：{exc}"
         persisted_id = f"{run_id}:{provider_id}"
         messages.append(
             {
                 "id": provider_id,
                 "type": "function",
-                "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
+                "function": {"name": name, "arguments": protocol_arguments},
             }
         )
         decoded.append((provider_id, name, arguments, error, persisted_id))
     return messages, decoded
 
 
-def _validate_arguments(value: Any, schema: dict[str, Any], path: str = "参数") -> str | None:
-    expected = schema.get("type")
-    valid = {
-        "object": lambda item: isinstance(item, dict),
-        "array": lambda item: isinstance(item, list),
-        "string": lambda item: isinstance(item, str),
-        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
-        "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
-        "boolean": lambda item: isinstance(item, bool),
-        "null": lambda item: item is None,
+def _tool_definition(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {"name": name, "description": description, "parameters": schema},
     }
-    if expected in valid and not valid[expected](value):
-        return f"{path}类型错误，期望 {expected}。"
-    if "enum" in schema and value not in schema["enum"]:
-        return f"{path}不在允许值范围内。"
-    if isinstance(value, dict):
-        properties = schema.get("properties", {})
-        missing = [key for key in schema.get("required", []) if key not in value]
-        if missing:
-            return f"{path}缺少必需字段：{', '.join(missing)}。"
-        if schema.get("additionalProperties") is False:
-            extra = set(value) - set(properties)
-            if extra:
-                return f"{path}包含未声明字段：{', '.join(sorted(extra))}。"
-        for key, item in value.items():
-            child_schema = properties.get(key)
-            if isinstance(child_schema, dict):
-                problem = _validate_arguments(item, child_schema, f"{path}.{key}")
-                if problem:
-                    return problem
-    if isinstance(value, str) and len(value) < schema.get("minLength", 0):
-        return f"{path}不能为空。"
-    if isinstance(value, (int, float)):
-        if "minimum" in schema and value < schema["minimum"]:
-            return f"{path}小于允许的最小值。"
-        if "exclusiveMinimum" in schema and value <= schema["exclusiveMinimum"]:
-            return f"{path}必须大于 {schema['exclusiveMinimum']}。"
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, item in enumerate(value):
-            problem = _validate_arguments(item, schema["items"], f"{path}[{index}]")
-            if problem:
-                return problem
-    return None
 
 
-def _exposed_tool_schema(name: str, schema: dict[str, Any]) -> dict[str, Any]:
-    if name == "dataset.inspect":
-        # 旧 Handler 的 path 分支会登记新文件；首阶段只开放已登记 ID 的只读检查。
-        return {
-            "type": "object",
-            "properties": {"dataset_id": {"type": "string"}},
-            "required": ["dataset_id"],
-            "additionalProperties": False,
-        }
-    return schema
+def _failed_result(call_id: str, code: str, message: str) -> ToolResult:
+    return ToolResult(call_id=call_id, status=ToolStatus.FAILED, error=ToolError(code=code, message=message))
+
+
+def _blocked_result(call_id: str, code: str, message: str) -> ToolResult:
+    return ToolResult(call_id=call_id, status=ToolStatus.BLOCKED, error=ToolError(code=code, message=message))
+
+
+def _replace_tool_observation(messages: list[dict[str, Any]], provider_call_id: str, content: str) -> None:
+    for item in reversed(messages):
+        if item.get("role") == "tool" and item.get("tool_call_id") == provider_call_id:
+            item["content"] = content
+            return
 
 
 def _tool_observation(result: ToolResult) -> str:
@@ -530,4 +776,4 @@ def _latest_user_message_id(store: StateStore, conversation_id: str) -> str | No
     return None
 
 
-__all__ = ["AgentLoop", "LoopPreparedRequest", "FIRST_STAGE_TOOLS"]
+__all__ = ["AgentLoop", "LoopPreparedRequest"]

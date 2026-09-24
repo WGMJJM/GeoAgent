@@ -5,10 +5,21 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.loop import AgentLoop
-from app.core.models import AgentRequest, AgentResultStatus, Dataset, DatasetKind, Message, RunStatus
+from app.auth.approval import ApprovalService
+from app.core.models import (
+    AgentRequest,
+    AgentResultStatus,
+    Dataset,
+    DatasetKind,
+    Message,
+    RiskLevel,
+    RunStatus,
+    ToolMetadata,
+)
 from app.execution.tools import ToolExecutor, ToolRegistry
 from app.models import ModelAdapter, ModelRequest, ModelResponse
 from app.observability import TraceRecorder
+from app.run.lifecycle import record_approval_decision
 from app.state import StateStore
 from app.tools.gis import register_gis_tools
 
@@ -52,14 +63,21 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
         trace,
         settings,
         lambda _profile: adapter,
-        lambda _user: {"registry": dataset_view},
+        lambda user_id: {
+            "registry": dataset_view,
+            "inspector": object(),
+            "vectors": object(),
+            "rasters": object(),
+            "workspace": object(),
+            "user_id": user_id,
+        },
     )
     return store, loop
 
 
 async def _run(loop: AgentLoop, store: StateStore, text: str):
     conversation = store.create_conversation("测试")
-    request = AgentRequest(conversation_id=conversation.id, user_input=text)
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input=text)
     store.save_message(Message(conversation_id=conversation.id, role="user", content=text))
     prepared = await loop.prepare_request(request)
     return request, await loop.run(request, prepared=prepared)
@@ -83,7 +101,13 @@ async def test_dataset_list_uses_tool_result_in_same_model_loop(tmp_path):
     assert store.get_run(result.trace_id).status is RunStatus.COMPLETED
     assert store.get_run(result.trace_id).tool_call_count == 1
     assert "roads" in adapter.requests[1].messages[-1]["content"]
-    assert all(tool["function"]["name"] in {"dataset.list", "dataset.inspect", "agent.ask_user", "conversation.search_history"} for tool in adapter.requests[0].tools)
+    assert {tool["function"]["name"] for tool in adapter.requests[0].tools} == {
+        "tool.search",
+        "dataset.list",
+        "dataset.inspect",
+        "agent.ask_user",
+        "conversation.search_history",
+    }
 
 
 @pytest.mark.asyncio
@@ -152,6 +176,7 @@ async def test_waiting_run_resumes_from_checkpoint_with_user_reply(tmp_path):
     store, loop = _loop(tmp_path, adapter)
     request, waiting = await _run(loop, store, "检查这个图层")
     checkpoint = store.latest_checkpoint(waiting.trace_id)
+    store.save_message(Message(conversation_id=request.conversation_id, role="user", content="这是另一项新任务，不应混入旧 Run。"))
     store.save_message(Message(conversation_id=request.conversation_id, role="user", content="道路图层"))
     resumed_request = request.model_copy(update={"user_input": "道路图层"})
     resumed = await loop.run(
@@ -164,6 +189,253 @@ async def test_waiting_run_resumes_from_checkpoint_with_user_reply(tmp_path):
     assert resumed.status is AgentResultStatus.SUCCESS
     assert resumed.trace_id == waiting.trace_id
     assert "道路图层" in adapter.requests[1].messages[-1]["content"]
+    assert "另一项新任务" not in str(adapter.requests[1].messages)
+
+
+@pytest.mark.asyncio
+async def test_search_injects_deferred_tool_on_next_turn_and_executes_it(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
+        ModelResponse(tool_calls=[{"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
+        ModelResponse(content="缓冲区已生成。"),
+    )
+    store, loop = _loop(tmp_path, adapter, [Dataset(id="ds_roads", name="roads", kind=DatasetKind.VECTOR, path="roads.gpkg", format="GPKG")])
+    calls: list[dict] = []
+    metadata = loop.registry.get("vector.buffer").metadata
+    loop.registry.unregister("vector.buffer")
+    loop.registry.register(metadata, lambda arguments, _context: calls.append(arguments) or {"output": {"created": True}}, deferred=True)
+
+    _, result = await _run(loop, store, "为道路生成缓冲区")
+
+    names = [{tool["function"]["name"] for tool in item.tools} for item in adapter.requests]
+    assert "vector.buffer" not in names[0]
+    assert "vector.buffer" in names[1]
+    assert len(names[0]) < len(loop.registry.names())
+    assert result.status is AgentResultStatus.SUCCESS
+    assert calls == [{"dataset_id": "ds_roads", "distance": 25}]
+    assert store.get_run(result.trace_id).tool_call_count == 2
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert checkpoint.state["activated_tool_names"] == ["vector.buffer"]
+
+
+@pytest.mark.asyncio
+async def test_search_does_not_activate_tool_earlier_in_same_batch(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(
+            tool_calls=[
+                {"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
+                {"id": "forged", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}},
+            ]
+        ),
+        ModelResponse(content="工具未在调用前激活，因此没有执行。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    calls: list[dict] = []
+    metadata = loop.registry.get("vector.buffer").metadata
+    loop.registry.unregister("vector.buffer")
+    loop.registry.register(metadata, lambda arguments, _context: calls.append(arguments), deferred=True)
+
+    _, result = await _run(loop, store, "生成缓冲区")
+
+    assert result.status is AgentResultStatus.SUCCESS
+    assert calls == []
+    assert store.get_tool_call(f"{result.trace_id}:forged") is None
+    observation = adapter.requests[1].messages[-1]["content"]
+    assert "DEFERRED_TOOL_NOT_ACTIVE" in observation
+    assert {message.get("tool_call_id") for message in adapter.requests[1].messages if message.get("role") == "tool"} == {"search", "forged"}
+    assert "vector.buffer" in {tool["function"]["name"] for tool in adapter.requests[1].tools}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", ['{"query":""}', '{"query":"buffer","limit":6}'])
+async def test_invalid_tool_search_arguments_return_a_tool_observation(tmp_path, arguments):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "invalid_search", "function": {"name": "tool.search", "arguments": arguments}}]),
+        ModelResponse(content="搜索参数无效，已安全恢复。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+
+    _, result = await _run(loop, store, "搜索工具")
+
+    assert result.status is AgentResultStatus.SUCCESS
+    tool_messages = [item for item in adapter.requests[1].messages if item.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0]["tool_call_id"] == "invalid_search"
+    assert "INVALID_TOOL_ARGUMENTS" in tool_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_latest_search_replaces_activation_and_empty_search_clears_it(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "search_buffer", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
+        ModelResponse(
+            tool_calls=[
+                {"id": "search_slope", "function": {"name": "tool.search", "arguments": '{"query":"slope"}'}},
+                {"id": "active_buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":15}'}},
+            ]
+        ),
+        ModelResponse(content="已重新搜索。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    calls: list[dict] = []
+    metadata = loop.registry.get("vector.buffer").metadata
+    loop.registry.unregister("vector.buffer")
+    loop.registry.register(metadata, lambda arguments, _context: calls.append(arguments) or {"output": "ok"}, deferred=True)
+    _, result = await _run(loop, store, "查询两个能力")
+    names = [{tool["function"]["name"] for tool in item.tools} for item in adapter.requests]
+    assert "vector.buffer" not in names[0]
+    assert "vector.buffer" in names[1]
+    assert "vector.buffer" not in names[2]
+    assert "raster.slope" in names[2]
+    assert calls == [{"dataset_id": "ds_roads", "distance": 15}]
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert checkpoint.state["activated_tool_names"] == ["raster.slope"]
+
+    empty_adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "search_buffer", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
+        ModelResponse(tool_calls=[{"id": "search_empty", "function": {"name": "tool.search", "arguments": '{"query":"not_a_real_capability_938"}'}}]),
+        ModelResponse(content="没有找到匹配工具。"),
+    )
+    empty_store, empty_loop = _loop(tmp_path / "empty", empty_adapter)
+    _, empty_result = await _run(empty_loop, empty_store, "查询能力")
+    assert "vector.buffer" not in {tool["function"]["name"] for tool in empty_adapter.requests[2].tools}
+    assert empty_store.latest_checkpoint(empty_result.trace_id).state["activated_tool_names"] == []
+
+
+@pytest.mark.asyncio
+async def test_multi_tool_call_batch_keeps_all_results_before_waiting_for_user(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(
+            tool_calls=[
+                {"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
+                {"id": "question", "function": {"name": "agent.ask_user", "arguments": '{"question":"要使用多少米？"}'}},
+            ]
+        )
+    )
+    store, loop = _loop(tmp_path, adapter)
+    _, result = await _run(loop, store, "生成缓冲区")
+    assert result.error == "WAITING_USER"
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    messages = checkpoint.state["protocol_messages"]
+    tool_results = [item["tool_call_id"] for item in messages if item.get("role") == "tool"]
+    assert tool_results == ["search", "question"]
+    assert checkpoint.state["activated_tool_names"] == ["vector.buffer"]
+
+
+@pytest.mark.asyncio
+async def test_active_tools_are_run_local_and_inspect_is_read_only(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
+        ModelResponse(content="第一轮结束。"),
+        ModelResponse(content="新运行没有继承旧工具。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    _, first = await _run(loop, store, "搜索缓冲工具")
+    _, second = await _run(loop, store, "另一个独立问题")
+    assert first.status is AgentResultStatus.SUCCESS
+    assert second.status is AgentResultStatus.SUCCESS
+    third_names = {tool["function"]["name"] for tool in adapter.requests[2].tools}
+    assert "vector.buffer" not in third_names
+
+    inspect_schema = loop.registry.get("dataset.inspect").metadata.input_schema
+    assert inspect_schema["required"] == ["dataset_id"]
+    assert set(inspect_schema["properties"]) == {"dataset_id"}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_restore_revalidates_current_environment(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
+        ModelResponse(tool_calls=[{"id": "question", "function": {"name": "agent.ask_user", "arguments": '{"question":"采用多少米？"}'}}]),
+        ModelResponse(tool_calls=[{"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
+        ModelResponse(content="当前环境不支持该操作，因此没有执行。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    services = loop.services_factory("test-user")
+    loop.services_factory = lambda _user: services
+    calls: list[dict] = []
+    metadata = loop.registry.get("vector.buffer").metadata
+    loop.registry.unregister("vector.buffer")
+    loop.registry.register(metadata, lambda arguments, _context: calls.append(arguments), deferred=True)
+    conversation = store.create_conversation("环境恢复", user_id="test-user")
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="生成道路缓冲区")
+    store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
+
+    waiting = await loop.run(request, prepared=await loop.prepare_request(request))
+    checkpoint = store.latest_checkpoint(waiting.trace_id)
+    assert checkpoint.state["activated_tool_names"] == ["vector.buffer"]
+    services.pop("vectors")
+    store.save_message(Message(conversation_id=conversation.id, role="user", content="采用25米"))
+    resumed_request = request.model_copy(update={"user_input": "采用25米"})
+    resumed = await loop.run(
+        resumed_request,
+        prepared=loop.prepare_resume(resumed_request, store.get_run(waiting.trace_id)),
+        resume_from=checkpoint,
+        continuation={"type": "user_input", "content": "采用25米"},
+    )
+
+    assert resumed.status is AgentResultStatus.SUCCESS
+    assert "vector.buffer" not in {tool["function"]["name"] for tool in adapter.requests[2].tools}
+    assert calls == []
+    assert "DEFERRED_TOOL_NOT_ACTIVE" in adapter.requests[3].messages[-1]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved_by_user", [True, False])
+async def test_approval_pauses_and_resumes_saved_call_once(tmp_path, approved_by_user):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"敏感"}'}}]),
+        ModelResponse(tool_calls=[{"id": "danger", "function": {"name": "test.sensitive_write", "arguments": '{"value":7}'}}]),
+        ModelResponse(content="审批结果已处理。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    loop.executor.approval_service = ApprovalService(store)
+    side_effects: list[dict] = []
+    loop.registry.register(
+        ToolMetadata(
+            name="test.sensitive_write",
+            description="敏感测试写入操作",
+            input_schema={"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"], "additionalProperties": False},
+            required_scopes=["dataset.write"],
+            risk_level=RiskLevel.DESTRUCTIVE,
+        ),
+        lambda arguments, _context: side_effects.append(arguments) or {"output": {"written": True}},
+        deferred=True,
+    )
+    conversation = store.create_conversation("审批恢复", user_id="test-user")
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="执行敏感写入")
+    store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
+    prepared = await loop.prepare_request(request)
+    waiting = await loop.run(request, prepared=prepared)
+
+    assert waiting.error == "APPROVAL_REQUIRED"
+    assert store.get_run(waiting.trace_id).status is RunStatus.WAITING_APPROVAL
+    checkpoint = store.latest_checkpoint(waiting.trace_id)
+    pending = checkpoint.state["pending_approvals"][0]
+    assert pending["tool_name"] == "test.sensitive_write"
+    assert pending["arguments"] == {"value": 7}
+    assert store.get_tool_call(pending["call_id"]) is None
+
+    approval = store.get_approval(pending["approval_id"], user_id="test-user")
+    decision = (
+        loop.executor.approval_service.approve(approval.id, user_id="test-user")
+        if approved_by_user
+        else loop.executor.approval_service.deny(approval.id, user_id="test-user")
+    )
+    resumed_run, _ = record_approval_decision(store, decision)
+    result = await loop.run(
+        request,
+        prepared=loop.prepare_resume(request, resumed_run),
+        resume_from=checkpoint,
+        continuation={"type": "approval_result", "approval_id": approval.id, "approved": approved_by_user},
+    )
+
+    assert result.status is AgentResultStatus.SUCCESS
+    assert side_effects == ([{"value": 7}] if approved_by_user else [])
+    final_approval = store.get_approval(approval.id, user_id="test-user")
+    assert final_approval.status.value == ("CONSUMED" if approved_by_user else "DENIED")
+    expected_observation = "written" if approved_by_user else "APPROVAL_DENIED"
+    assert expected_observation in adapter.requests[-1].messages[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -182,7 +454,7 @@ async def test_model_can_search_original_messages_on_demand(tmp_path):
     store, loop = _loop(tmp_path, adapter)
     conversation = store.create_conversation("历史检索")
     store.save_message(Message(conversation_id=conversation.id, role="user", content="道路缓冲距离采用 500 米。"))
-    request = AgentRequest(conversation_id=conversation.id, user_input="之前的距离是多少？")
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="之前的距离是多少？")
     store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
     prepared = await loop.prepare_request(request)
 

@@ -26,13 +26,7 @@ def list_datasets(arguments: dict[str, Any], context: ToolContext) -> dict:
 
 
 def inspect_dataset(arguments: dict[str, Any], context: ToolContext) -> dict:
-    registry = context.services["registry"]
-    identifier = arguments.get("dataset_id") or arguments.get("path")
-    dataset = registry.resolve(identifier) if identifier else None
-    if dataset is None and arguments.get("path"):
-        path = context.services["workspace"].resolve(arguments["path"], allow_missing=False)
-        dataset = registry.register_path(path, name=arguments.get("name"), run_id=context.run_id)
-    dataset = dataset or dataset_from_context(context, identifier)
+    dataset = dataset_from_context(context, arguments.get("dataset_id"))
     return {"output": dataset.model_dump(mode="json"), "datasets": [dataset.id]}
 
 

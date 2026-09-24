@@ -77,7 +77,7 @@ def test_tool_executor_normalizes_subprocess_timeout(application):
     )
     call = ToolCall(name="test.timeout")
 
-    result = asyncio.run(application.tool_executor.execute(call, agent_id="main", services=application.tool_executor.services))
+    result = asyncio.run(application.tool_executor.execute(call, agent_id="main", services=application.tool_executor.services, internal=True))
 
     assert result.error is not None
     assert result.error.code == "EXECUTION_TIMEOUT"
@@ -99,6 +99,7 @@ def test_tool_executor_signals_handler_when_async_timeout_expires(application):
             ToolCall(name="test.blocking"),
             agent_id="main",
             services=application.tool_executor.services,
+            internal=True,
         )
     )
 
@@ -125,6 +126,7 @@ def test_tool_executor_signals_handler_when_execution_is_cancelled(application):
                 ToolCall(name="test.cancelled"),
                 agent_id="main",
                 services=application.tool_executor.services,
+                internal=True,
             )
         )
         assert await asyncio.to_thread(started.wait, 1)

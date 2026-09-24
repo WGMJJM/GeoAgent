@@ -58,11 +58,7 @@ _OUTPUT_PATH = {"type": "string", "description": "workspace 内的输出路径�
 _SCHEMAS: dict[str, dict[str, Any]] = {
     "dataset.list": _schema({"kind": {"type": "string", "enum": ["VECTOR", "RASTER", "TABLE"]}}),
     "dataset.inspect": _schema(
-        {
-            "dataset_id": _DATASET_ID,
-            "path": {"type": "string", "description": "workspace 内尚未登记的数据文件路径"},
-            "name": {"type": "string", "description": "新登记数据集的显示名称，可选"},
-        }
+        {"dataset_id": _DATASET_ID}, required=("dataset_id",)
     ),
     "dataset.register": _schema(
         {"path": {"type": "string", "description": "workspace 内的数据文件路径"}, "name": {"type": "string"}},

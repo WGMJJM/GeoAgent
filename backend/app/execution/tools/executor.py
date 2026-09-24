@@ -10,6 +10,7 @@ from threading import Event
 from typing import Any
 
 from app.auth import ApprovalService, PermissionPolicy
+from app.auth.policy import ToolDiscoveryContext
 from app.core.models import (
     DatasetOutputPolicy,
     ErrorCategory,
@@ -26,6 +27,7 @@ from app.state import StateStore
 
 from .model import ToolContext
 from .registry import ToolRegistry
+from .schema import validate_arguments
 
 
 class ToolExecutor:
@@ -50,19 +52,19 @@ class ToolExecutor:
         self.services: dict[str, Any] = {}
         self._cancel_events: dict[str, set[Event]] = {}
 
-    async def execute(self, call: ToolCall, *, agent_id: str, services: dict[str, Any], approval_id: str | None = None) -> ToolResult:
+    async def execute(
+        self,
+        call: ToolCall,
+        *,
+        agent_id: str,
+        services: dict[str, Any],
+        approval_id: str | None = None,
+        active_tool_names: frozenset[str] | None = None,
+        discovery_context: ToolDiscoveryContext | None = None,
+        internal: bool = False,
+    ) -> ToolResult:
         started = time.perf_counter()
         call = call.model_copy(update={"agent_id": agent_id})
-        existing = self.store.get_tool_call(call.id)
-        if existing is not None:
-            execution_status, stored_result = existing
-            if execution_status is ToolExecutionStatus.COMPLETED and stored_result is not None:
-                return stored_result.model_copy(update={"call_id": call.id})
-            if execution_status is ToolExecutionStatus.RUNNING:
-                return _in_progress_result(call.id)
-        if self.metrics:
-            self.metrics.increment("tool_calls.started")
-            self.metrics.increment("tool_call_count")
         try:
             registered = self.registry.get(call.name)
         except KeyError as exc:
@@ -75,6 +77,50 @@ class ToolExecutor:
             if call.run_id:
                 await self.trace.emit(call.run_id, EventType.TOOL_FAILED, str(exc), payload={"tool": call.name, "status": result.status.value}, agent_id=agent_id)
             return result
+
+        context = discovery_context or PermissionPolicy.discovery_context(
+            authenticated_user=bool(services.get("user_id")),
+            services=services,
+        )
+        if internal:
+            # 可信内部调用可绕过 Run 激活与用户 scope，但不能伪造运行环境。
+            if not set(registered.metadata.required_envs).issubset(context.available_envs):
+                return _blocked_tool_result(
+                    call.id,
+                    "TOOL_ENVIRONMENT_UNAVAILABLE",
+                    "工具所需的运行环境当前不可用。",
+                )
+        else:
+            if active_tool_names is None or discovery_context is None:
+                return _blocked_tool_result(
+                    call.id,
+                    "TRUSTED_EXECUTION_CONTEXT_REQUIRED",
+                    "工具调用缺少服务端验证的运行时授权上下文。",
+                )
+            if call.name not in active_tool_names:
+                code = "DEFERRED_TOOL_NOT_ACTIVE" if self.registry.is_deferred(call.name) else "TOOL_NOT_ACTIVE"
+                return _blocked_tool_result(call.id, code, "该工具未在当前 Run 中激活。请先使用 tool.search。")
+            if not self.policy.is_discoverable(registered.metadata, context):
+                return _blocked_tool_result(
+                    call.id,
+                    "TOOL_NOT_AVAILABLE",
+                    "当前用户权限或运行环境不允许使用该工具。",
+                )
+
+        schema_problem = validate_arguments(call.arguments, registered.metadata.input_schema)
+        if schema_problem:
+            return _blocked_tool_result(call.id, "INVALID_TOOL_ARGUMENTS", schema_problem)
+
+        existing = self.store.get_tool_call(call.id)
+        if existing is not None:
+            execution_status, stored_result = existing
+            if execution_status is ToolExecutionStatus.COMPLETED and stored_result is not None:
+                return stored_result.model_copy(update={"call_id": call.id})
+            if execution_status is ToolExecutionStatus.RUNNING:
+                return _in_progress_result(call.id)
+        if self.metrics:
+            self.metrics.increment("tool_calls.started")
+            self.metrics.increment("tool_call_count")
 
         decision = self.policy.authorize(registered.metadata, call.arguments)
         if not decision.allowed:
@@ -95,6 +141,18 @@ class ToolExecutor:
                 if consumed is not None:
                     await self.trace.emit(call.run_id or "unbound", EventType.APPROVAL_CONSUMED, "已消费一次性工具审批", payload={"approval_id": consumed.id, "tool": call.name, "status": consumed.status.value}, agent_id=agent_id)
                     decision = None
+                elif approval_id or continuation_approval_id:
+                    result = ToolResult(
+                        call_id=call.id,
+                        status=ToolStatus.BLOCKED,
+                        error=ToolError(
+                            code="APPROVAL_MISMATCH",
+                            category=ErrorCategory.PERMISSION,
+                            message="审批与当前运行、工具或参数不匹配，工具没有执行。",
+                        ),
+                    )
+                    await self.trace.emit(call.run_id or "unbound", EventType.TOOL_FAILED, result.error.message, payload={"tool": call.name, "status": result.status.value}, agent_id=agent_id)
+                    return result
             if decision is not None:
                 if decision.needs_approval and self.approval_service is not None and user_id and current_run is not None and call.run_id:
                     approval = self.approval_service.create_pending(
@@ -110,7 +168,10 @@ class ToolExecutor:
                     status=ToolStatus.BLOCKED,
                     error=ToolError(code="APPROVAL_REQUIRED", category=ErrorCategory.PERMISSION, message=decision.reason, details={"needs_approval": decision.needs_approval, "approval_id": approval_id}),
                 )
-                if self._claim(call):
+                # 等待审批不是已完成的幂等调用；恢复时必须允许同一个稳定 call.id
+                # 在精确审批匹配后继续执行。没有可消费的审批时则持久化阻断结果。
+                approval_pending = decision.needs_approval and bool(approval_id)
+                if not approval_pending and self._claim(call):
                     self.store.save_tool_call_result(call.id, result)
                 if self.metrics:
                     self.metrics.observe("tool_ms", (time.perf_counter() - started) * 1000)
@@ -216,6 +277,14 @@ def _in_progress_result(call_id: str) -> ToolResult:
             message="相同 call.id 的工具调用正在执行，当前请求不会重复触发副作用。",
             details={"recovery": "等待原调用完成后读取持久化结果。"},
         ),
+    )
+
+
+def _blocked_tool_result(call_id: str, code: str, message: str) -> ToolResult:
+    return ToolResult(
+        call_id=call_id,
+        status=ToolStatus.BLOCKED,
+        error=ToolError(code=code, category=ErrorCategory.PERMISSION, message=message),
     )
 
 

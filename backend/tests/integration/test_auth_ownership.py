@@ -152,7 +152,7 @@ def test_expired_and_inactive_sessions_are_rejected(application):
 def test_python_tool_is_disabled_without_explicit_configuration(application):
     from app.core.models import ToolCall
 
-    result = asyncio.run(application.tool_executor.execute(ToolCall(name="python.execute", arguments={"code": "print(1)"}), agent_id="main", services=application.execution_services()))
-    assert result.status.value == "FAILED"
+    result = asyncio.run(application.tool_executor.execute(ToolCall(name="python.execute", arguments={"code": "print(1)"}), agent_id="main", services=application.execution_services(), internal=True))
+    assert result.status.value == "BLOCKED"
     assert result.error is not None
-    assert result.error.code == "UNSAFE_PYTHON_DISABLED"
+    assert result.error.code == "TOOL_ENVIRONMENT_UNAVAILABLE"
