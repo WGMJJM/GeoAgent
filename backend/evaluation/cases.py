@@ -77,11 +77,11 @@ def multi_agent_cases() -> list[EvaluationCase]:
     """多智能体调度与依赖传播清单。"""
 
     return [
-        EvaluationCase(id="parallel_two_subtasks", name="两个独立子任务并行", prompt="分别检查 roads 和 population", dataset_keys=["roads", "population"], expect_delegation=True, expected_subtask_count=2, enabled=False),
+        EvaluationCase(id="parallel_two_subtasks", name="两个独立子任务并行", prompt="分别检查 roads 和 population", dataset_keys=["roads", "population"], expect_delegation=True, expected_subtask_count=2, notes="已由真实 GIS 并发集成测试覆盖；Runner 必须传入 user_id 和模型。"),
         EvaluationCase(id="parallel_three_subtasks", name="三个独立子任务并行", prompt="综合道路、人口和 DEM", dataset_keys=["roads", "population", "dem"], expect_delegation=True, expected_subtask_count=3, enabled=False),
         EvaluationCase(id="dependency_failure_blocks", name="依赖失败阻断后继", prompt="先处理输入再处理依赖结果", expect_delegation=True, expected_directive="ABORT", enabled=False),
         EvaluationCase(id="required_failure", name="必需子任务失败", prompt="执行必需子任务", expect_delegation=True, expected_directive="ABORT", enabled=False),
-        EvaluationCase(id="optional_failure", name="可选子任务失败", prompt="执行可选质量检查", expect_delegation=True, expected_status="PARTIAL", enabled=False),
+        EvaluationCase(id="optional_failure", name="可选子任务失败", prompt="执行可选质量检查", expect_delegation=True, expected_status="PARTIAL", notes="已由必需/可选失败集成测试覆盖；Runner 必须传入 user_id 和模型。"),
         EvaluationCase(id="subagent_timeout", name="子智能体超时", prompt="执行一个超时子任务", expect_delegation=True, expected_status="BLOCKED", enabled=False),
         EvaluationCase(id="subagent_ask_user", name="子智能体请求补充", prompt="子任务需要用户输入", expect_delegation=True, expected_directive="ASK_USER", enabled=False),
         EvaluationCase(id="subagent_replan", name="子智能体请求重规划", prompt="子任务需要重新规划", expect_delegation=True, expected_directive="REPLAN", enabled=False),

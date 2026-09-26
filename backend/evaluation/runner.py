@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable
 
-from app.core.models import AgentResultStatus
+from app.core.models import AgentRequest, AgentResultStatus
 from app.demo import seed_demo
 
 from .cases import default_cases
@@ -14,8 +14,9 @@ from .models import EvaluationCase, EvaluationCaseResult
 
 
 class EvaluationRunner:
-    def __init__(self, application, cases: Iterable[EvaluationCase] | None = None) -> None:
+    def __init__(self, application, cases: Iterable[EvaluationCase] | None = None, *, user_id: str | None = None) -> None:
         self.application = application
+        self.user_id = user_id
         self.cases = list(cases) if cases is not None else default_cases()
 
     async def run(self) -> EvaluationSummary:
@@ -33,7 +34,7 @@ class EvaluationRunner:
     async def _run_case(self, case: EvaluationCase, demo_ids: dict[str, str]) -> EvaluationCaseResult:
         dataset_ids = list(case.dataset_ids) or [demo_ids[key] for key in case.dataset_keys if key in demo_ids]
         started = time.perf_counter()
-        result = await self.application.ask(case.prompt, dataset_ids=dataset_ids)
+        result = await self.application.ask(AgentRequest(user_input=case.prompt, dataset_ids=dataset_ids, user_id=self.user_id))
         events = self.application.store.list_events(result.trace_id)
         run = self.application.store.get_run(result.trace_id)
         selected_tools = [str(event.payload.get("tool")) for event in events if event.event_type == "ToolStarted" and event.payload.get("tool")]
