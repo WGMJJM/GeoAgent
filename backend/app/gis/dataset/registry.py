@@ -24,6 +24,15 @@ class DatasetRegistry:
             system_owned=self.system_owned if system_owned is None and user_id is None else bool(system_owned),
         )
 
+    def for_run(self, dataset_ids: list[str], run_id: str) -> DatasetRegistry:
+        registry = self.for_user(self.owner_user_id, system_owned=self.system_owned)
+        registry.allowed_dataset_ids = frozenset(dataset_ids)
+        registry.run_id = run_id
+        return registry
+
+    def _in_run_scope(self, dataset: Dataset) -> bool:
+        return not hasattr(self, "allowed_dataset_ids") or dataset.id in self.allowed_dataset_ids or dataset.created_by_run_id == self.run_id
+
     def register(self, dataset: Dataset) -> Dataset:
         self.store.save_dataset(dataset)
         return dataset
@@ -81,7 +90,8 @@ class DatasetRegistry:
 
     def get(self, dataset_id: str, *, user_id: str | None = None) -> Dataset | None:
         owner = user_id if user_id is not None else self.owner_user_id
-        return self.store.get_dataset_for_user(dataset_id, owner) if owner is not None else self.store.get_dataset(dataset_id)
+        dataset = self.store.get_dataset_for_user(dataset_id, owner) if owner is not None else self.store.get_dataset(dataset_id)
+        return dataset if dataset is not None and self._in_run_scope(dataset) else None
 
     def resolve(self, identifier: str, *, user_id: str | None = None) -> Dataset | None:
         identifier = identifier.strip()
@@ -92,7 +102,7 @@ class DatasetRegistry:
         if exact:
             return exact
         path = Path(identifier).expanduser()
-        candidates = self.store.list_datasets_for_user(owner) if owner is not None else self.store.list_datasets()
+        candidates = self.list(user_id=owner)
         for dataset in candidates:
             if dataset.name.casefold() == identifier.casefold() or Path(dataset.path).name.casefold() == identifier.casefold():
                 return dataset
@@ -102,4 +112,5 @@ class DatasetRegistry:
 
     def list(self, kind: DatasetKind | None = None, *, user_id: str | None = None) -> list[Dataset]:
         owner = user_id if user_id is not None else self.owner_user_id
-        return self.store.list_datasets_for_user(owner, kind.value if kind else None) if owner is not None else self.store.list_datasets(kind.value if kind else None)
+        datasets = self.store.list_datasets_for_user(owner, kind.value if kind else None) if owner is not None else self.store.list_datasets(kind.value if kind else None)
+        return [dataset for dataset in datasets if self._in_run_scope(dataset)]

@@ -82,6 +82,14 @@ class ToolExecutor:
             authenticated_user=bool(services.get("user_id")),
             services=services,
         )
+        bound_run = self.store.get_run(call.run_id) if call.run_id else None
+        if bound_run is not None and bound_run.parent_run_id:
+            parent = self.store.get_run(bound_run.parent_run_id)
+            if parent is None or services.get("user_id") != self.store.user_id_for_run(bound_run.id):
+                return _blocked_tool_result(call.id, "SUBAGENT_IDENTITY_MISMATCH", "子运行身份与父运行不匹配。")
+            context = self.policy.restrict_to_run(context, bound_run, parent)
+            if internal or context.allowed_tool_names is None or call.name not in context.allowed_tool_names:
+                return _blocked_tool_result(call.id, "SUBAGENT_TOOL_NOT_ALLOWED", "子运行不能扩大其工具权限。")
         if internal:
             # 可信内部调用可绕过 Run 激活与用户 scope，但不能伪造运行环境。
             if not set(registered.metadata.required_envs).issubset(context.available_envs):
@@ -114,7 +122,9 @@ class ToolExecutor:
         existing = self.store.get_tool_call(call.id)
         if existing is not None:
             execution_status, stored_result = existing
-            if execution_status is ToolExecutionStatus.COMPLETED and stored_result is not None:
+            completed = execution_status is ToolExecutionStatus.COMPLETED
+            child_result_saved = bound_run is not None and bound_run.parent_run_id and execution_status is not ToolExecutionStatus.RUNNING
+            if (completed or child_result_saved) and stored_result is not None:
                 return stored_result.model_copy(update={"call_id": call.id})
             if execution_status is ToolExecutionStatus.RUNNING:
                 return _in_progress_result(call.id)
@@ -188,14 +198,25 @@ class ToolExecutor:
         cancel_event = Event()
         if call.run_id:
             self._cancel_events.setdefault(call.run_id, set()).add(cancel_event)
-        context = ToolContext(run_id=call.run_id or "unbound", agent_id=agent_id, services=services, cancel_event=cancel_event)
+        context = ToolContext(run_id=call.run_id or "unbound", agent_id=agent_id, services=services, cancel_event=cancel_event, call_id=call.id)
+        handler_task = asyncio.create_task(asyncio.to_thread(registered.handler, call.arguments, context))
         try:
-            value = await asyncio.wait_for(asyncio.to_thread(registered.handler, call.arguments, context), timeout=self.timeout_seconds)
+            value = await asyncio.wait_for(asyncio.shield(handler_task), timeout=self.timeout_seconds)
             if inspect.isawaitable(value):
                 value = await asyncio.wait_for(value, timeout=self.timeout_seconds)
             result = _result_from_value(call.id, value)
         except asyncio.CancelledError:
             cancel_event.set()
+            settled, value = await _settle_handler(handler_task, self.timeout_seconds)
+            if settled:
+                if inspect.iscoroutine(value):
+                    value.close()
+                # 同步计算可能在取消之后才退出；先记录真实完成结果，再结束 Run。
+                result = _result_from_value(call.id, value) if value is not None and not inspect.isawaitable(value) else ToolResult(
+                    call_id=call.id, status=ToolStatus.CANCELLED,
+                    error=ToolError(code="EXECUTION_CANCELLED", category=ErrorCategory.EXECUTION, message="工具执行已取消。"))
+                self.store.save_tool_call_result(call.id, result)
+            # 未退出的同步线程保留 RUNNING 占用：技术恢复必须人工处理，不能重复写入。
             raise
         except ProcessCancelled:
             result = ToolResult(call_id=call.id, status=ToolStatus.CANCELLED, error=ToolError(code="EXECUTION_CANCELLED", category=ErrorCategory.EXECUTION, message="Tool 所属 Run 已取消。"))
@@ -214,7 +235,21 @@ class ToolExecutor:
             )
         except TimeoutError:
             cancel_event.set()
-            result = ToolResult(call_id=call.id, status=ToolStatus.FAILED, retryable=registered.metadata.supports_retry, error=ToolError(code="EXECUTION_TIMEOUT", category=ErrorCategory.EXECUTION, message=f"Tool 超过 {self.timeout_seconds}s 未完成。", retryable=registered.metadata.supports_retry))
+            settled, late_value = await _settle_handler(handler_task, self.timeout_seconds)
+            if settled:
+                if inspect.iscoroutine(late_value):
+                    late_value.close()
+                result = ToolResult(call_id=call.id, status=ToolStatus.FAILED, retryable=registered.metadata.supports_retry, error=ToolError(code="EXECUTION_TIMEOUT", category=ErrorCategory.EXECUTION, message=f"Tool 超过 {self.timeout_seconds}s 未完成。", retryable=registered.metadata.supports_retry))
+                if late_value is not None and not inspect.isawaitable(late_value):
+                    late_result = _result_from_value(call.id, late_value)
+                    if late_result.status in {ToolStatus.SUCCESS, ToolStatus.PARTIAL_SUCCESS}:
+                        result = late_result.model_copy(update={"status": ToolStatus.PARTIAL_SUCCESS,
+                            "error": result.error.model_copy(update={"retryable": False}), "retryable": False,
+                            "warnings": [*late_result.warnings, "工具超过执行期限，但清理期间已确认其结果；没有自动重试。"]})
+            else:
+                result = ToolResult(call_id=call.id, status=ToolStatus.BLOCKED, error=ToolError(
+                    code="SIDE_EFFECT_UNCERTAIN", category=ErrorCategory.EXECUTION,
+                    message="同步工具在清理期限后仍未退出，副作用无法确认，需要人工处理。"))
         except Exception as exc:
             error = as_tool_error(exc)
             result = ToolResult(call_id=call.id, status=ToolStatus.FAILED, retryable=error.retryable, error=error)
@@ -236,7 +271,8 @@ class ToolExecutor:
                 self.metrics.increment("tool_calls.failed")
             if result.error and result.error.code == "EXECUTION_TIMEOUT":
                 self.metrics.increment("tool_calls.timed_out")
-        self.store.save_tool_call_result(call.id, result)
+        if result.error is None or result.error.code != "SIDE_EFFECT_UNCERTAIN":
+            self.store.save_tool_call_result(call.id, result)
         if call.run_id:
             event_type = EventType.TOOL_COMPLETED if result.status in {ToolStatus.SUCCESS, ToolStatus.PARTIAL_SUCCESS} else EventType.TOOL_FAILED
             await self.trace.emit(call.run_id, event_type, f"{call.name}: {result.status.value}", payload={"tool": call.name, "status": result.status.value, "error": result.error.model_dump(mode="json") if result.error else None, "duration_ms": result.duration_ms}, agent_id=agent_id)
@@ -265,6 +301,20 @@ def _result_from_value(call_id: str, value: Any) -> ToolResult:
         return ToolResult(call_id=call_id, status=ToolStatus.SUCCESS, output=value)
     status = ToolStatus(value.get("status", ToolStatus.SUCCESS)) if "status" in value else ToolStatus.SUCCESS
     return ToolResult(call_id=call_id, status=status, output=value.get("output", value), datasets=value.get("datasets", []), artifacts=value.get("artifacts", []), warnings=value.get("warnings", []), retryable=bool(value.get("retryable", False)))
+
+
+async def _settle_handler(task: asyncio.Task, timeout: float) -> tuple[bool, Any]:
+    """取消通知后等待同步处理器退出；不能把 Python 线程说成可强制终止的进程。"""
+
+    try:
+        return True, await asyncio.wait_for(asyncio.shield(task), timeout=max(0.001, timeout))
+    except TimeoutError:
+        if task.done():
+            return True, None
+        task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+        return False, None
+    except Exception:
+        return True, None
 
 
 def _in_progress_result(call_id: str) -> ToolResult:

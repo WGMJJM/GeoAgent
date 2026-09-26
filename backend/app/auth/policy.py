@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from app.core.models import RiskLevel, ToolMetadata
+from app.core.models import RiskLevel, Run, ToolMetadata
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class ToolDiscoveryContext:
 
     granted_scopes: frozenset[str] = frozenset()
     available_envs: frozenset[str] = frozenset()
+    allowed_tool_names: frozenset[str] | None = None
 
 
 class PermissionPolicy:
@@ -45,9 +46,28 @@ class PermissionPolicy:
         """只判断是否可向模型展示；真实执行仍由 authorize 和资源服务再次校验。"""
 
         return (
-            set(metadata.required_scopes).issubset(context.granted_scopes)
+            (context.allowed_tool_names is None or metadata.name in context.allowed_tool_names)
+            and set(metadata.required_scopes).issubset(context.granted_scopes)
             and set(metadata.required_envs).issubset(context.available_envs)
         )
+
+    @staticmethod
+    def restrict_to_run(context: ToolDiscoveryContext, run: Run | None, parent: Run | None = None) -> ToolDiscoveryContext:
+        """只读取服务端持久化 Run 的限制，每次发现和执行均重新取交集。"""
+
+        names = context.allowed_tool_names
+        scopes, environments = context.granted_scopes, context.available_envs
+        for current in (parent, run):
+            if current is None:
+                continue
+            raw = current.metadata.get("allowed_tool_names")
+            if isinstance(raw, list):
+                allowed = frozenset(raw)
+                names = allowed if names is None else names & allowed
+        if run is not None and run.parent_run_id:
+            scopes &= frozenset(run.metadata.get("parent_granted_scopes", []))
+            environments &= frozenset(run.metadata.get("parent_available_envs", []))
+        return ToolDiscoveryContext(scopes, environments, names)
 
     @staticmethod
     def discovery_context(*, authenticated_user: bool, services: Mapping[str, Any]) -> ToolDiscoveryContext:

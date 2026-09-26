@@ -431,6 +431,82 @@ class WorkingMemoryDelta(StrictModel):
     source_run_id: str | None = None
 
 
+class UpstreamDatasetBinding(StrictModel):
+    from_subtask: str = Field(min_length=1, max_length=64)
+    output_role: str | None = Field(default=None, max_length=64)
+    input_name: str = Field(min_length=1, max_length=64)
+
+
+class DelegationSubtask(StrictModel):
+    """模型只能请求执行计划，不能设置子 Run 身份、状态或权限凭证。"""
+
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    goal: str = Field(min_length=1, max_length=2000)
+    description: str = Field(default="", max_length=2000)
+    dataset_ids: list[str] = Field(default_factory=list, max_length=32)
+    dependencies: list[str] = Field(default_factory=list, max_length=20)
+    allowed_tools: list[str] = Field(min_length=1, max_length=32)
+    upstream_dataset_bindings: list[UpstreamDatasetBinding] = Field(default_factory=list, max_length=16)
+    # 角色 -> 产出该角色的真实工具名；该角色必须恰好有一个经验证的输出。
+    output_roles: dict[str, str] = Field(default_factory=dict, max_length=8)
+    parallelizable: bool = True
+    required: bool = True
+
+    @field_validator("goal")
+    @classmethod
+    def non_empty_goal(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("子任务目标不能为空")
+        return value.strip()
+
+    @field_validator("dataset_ids", "dependencies", "allowed_tools")
+    @classmethod
+    def bounded_identifiers(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() or len(value) > 160 for value in values):
+            raise ValueError("引用名称不能为空或超过 160 字符")
+        if len(set(values)) != len(values):
+            raise ValueError("引用列表不能重复")
+        return values
+
+
+class DelegationPlan(StrictModel):
+    subtasks: list[DelegationSubtask] = Field(min_length=1, max_length=20)
+
+
+class DatasetOutputRef(StrictModel):
+    dataset_id: str
+    role: str | None = None
+    source_dataset_ids: list[str] = Field(default_factory=list)
+
+
+class SubAgentResult(StrictModel):
+    subtask_id: str
+    run_id: str
+    status: AgentResultStatus
+    execution_status: TaskStatus
+    datasets: list[DatasetOutputRef] = Field(default_factory=list)
+    artifact_ids: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    metric_sources: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    error: ToolError | None = None
+    needs_input: dict[str, Any] | None = None
+    memory_delta: WorkingMemoryDelta = Field(default_factory=WorkingMemoryDelta)
+    summary: str | None = None
+
+
+class DelegationResult(StrictModel):
+    delegation_id: str
+    parent_run_id: str
+    status: AgentResultStatus
+    subtasks: list[SubAgentResult]
+    added_dataset_ids: list[str] = Field(default_factory=list)
+    added_artifact_ids: list[str] = Field(default_factory=list)
+    failed_subtask_ids: list[str] = Field(default_factory=list)
+    blocked_subtask_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class Checkpoint(StrictModel):
     id: str = Field(default_factory=lambda: new_id("cp"))
     run_id: str

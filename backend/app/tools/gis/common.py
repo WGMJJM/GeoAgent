@@ -25,6 +25,12 @@ def output_path(context: ToolContext, requested: str | None, stem: str, suffix: 
     filename = requested or f"{stem}_{new_id('out').split('_', 1)[1]}{suffix}"
     directory = workspace.intermediate_dir if intermediate else workspace.output_dir
     target = workspace.resolve(directory / filename)
+    if hasattr(workspace, "write_root"):
+        # 子 Run 的显式绝对路径同样必须留在独立写目录中。
+        try:
+            target.relative_to(workspace.write_root)
+        except ValueError as exc:
+            raise PermissionError("子任务输出必须位于当前 Run 的独立目录") from exc
     if target.exists():
         raise FileExistsError(f"输出文件已存在，为避免覆盖请换一个 output_path：{target.name}")
     return target
@@ -41,4 +47,4 @@ def register_derived(
     tool_call_id: str | None = None,
 ) -> Dataset:
     registry = context.services["registry"]
-    return registry.register_path(path, name=name, run_id=context.run_id, source_dataset_ids=source_ids, operation=operation, parameters=parameters, tool_call_id=tool_call_id)
+    return registry.register_path(path, name=name, run_id=context.run_id, source_dataset_ids=source_ids, operation=operation, parameters=parameters, tool_call_id=tool_call_id or context.call_id)

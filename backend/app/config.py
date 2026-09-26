@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     default_crs: str = "EPSG:3857"
     max_agent_turns: int = Field(default=20, ge=1)
     max_tool_calls: int = Field(default=40, ge=1)
+    max_subagents: int = Field(default=5, ge=1, le=20)
+    max_parallel_agents: int = Field(default=3, ge=1, le=20)
     max_preview_features: int = Field(default=200, ge=1, le=1000)
     max_preview_fields: int = Field(default=32, ge=1, le=128)
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)

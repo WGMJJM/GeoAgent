@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS tool_calls (
     created_at TEXT NOT NULL,
     updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS delegations (
+    id TEXT PRIMARY KEY,
+    parent_run_id TEXT NOT NULL,
+    call_id TEXT NOT NULL UNIQUE,
+    payload_json TEXT NOT NULL,
+    FOREIGN KEY(parent_run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS checkpoints (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL,
@@ -833,9 +840,11 @@ class StateStore:
     @staticmethod
     def _save_task(db: sqlite3.Connection, task: Task) -> None:
         db.execute(
-            """INSERT OR REPLACE INTO tasks
+            """INSERT INTO tasks
             (id,conversation_id,goal,status,result,created_at,payload_json,updated_at)
-            VALUES(?,?,?,?,?,?,?,?)""",
+            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+            conversation_id=excluded.conversation_id,goal=excluded.goal,status=excluded.status,
+            result=excluded.result,payload_json=excluded.payload_json,updated_at=excluded.updated_at""",
             (task.id, task.conversation_id, task.goal, task.status.value, task.result, task.created_at.isoformat(), task.model_dump_json(), task.updated_at.isoformat()),
         )
 
@@ -892,6 +901,52 @@ class StateStore:
             row = db.execute("SELECT payload_json FROM subtasks WHERE task_id=? AND id=?", (task_id, subtask_id)).fetchone()
         return self._model(SubTask, row[0]) if row else None
 
+    def create_delegation(self, state: dict[str, Any], parent: Run, task: Task,
+                          subtasks: list[SubTask], children: list[Run], memory: WorkingMemory) -> bool:
+        """计划、稳定子身份和父 Task 关联先原子保存，之后才能启动执行。"""
+
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM delegations WHERE call_id=?", (state["call_id"],)).fetchone():
+                return False
+            self._save_task(db, task)
+            self._save_run(db, parent)
+            for subtask, child in zip(subtasks, children, strict=True):
+                db.execute("INSERT INTO subtasks(id,task_id,payload_json) VALUES(?,?,?)",
+                           (subtask.id, task.id, subtask.model_dump_json()))
+                self._save_run(db, child)
+            db.execute("INSERT OR IGNORE INTO working_memories(task_id,conversation_id,payload_json,updated_at) VALUES(?,?,?,?)",
+                       (memory.task_id, memory.conversation_id, memory.model_dump_json(), memory.updated_at.isoformat()))
+            db.execute("INSERT INTO delegations(id,parent_run_id,call_id,payload_json) VALUES(?,?,?,?)",
+                       (state["id"], parent.id, state["call_id"], self._json(state)))
+        return True
+
+    def get_delegation(self, call_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT payload_json FROM delegations WHERE call_id=?", (call_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def list_delegations(self, parent_run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT payload_json FROM delegations WHERE parent_run_id=? ORDER BY rowid", (parent_run_id,)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def save_delegation(self, state: dict[str, Any], *, memory: WorkingMemory | None = None) -> None:
+        """委派结果和主工作记忆在一个事务内提交，模型观察晚于此事务。"""
+
+        with self.transaction() as db:
+            if memory is not None:
+                db.execute("UPDATE working_memories SET payload_json=?,updated_at=? WHERE task_id=?",
+                           (memory.model_dump_json(), memory.updated_at.isoformat(), memory.task_id))
+            db.execute("UPDATE delegations SET payload_json=? WHERE id=?", (self._json(state), state["id"]))
+
+    def list_tool_calls(self, run_id: str) -> list[tuple[ToolCall, ToolExecutionStatus, ToolResult | None]]:
+        with self._connect() as db:
+            rows = db.execute("SELECT * FROM tool_calls WHERE run_id=? ORDER BY created_at,id", (run_id,)).fetchall()
+        return [(ToolCall(id=row["id"], name=row["name"], arguments=json.loads(row["arguments_json"]), run_id=run_id),
+                 ToolExecutionStatus(row["status"]), self._model(ToolResult, row["result_json"]) if row["result_json"] else None)
+                for row in rows]
+
     def save_run(self, run: Run) -> None:
         with self._connect() as db:
             self._save_run(db, run)
@@ -900,10 +955,15 @@ class StateStore:
     @staticmethod
     def _save_run(db: sqlite3.Connection, run: Run) -> None:
         db.execute(
-            """INSERT OR REPLACE INTO runs
+            """INSERT INTO runs
             (id,conversation_id,task_id,parent_run_id,agent_id,status,started_at,finished_at,error,
              turn_count,tool_call_count,metadata_json,payload_json,updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+            conversation_id=excluded.conversation_id,task_id=excluded.task_id,parent_run_id=excluded.parent_run_id,
+            agent_id=excluded.agent_id,status=excluded.status,started_at=excluded.started_at,
+            finished_at=excluded.finished_at,error=excluded.error,turn_count=excluded.turn_count,
+            tool_call_count=excluded.tool_call_count,metadata_json=excluded.metadata_json,
+            payload_json=excluded.payload_json,updated_at=excluded.updated_at""",
             (
                 run.id,
                 run.conversation_id,

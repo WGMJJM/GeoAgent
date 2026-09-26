@@ -24,3 +24,4 @@ class ToolContext:
     agent_id: str
     services: dict[str, Any]
     cancel_event: Event | None = None
+    call_id: str | None = None

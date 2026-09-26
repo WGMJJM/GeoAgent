@@ -25,6 +25,17 @@ class WorkspaceManager:
 
         return WorkspaceManager(self.root / "users" / user_id) if user_id else self
 
+    def for_run(self, run_id: str) -> WorkspaceManager:
+        """共享已授权输入的读取根目录，输出和临时目录按子 Run 隔离。"""
+
+        workspace = WorkspaceManager(self.root)
+        workspace.write_root = self.assert_inside(self.root / "runs" / run_id)
+        for name in ("intermediate", "output", "temp"):
+            directory = workspace.write_root / name
+            directory.mkdir(parents=True, exist_ok=True)
+            setattr(workspace, f"{name}_dir", directory)
+        return workspace
+
     def resolve(self, path: str | Path, *, allow_missing: bool = True) -> Path:
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
