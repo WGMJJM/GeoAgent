@@ -33,7 +33,7 @@ function VectorMap({ preview, title }: { preview: DatasetPreview; title?: string
   if (features.length === 0 || positions.length === 0) return <div className="map-viewer map-message">该数据集没有可显示的要素。</div>;
   const bounds = boundsOf(positions);
   const project = (position: Position): [number, number] => [24 + ((position[0] - bounds.minX) / Math.max(bounds.maxX - bounds.minX, 1e-9)) * 472, 276 - ((position[1] - bounds.minY) / Math.max(bounds.maxY - bounds.minY, 1e-9)) * 252];
-  return <div className="map-viewer"><div className="map-viewer-head"><b>{title ?? "地图预览"}</b><span>{preview.truncated ? `仅显示前 ${features.length} 个要素` : `${preview.feature_count ?? features.length} 个要素`}</span></div><svg className="map-canvas" viewBox="0 0 520 300" role="img" aria-label={`${title ?? "数据集"}地图预览`}><rect x="0" y="0" width="520" height="300" rx="9" fill="#eef7f3" />{features.map((feature, index) => <Geometry key={index} geometry={feature.geometry} project={project} />)}</svg>{preview.truncated && <small className="map-hint">数据量较大，地图仅展示有限要素。</small>}</div>;
+  return <div className="map-viewer"><div className="map-viewer-head"><b>{title ?? "地图预览"}</b><span>{preview.truncated ? `仅显示前 ${features.length} 个要素` : `${preview.feature_count ?? features.length} 个要素`}</span></div><svg className="map-canvas" viewBox="0 0 520 300" role="img" aria-label={`${title ?? "数据集"}地图预览`}><rect x="0" y="0" width="520" height="300" rx="9" fill="var(--surface-muted)" />{features.map((feature, index) => <Geometry key={index} geometry={feature.geometry} project={project} />)}</svg>{preview.truncated && <small className="map-hint">数据量较大，地图仅展示有限要素。</small>}</div>;
 }
 
 function Geometry({ geometry, project }: { geometry?: Feature["geometry"]; project: (position: Position) => [number, number] }) {
@@ -43,9 +43,9 @@ function Geometry({ geometry, project }: { geometry?: Feature["geometry"]; proje
     const point = collectPositions(geometry.coordinates)[0];
     if (!point) return null;
     const [x, y] = project(point);
-    return <circle cx={x} cy={y} r="3.5" fill="#348166" stroke="#fff" strokeWidth="1.5" />;
+    return <circle cx={x} cy={y} r="3.5" fill="var(--accent)" stroke="var(--surface)" strokeWidth="1.5" />;
   }
-  return <>{paths.map((points, index) => geometry.type?.includes("Polygon") ? <polygon key={index} points={points} fill="#7bbda0" fillOpacity=".35" stroke="#348166" strokeWidth="1.2" /> : <polyline key={index} points={points} fill="none" stroke="#348166" strokeWidth="1.5" />)}</>;
+  return <>{paths.map((points, index) => geometry.type?.includes("Polygon") ? <polygon key={index} points={points} fill="var(--accent-border)" fillOpacity=".35" stroke="var(--accent)" strokeWidth="1.2" /> : <polyline key={index} points={points} fill="none" stroke="var(--accent)" strokeWidth="1.5" />)}</>;
 }
 
 function collectPositions(value: unknown): Position[] {

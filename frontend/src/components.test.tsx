@@ -101,6 +101,23 @@ describe("统一聊天输入区", () => {
     expect(screen.getAllByRole("textbox")).toHaveLength(1);
   });
 
+  it("统一线性图标保留发送、添加和移除的可访问名称与回调", () => {
+    const onRemoveDataset = vi.fn();
+    const onRemoveFile = vi.fn();
+    const { container } = render(<ProductChat {...productChatProps} message="检查数据" selectedDatasetIds={["ds-test"]} uploadedFiles={[{ id: "file-test", name: "dem.tif", kind: "RASTER", path: "dem.tif", format: "GeoTIFF" }]} onRemoveDataset={onRemoveDataset} onRemoveFile={onRemoveFile} />);
+    const send = screen.getByRole("button", { name: "发送" });
+    expect(send.querySelector('svg[data-icon="send"]')?.getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByLabelText("添加文件").querySelector('svg[data-icon="plus"]')).toBeTruthy();
+    expect(container.querySelector('svg[data-icon="attachment"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "移除数据集 ds-test" }));
+    fireEvent.click(screen.getByRole("button", { name: "移除 dem.tif" }));
+    fireEvent.click(send);
+    expect(onRemoveDataset).toHaveBeenCalledWith("ds-test");
+    expect(onRemoveFile).toHaveBeenCalledWith("file-test");
+    expect(productChatProps.send).toHaveBeenCalledOnce();
+    expect(container.querySelectorAll('.chat-layout .composer')).toHaveLength(1);
+  });
+
   it("连接阶段从发送开始显示统一状态和计时", () => {
     render(<ProductChat {...productChatProps} busy activeRunId={null} elapsedMs={2_400} />);
     expect(screen.getByText("用时 2秒")).toBeTruthy();
@@ -265,6 +282,15 @@ describe("对话删除", () => {
     const remove = await screen.findByRole("button", { name: "删除对话 正在处理" });
     await waitFor(() => expect((remove as HTMLButtonElement).disabled).toBe(false));
     expect(remove.getAttribute("title")).toBe("删除对话");
+    const account = screen.getByRole("button", { name: /测试用户 @tester/ });
+    expect(account.querySelector(".account-chevron")).toBeNull();
+    expect(account.textContent).not.toContain("⌃");
+    fireEvent.click(account);
+    expect(account.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByRole("button", { name: /^设置$/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "退出登录" })).toBeTruthy();
+    fireEvent.click(account);
+    expect(account.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(remove);
     expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
   });
