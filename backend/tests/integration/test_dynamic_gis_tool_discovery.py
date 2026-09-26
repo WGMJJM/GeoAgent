@@ -10,7 +10,9 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Point
 
+from app.agent.loop import TOOL_VISIBILITY_PREFIX
 from app.core.models import AgentRequest, AgentResultStatus, Message
+from app.core.tokens import estimate_tokens
 from app.models import ModelAdapter, ModelRequest, ModelResponse
 
 
@@ -143,6 +145,10 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
     assert "证据足够时立即回答" in prompt
     assert "权限不足或临时执行失败不等于缺少能力" in prompt
     assert "未检索到或未开放某项能力不代表项目中不存在" in prompt
+    assert "callable 中的工具已经提供完整 Schema" in prompt
+    assert "历史搜索只表示曾经发现" in prompt
+    search_description = next(item["function"]["description"] for item in adapter.requests[0].tools if item["function"]["name"] == "tool.search")
+    assert "Use callable tools directly" in search_description
     if needs_statistics:
         tool_definitions = adapter.requests[2].tools
         assert sum(item["function"]["name"] == "raster.inspect" for item in tool_definitions) == 1
@@ -153,6 +159,11 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
         assert statistics["max"] == 63
         assert statistics["mean"] == 32
     assert len(adapter.requests) == (4 if needs_statistics else 2)
+    for model_request in adapter.requests:
+        status = next(item for item in model_request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX))
+        visibility = json.loads(status["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
+        assert visibility["callable"] == [item["function"]["name"] for item in model_request.tools]
+        assert application.agent_loop._tool_context_tokens(model_request.tools, visibility["cached"]) <= 2500
 
 
 def test_reprojection_discovery_keeps_slope_available_for_real_execution(application):
@@ -178,6 +189,10 @@ def test_reprojection_discovery_keeps_slope_available_for_real_execution(applica
                 return ModelResponse(tool_calls=[call("raster.reproject", {"dataset_id": source.id, "target_crs": "EPSG:32650"}, "project")])
             if turn == 4:
                 assert "raster.slope" in {item["function"]["name"] for item in request.tools}
+                status = next(item for item in request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX))
+                visibility = json.loads(status["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
+                assert "raster.slope" in visibility["callable"]
+                assert "raster.slope" not in {item["name"] for item in visibility["cached"]}
                 observation = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "project"))
                 return ModelResponse(tool_calls=[call("raster.slope", {"dataset_id": observation["output"]["id"]}, "slope")])
             return ModelResponse(content="已重投影并计算坡度，没有重复发现坡度工具。")
@@ -202,4 +217,10 @@ def test_reprojection_discovery_keeps_slope_available_for_real_execution(applica
     assert output.crs.authority == "EPSG:32650"
     assert application.workspace.for_user(user_id).resolve(output.path, allow_missing=False).exists()
     for model_request in adapter.requests:
-        assert application.agent_loop._tool_context_tokens(model_request.tools, []) <= 2500
+        statuses = [item for item in model_request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX)]
+        assert len(statuses) == 1
+        visibility = json.loads(statuses[0]["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
+        assert visibility["callable"] == [item["function"]["name"] for item in model_request.tools]
+        tokens = estimate_tokens(json.dumps(model_request.tools, ensure_ascii=False, separators=(",", ":"))) + estimate_tokens(statuses[0]["content"])
+        assert tokens == application.agent_loop._tool_context_tokens(model_request.tools, visibility["cached"])
+        assert tokens <= 2500
