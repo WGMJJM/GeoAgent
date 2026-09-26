@@ -76,11 +76,11 @@ class ConversationSummarizer:
         eligible = unprocessed[:-self.recent_messages]
         if not eligible:
             return False
-        pending_tokens = sum(estimate_tokens(item.content) for item in eligible)
+        pending_tokens = sum(adapter.count_tokens(item.content) for item in eligible)
         if len(eligible) < self.trigger_messages and pending_tokens < self.trigger_tokens:
             return False
 
-        batch = _bounded_batch(eligible)
+        batch = _bounded_batch(eligible, adapter.count_tokens)
         if not batch:
             return False
         verified_runs, verified_resources = self._verified_context(batch, conversation_id, user_id)
@@ -345,11 +345,11 @@ def _entry_view(entry: ConversationMemoryEntry) -> dict[str, str | None]:
     }
 
 
-def _bounded_batch(messages: list[Message]) -> list[Message]:
+def _bounded_batch(messages: list[Message], count_tokens=estimate_tokens) -> list[Message]:
     batch: list[Message] = []
     tokens = 0
     for message in messages[:SUMMARY_MAX_BATCH_MESSAGES]:
-        estimate = estimate_tokens(message.content[:5000])
+        estimate = count_tokens(message.content[:5000])
         if batch and tokens + estimate > SUMMARY_MAX_BATCH_TOKENS:
             break
         batch.append(message)

@@ -148,6 +148,38 @@ async def test_plain_question_goes_directly_to_the_same_model(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_usage", [(200, 30), (0, 0), (None, None), (200, None)])
+async def test_usage_counts_each_response_without_extra_model_requests(tmp_path, second_usage):
+    first = ModelResponse(tool_calls=[{"id": "list", "function": {"name": "dataset.list", "arguments": "{}"}}],
+                          input_tokens=100, output_tokens=20)
+    second = ModelResponse(content="当前没有数据集。", input_tokens=second_usage[0], output_tokens=second_usage[1])
+    adapter = SequenceAdapter(first, second)
+    store, loop = _loop(tmp_path, adapter)
+    seen = []
+
+    async def capture(event):
+        seen.append(event)
+
+    loop.trace.bus.subscribe(capture)
+    _, result = await _run(loop, store, "列出数据集")
+    assert len(adapter.requests) == 2
+    usage = store.get_run(result.trace_id).token_usage
+    assert usage.model_calls == 2
+    complete_usage = second_usage[0] is not None and second_usage[1] is not None
+    assert usage.reported_calls == 1 + complete_usage
+    assert usage.reported_input_tokens == 100 + (second_usage[0] if complete_usage else 0)
+    assert usage.reported_output_tokens == 20 + (second_usage[1] if complete_usage else 0)
+    assert usage.local_input_tokens == sum(adapter.count_tokens(json.dumps(
+        {"messages": request.messages, "tools": request.tools}, ensure_ascii=False, separators=(",", ":"),
+    )) for request in adapter.requests)
+    assert usage.local_output_tokens == adapter.count_tokens(second.content) + adapter.count_tokens(json.dumps(first.tool_calls, ensure_ascii=False, separators=(",", ":")))
+    events = [event for event in seen if event.event_type == "TokenUsageUpdated"]
+    assert [event.payload["token_usage"]["model_calls"] for event in events] == [1, 2]
+    assert events[-1].payload["token_usage"] == usage.model_dump()
+    assert seen.index(events[-1]) < next(index for index, event in enumerate(seen) if event.event_type == "RunCompleted")
+
+
+@pytest.mark.asyncio
 async def test_ask_user_persists_waiting_state_and_checkpoint(tmp_path):
     adapter = SequenceAdapter(
         ModelResponse(
@@ -201,6 +233,7 @@ async def test_waiting_run_resumes_from_checkpoint_with_user_reply(tmp_path):
     )
     store, loop = _loop(tmp_path, adapter)
     request, waiting = await _run(loop, store, "检查这个图层")
+    assert store.get_run(waiting.trace_id).token_usage.model_calls == 1
     checkpoint = store.latest_checkpoint(waiting.trace_id)
     store.save_message(Message(conversation_id=request.conversation_id, role="user", content="这是另一项新任务，不应混入旧 Run。"))
     store.save_message(Message(conversation_id=request.conversation_id, role="user", content="道路图层"))
@@ -216,6 +249,7 @@ async def test_waiting_run_resumes_from_checkpoint_with_user_reply(tmp_path):
     assert resumed.trace_id == waiting.trace_id
     assert "道路图层" in adapter.requests[1].messages[-1]["content"]
     assert "另一项新任务" not in str(adapter.requests[1].messages)
+    assert store.get_run(resumed.trace_id).token_usage.model_calls == 2
 
 
 @pytest.mark.asyncio
@@ -1084,6 +1118,7 @@ async def test_compaction_checkpoints_restore_originals_and_never_reexecute_tool
     assert result.status is AgentResultStatus.SUCCESS
     assert executed == before_resume == [f"{waiting.trace_id}:execute_{index}" for index in range(4)]
     assert len(adapter.requests) == 4
+    assert store.get_run(result.trace_id).token_usage.model_calls == (3 if model_failure else 4)
     assert store.get_run(result.trace_id).tool_call_count == (5 if model_failure else 6)
     for model_request in adapter.requests[2:]:
         observations = {item["tool_call_id"]: json.loads(item["content"]) for item in model_request.messages if item["role"] == "tool"}

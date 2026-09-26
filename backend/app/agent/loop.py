@@ -17,6 +17,7 @@ from app.core.models import (
     Checkpoint,
     Run,
     RunStatus,
+    TokenUsage,
     ToolCall,
     ToolError,
     ToolResult,
@@ -234,7 +235,7 @@ class AgentLoop:
         for turn in range(remaining_turns + bool(resume_pending)):
             services = self._execution_services(request, run)
             runtime_context = self._discovery_context(request, services, run)
-            tools, cards, activated_names = self._tool_context(runtime_context, discovered_names, activated_names)
+            tools, cards, activated_names = self._tool_context(runtime_context, discovered_names, activated_names, count_tokens=model.count_tokens)
             model_tools = tools if tool_call_count < self.settings.max_tool_calls else []
             model_cards = cards if tool_call_count < self.settings.max_tool_calls else []
             current = self.store.get_run(run.id) or run
@@ -246,6 +247,7 @@ class AgentLoop:
                     previous_compacted_ids = set(compacted_ids)
                     model_messages = self._tool_context_messages(
                         messages, model_tools, model_cards, run_id=current.id, compacted_ids=compacted_ids,
+                        count_tokens=model.count_tokens,
                     )
                     if compacted_ids != previous_compacted_ids:
                         self._save_checkpoint(
@@ -253,13 +255,16 @@ class AgentLoop:
                             pending_approvals, discovered_names=discovered_names, used_names=used_names,
                             compacted_ids=compacted_ids,
                         )
-                    response = await model.complete(
-                        ModelRequest(
-                            messages=model_messages,
-                            tools=model_tools,
-                            max_tokens=self.settings.max_tokens,
-                        )
+                    model_request = ModelRequest(
+                        messages=model_messages,
+                        tools=model_tools,
+                        max_tokens=self.settings.max_tokens,
                     )
+                    local_input_tokens = model.count_tokens(json.dumps(
+                        {"messages": model_request.messages, "tools": model_request.tools},
+                        ensure_ascii=False, separators=(",", ":"),
+                    ))
+                    response = await model.complete(model_request)
             except Exception:
                 return await self._finish(
                     current,
@@ -272,6 +277,27 @@ class AgentLoop:
                         trace_id=current.id,
                     ),
                 )
+
+            if response is not None:
+                local_output_tokens = model.count_tokens(response.content)
+                if response.tool_calls:
+                    local_output_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
+                reported = response.input_tokens is not None and response.output_tokens is not None
+                updates = self.store.add_run_token_usage(current.id, TokenUsage(
+                    local_input_tokens=local_input_tokens,
+                    local_output_tokens=local_output_tokens,
+                    reported_input_tokens=response.input_tokens if reported else 0,
+                    reported_output_tokens=response.output_tokens if reported else 0,
+                    model_calls=1,
+                    reported_calls=int(reported),
+                ))
+                current = updates[0]
+                for measured_run in updates:
+                    await self.trace.emit(
+                        measured_run.id, EventType.TOKEN_USAGE_UPDATED, "模型累计用量已更新",
+                        agent_id=measured_run.agent_id,
+                        payload={"token_usage": measured_run.token_usage.model_dump(mode="json")},
+                    )
 
             if response is None or response.tool_calls:
                 restoring_batch = bool(resume_pending)
@@ -469,7 +495,7 @@ class AgentLoop:
                         break
                 if not remaining:
                     # 新检索候选先获得一次完整 Schema 选择机会；批次结束后仅续留已调用工具。
-                    _, _, activated_names = self._tool_context(runtime_context, discovered_names, used_names | (next_activations or set()))
+                    _, _, activated_names = self._tool_context(runtime_context, discovered_names, used_names | (next_activations or set()), count_tokens=model.count_tokens)
                 self._save_checkpoint(
                     request,
                     current,
@@ -570,33 +596,33 @@ class AgentLoop:
             ),
         )
 
-    def _tool_context(self, context: ToolDiscoveryContext, discovered_names: list[str], schema_names: set[str] | frozenset[str]):
+    def _tool_context(self, context: ToolDiscoveryContext, discovered_names: list[str], schema_names: set[str] | frozenset[str], *, count_tokens=estimate_tokens):
         """新候选和已调用工具可提供 Schema，其他发现记录仅提供卡片。"""
         definitions = self._tool_definitions(context)
         cards = []
-        if self._tool_context_tokens(definitions, cards) > self.settings.tool_context_tokens:
+        if self._tool_context_tokens(definitions, cards, count_tokens) > self.settings.tool_context_tokens:
             raise ValueError("工具上下文预算不足以容纳常驻工具定义。")
         available = self._available_activations(set(discovered_names), context)
         candidates = [name for name in reversed(discovered_names) if name in available][:self.settings.tool_context_max_cards]
         for name in candidates:
             metadata = self.registry.get(name).metadata
             definition = _tool_definition(name, metadata.description, metadata.input_schema)
-            if name in schema_names and self._tool_context_tokens([*definitions, definition], cards) <= self.settings.tool_context_tokens:
+            if name in schema_names and self._tool_context_tokens([*definitions, definition], cards, count_tokens) <= self.settings.tool_context_tokens:
                 definitions.append(definition)
             else:
                 card = self.catalog.card(name).public()
-                if self._tool_context_tokens(definitions, [*cards, card]) <= self.settings.tool_context_tokens:
+                if self._tool_context_tokens(definitions, [*cards, card], count_tokens) <= self.settings.tool_context_tokens:
                     cards.append(card)
         activated = {item["function"]["name"] for item in definitions if self.registry.is_deferred(item["function"]["name"])}
         return definitions, cards, activated
 
     @staticmethod
-    def _tool_context_tokens(definitions, cards) -> int:
-        tokens = estimate_tokens(json.dumps(definitions, ensure_ascii=False, separators=(",", ":")))
-        tokens += estimate_tokens(_tool_visibility_message(definitions, cards)["content"])
+    def _tool_context_tokens(definitions, cards, count_tokens=estimate_tokens) -> int:
+        tokens = count_tokens(json.dumps(definitions, ensure_ascii=False, separators=(",", ":")))
+        tokens += count_tokens(_tool_visibility_message(definitions, cards)["content"])
         return tokens
 
-    def _tool_context_messages(self, messages, definitions, cards, *, run_id: str, compacted_ids: set[str]):
+    def _tool_context_messages(self, messages, definitions, cards, *, run_id: str, compacted_ids: set[str], count_tokens=estimate_tokens):
         """仅在本轮模型视图提供实际工具状态；原始搜索观察与 Checkpoint 不变。"""
         searches = {
             call["id"]
@@ -615,6 +641,7 @@ class AgentLoop:
         view = compact_tool_results(
             view, token_budget=self.settings.protocol_history_tokens,
             ratio=self.settings.tool_result_compaction_ratio, run_id=run_id, compacted_ids=compacted_ids,
+            count_tokens=count_tokens,
         )
         view.insert(1, _tool_visibility_message(definitions, cards))
         return view

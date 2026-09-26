@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.core.tokens import estimate_tokens
+
 
 class ModelRequest(BaseModel):
     """一次模型请求；``max_tokens`` 表示模型输出上限，不是输入上下文预算。"""
@@ -22,8 +24,8 @@ class ModelRequest(BaseModel):
 class ModelResponse(BaseModel):
     content: str = ""
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     model: str | None = None
     finish_reason: str | None = None
 
@@ -31,8 +33,8 @@ class ModelResponse(BaseModel):
 class ModelStreamChunk(BaseModel):
     content: str = ""
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     model: str | None = None
     finish_reason: str | None = None
     done: bool = False
@@ -44,6 +46,10 @@ class ModelAdapter(ABC):
     supports_json_object = False
     supports_structured_output = False
     supports_json_schema = False
+
+    def count_tokens(self, value: str) -> int:
+        """本地预算分词；适配器可配置对应模型的词表，不进行网络请求。"""
+        return estimate_tokens(value)
 
     @abstractmethod
     async def complete(self, request: ModelRequest) -> ModelResponse:

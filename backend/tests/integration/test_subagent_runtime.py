@@ -142,12 +142,19 @@ async def test_real_buffer_closed_loop_and_persistent_idempotent_memory(applicat
     assert "父会话秘密" not in str(model.requests["a"])
     assert app.store.get_run(parent.id).task_id == child.task_id
     assert app.store.get_task(child.task_id).status is TaskStatus.SUCCEEDED
+    parent_usage = app.store.get_run(parent.id).token_usage
+    assert child.token_usage.model_calls == len(model.requests["a"]) == 3
+    assert parent_usage.model_calls == sum(len(requests) for requests in model.requests.values()) == 5
+    assert parent_usage.local_input_tokens > child.token_usage.local_input_tokens
+    usage_events = [event for event in app.store.list_events(parent.id) if event.event_type == "TokenUsageUpdated"]
+    assert [event.payload["token_usage"]["model_calls"] for event in usage_events] == [1, 2, 3, 4, 5]
     memory = app.store.get_working_memory(child.task_id)
     repeated = await app.delegation.execute(
         plan, request=request, parent=app.store.get_run(parent.id), call_id=f"{parent.id}:delegate"
     )
     assert repeated.output == observation
     assert app.store.get_working_memory(child.task_id) == memory
+    assert app.store.get_run(parent.id).token_usage == parent_usage
     assert (
         len(
             [

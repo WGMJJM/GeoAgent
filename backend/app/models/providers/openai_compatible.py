@@ -6,6 +6,7 @@ import asyncio
 
 from openai import AsyncOpenAI
 
+from app.core.tokens import estimate_tokens
 from app.models.adapter import ModelAdapter, ModelRequest, ModelResponse, ModelStreamChunk
 from app.models.config import ModelConfig
 
@@ -15,6 +16,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         if not config.model or not config.model.strip():
             raise ValueError("OpenAI 兼容接口需要填写模型名称。")
         self.config = config
+        self.count_tokens("")  # 启动时校验本地词表；配置错误不降级成另一种计数。
         self.timeout_seconds = config.timeout_seconds
         self.supports_stream = config.supports_stream
         self.supports_tools = config.supports_tools
@@ -27,6 +29,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
         base_url = config.base_url.strip() if config.base_url and config.base_url.strip() else None
         self.client = AsyncOpenAI(api_key=config.api_key or "local", base_url=base_url, timeout=config.timeout_seconds)
 
+    def count_tokens(self, value: str) -> int:
+        return estimate_tokens(value, self.config.tokenizer_file)
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
         async with asyncio.timeout(self.config.timeout_seconds):
             response = await self.client.chat.completions.create(
@@ -38,7 +43,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 max_tokens=request.max_tokens,
             )
         message = response.choices[0].message
-        return ModelResponse(content=message.content or "", tool_calls=[call.model_dump() for call in (message.tool_calls or [])], input_tokens=response.usage.prompt_tokens if response.usage else 0, output_tokens=response.usage.completion_tokens if response.usage else 0, model=response.model, finish_reason=response.choices[0].finish_reason)
+        return ModelResponse(content=message.content or "", tool_calls=[call.model_dump() for call in (message.tool_calls or [])], input_tokens=response.usage.prompt_tokens if response.usage else None, output_tokens=response.usage.completion_tokens if response.usage else None, model=response.model, finish_reason=response.choices[0].finish_reason)
 
     async def stream(self, request: ModelRequest):
         if not _capability(self, "supports_stream", True):
@@ -55,8 +60,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return
         tool_calls: dict[int, dict] = {}
         model = None
-        input_tokens = 0
-        output_tokens = 0
+        input_tokens = None
+        output_tokens = None
         finish_reason = None
         async with asyncio.timeout(self.config.timeout_seconds):
             stream = await self.client.chat.completions.create(

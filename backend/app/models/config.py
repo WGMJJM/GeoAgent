@@ -1,6 +1,10 @@
 """模型配置。"""
 
+from pathlib import Path
+
 from pydantic import BaseModel, Field
+
+from app.core.tokens import DEFAULT_TOKENIZER_FILE
 
 
 class ModelConfig(BaseModel):
@@ -8,6 +12,7 @@ class ModelConfig(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
+    tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     timeout_seconds: int = Field(default=90, ge=1)
     temperature: float = Field(default=0.1, ge=0, le=2)
     supports_stream: bool = True
@@ -25,6 +30,7 @@ class ModelProfile(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     model: str = Field(min_length=1)
+    tokenizer_file: Path | None = None
     timeout_seconds: int = Field(default=90, ge=1)
     temperature: float = Field(default=0.1, ge=0, le=2)
     supports_stream: bool = True
@@ -33,12 +39,13 @@ class ModelProfile(BaseModel):
     supports_json_schema: bool = False
     default: bool = False
 
-    def as_config(self) -> ModelConfig:
+    def as_config(self, *, tokenizer_file: Path = DEFAULT_TOKENIZER_FILE) -> ModelConfig:
         return ModelConfig(
             provider=self.provider,
             base_url=self.base_url,
             api_key=self.api_key,
             model=self.model,
+            tokenizer_file=self.tokenizer_file or tokenizer_file,
             timeout_seconds=self.timeout_seconds,
             temperature=self.temperature,
             supports_stream=self.supports_stream,

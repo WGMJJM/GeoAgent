@@ -29,6 +29,7 @@ from app.core.models import (
     Run,
     SubTask,
     Task,
+    TokenUsage,
     ToolCall,
     ToolExecutionStatus,
     ToolResult,
@@ -952,6 +953,26 @@ class StateStore:
             self._save_run(db, run)
             db.commit()
 
+    def add_run_token_usage(self, run_id: str, delta: TokenUsage) -> list[Run]:
+        """在同一事务累计当前运行和父运行；不重写状态，也不丢失并行子任务计数。"""
+        updated = []
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            while run_id is not None:
+                row = db.execute("SELECT payload_json FROM runs WHERE id=?", (run_id,)).fetchone()
+                if row is None:
+                    raise KeyError(run_id)
+                run = self._model(Run, row[0])
+                previous = run.token_usage or TokenUsage()
+                usage = TokenUsage(**{key: value + getattr(delta, key) for key, value in previous.model_dump().items()})
+                db.execute(
+                    "UPDATE runs SET payload_json=json_set(payload_json,'$.token_usage',json(?)),updated_at=? WHERE id=?",
+                    (usage.model_dump_json(), utc_now().isoformat(), run.id),
+                )
+                updated.append(run.model_copy(update={"token_usage": usage}))
+                run_id = run.parent_run_id
+        return updated
+
     @staticmethod
     def _save_run(db: sqlite3.Connection, run: Run) -> None:
         db.execute(
@@ -963,7 +984,9 @@ class StateStore:
             agent_id=excluded.agent_id,status=excluded.status,started_at=excluded.started_at,
             finished_at=excluded.finished_at,error=excluded.error,turn_count=excluded.turn_count,
             tool_call_count=excluded.tool_call_count,metadata_json=excluded.metadata_json,
-            payload_json=excluded.payload_json,updated_at=excluded.updated_at""",
+            payload_json=CASE WHEN json_type(runs.payload_json,'$.token_usage')='object'
+                THEN json_set(excluded.payload_json,'$.token_usage',json_extract(runs.payload_json,'$.token_usage'))
+                ELSE excluded.payload_json END,updated_at=excluded.updated_at""",
             (
                 run.id,
                 run.conversation_id,

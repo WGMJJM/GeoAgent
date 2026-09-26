@@ -12,6 +12,7 @@ class EventType(StrEnum):
     RUN_CREATED = "RunCreated"
     INTENT_RESOLVED = "IntentResolved"
     DECISION_MADE = "DecisionMade"
+    TOKEN_USAGE_UPDATED = "TokenUsageUpdated"
     SUBTASK_CREATED = "SubTaskCreated"
     SUBAGENT_SPAWNED = "SubAgentSpawned"
     TOOL_STARTED = "ToolStarted"

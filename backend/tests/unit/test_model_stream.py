@@ -7,6 +7,26 @@ from app.models.config import ModelConfig
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("usage", [None, SimpleNamespace(prompt_tokens=0, completion_tokens=0), SimpleNamespace(prompt_tokens=123, completion_tokens=45)])
+async def test_complete_reads_existing_response_usage_without_an_extra_request(usage):
+    requests = []
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(model="fake", usage=usage, choices=[SimpleNamespace(
+            message=SimpleNamespace(content="完成", tool_calls=[]), finish_reason="stop",
+        )])
+
+    adapter = object.__new__(OpenAICompatibleAdapter)
+    adapter.config = ModelConfig(model="fake")
+    adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    response = await adapter.complete(ModelRequest(messages=[{"role": "user", "content": "你好"}]))
+    assert len(requests) == 1
+    assert response.input_tokens == (usage.prompt_tokens if usage else None)
+    assert response.output_tokens == (usage.completion_tokens if usage else None)
+
+
 def _choice(*, finish_reason=None, content="", tool_calls=None):
     return SimpleNamespace(
         finish_reason=finish_reason,

@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.tokens import DEFAULT_TOKENIZER_FILE
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = PROJECT_ROOT / "backend" / ".env"
 
@@ -26,6 +28,7 @@ class Settings(BaseSettings):
     max_preview_fields: int = Field(default=32, ge=1, le=128)
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
     max_tokens: int = Field(default=3200, ge=1)
+    tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     protocol_history_tokens: int = Field(default=25600, ge=1)
     tool_result_compaction_ratio: float = Field(default=0.2, gt=0, le=1)
     tool_context_tokens: int = Field(default=3200, ge=1)

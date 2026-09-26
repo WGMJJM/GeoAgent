@@ -157,7 +157,7 @@ class Application:
             if profile.id in self.model_profiles:
                 raise ValueError(f"模型配置的编号重复：{profile.id}")
             self.model_profiles[profile.id] = profile
-            adapter = OpenAICompatibleAdapter(profile.as_config())
+            adapter = OpenAICompatibleAdapter(profile.as_config(tokenizer_file=self.settings.tokenizer_file))
             self.model_adapters[profile.id] = adapter
 
         if profiles:

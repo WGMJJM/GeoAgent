@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from math import ceil
 from typing import Any
 
@@ -238,6 +239,7 @@ def compact_tool_results(
     ratio: float,
     run_id: str,
     compacted_ids: set[str],
+    count_tokens: Callable[[str], int] = estimate_tokens,
 ) -> list[dict[str, Any]]:
     """按未处理结果的比例逐组精简旧正文，既不移除消息，也不改写恢复原文。"""
 
@@ -250,7 +252,7 @@ def compact_tool_results(
             else:
                 pending.append(index)
 
-    while pending and _history_tokens(view) > token_budget:
+    while pending and _history_tokens(view, count_tokens) > token_budget:
         count = ceil(len(pending) * ratio)
         for index in pending[:count]:
             view[index] = _compact_observation(view[index], run_id)
@@ -259,9 +261,9 @@ def compact_tool_results(
     return view
 
 
-def _history_tokens(messages: list[dict[str, Any]]) -> int:
+def _history_tokens(messages: list[dict[str, Any]], count_tokens: Callable[[str], int] = estimate_tokens) -> int:
     history = [item for item in messages if item.get("role") in _ALLOWED_ROLES]
-    return estimate_tokens(json.dumps(history, ensure_ascii=False, separators=(",", ":")))
+    return count_tokens(json.dumps(history, ensure_ascii=False, separators=(",", ":")))
 
 
 def _compact_observation(message: dict[str, Any], run_id: str) -> dict[str, Any]:

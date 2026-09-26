@@ -352,6 +352,17 @@ class AgentResult(StrictModel):
     trace_id: str
 
 
+class TokenUsage(StrictModel):
+    """本 Run 及其子运行已完成的模型调用累计量；本地与供应商计数分开。"""
+
+    local_input_tokens: int = 0
+    local_output_tokens: int = 0
+    reported_input_tokens: int = 0
+    reported_output_tokens: int = 0
+    model_calls: int = 0
+    reported_calls: int = 0
+
+
 class Run(StrictModel):
     id: str = Field(default_factory=lambda: new_id("run"))
     parent_run_id: str | None = None
@@ -364,6 +375,7 @@ class Run(StrictModel):
     error: str | None = None
     turn_count: int = 0
     tool_call_count: int = 0
+    token_usage: TokenUsage | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
