@@ -1,0 +1,2 @@
+# 保留上游词表的字节格式，Windows checkout 也不能改为 CRLF。
+qwen3.json -text
