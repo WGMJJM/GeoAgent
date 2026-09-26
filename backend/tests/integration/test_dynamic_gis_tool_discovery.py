@@ -103,8 +103,7 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
     if needs_statistics:
         responses.extend([
             ModelResponse(content="用户要求平均高程，当前检查结果不足以给出像元统计，需要发现栅格统计能力。", tool_calls=[
-                call("tool.search", {"query": "栅格统计 最小值 最大值"}, "chinese"),
-                call("tool.search", {"query": "raster statistics min max"}, "english"),
+                call("tool.search", {"query": "栅格统计 最小值 最大值", "english_query": "raster statistics min max"}, "bilingual"),
             ]),
             ModelResponse(tool_calls=[call("raster.inspect", {"dataset_id": dataset.id}, "statistics")]),
         ])
@@ -133,7 +132,7 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
 
     result = asyncio.run(execute())
     assert result.status is AgentResultStatus.SUCCESS
-    assert application.store.get_run(result.trace_id).tool_call_count == (4 if needs_statistics else 1)
+    assert application.store.get_run(result.trace_id).tool_call_count == (3 if needs_statistics else 1)
     calls = application.store.list_tool_calls(result.trace_id)
     assert [item[0].name for item in calls] == (["dataset.inspect", "raster.inspect"] if needs_statistics else ["dataset.inspect"])
     assert all(item[2].status.value == "SUCCESS" for item in calls)
@@ -172,9 +171,9 @@ def test_reprojection_discovery_keeps_slope_available_for_real_execution(applica
             self.requests.append(request)
             turn = len(self.requests)
             if turn == 1:
-                return ModelResponse(tool_calls=[call("tool.search", {"query": query}, f"slope_{index}") for index, query in enumerate(("坡度", "slope"))])
+                return ModelResponse(tool_calls=[call("tool.search", {"query": "坡度", "english_query": "slope"}, "find_slope")])
             if turn == 2:
-                return ModelResponse(tool_calls=[call("tool.search", {"query": query}, f"projection_{index}") for index, query in enumerate(("栅格重投影", "raster reproject"))])
+                return ModelResponse(tool_calls=[call("tool.search", {"query": "栅格重投影", "english_query": "raster reproject"}, "find_projection")])
             if turn == 3:
                 return ModelResponse(tool_calls=[call("raster.reproject", {"dataset_id": source.id, "target_crs": "EPSG:32650"}, "project")])
             if turn == 4:
@@ -195,7 +194,7 @@ def test_reprojection_discovery_keeps_slope_available_for_real_execution(applica
 
     result = asyncio.run(execute())
     assert result.status is AgentResultStatus.SUCCESS
-    assert application.store.get_run(result.trace_id).tool_call_count == 6
+    assert application.store.get_run(result.trace_id).tool_call_count == 4
     calls = application.store.list_tool_calls(result.trace_id)
     assert [item[0].name for item in calls] == ["raster.reproject", "raster.slope"]
     assert all(item[2].status.value == "SUCCESS" for item in calls)

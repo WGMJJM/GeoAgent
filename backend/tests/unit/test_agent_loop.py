@@ -248,7 +248,7 @@ async def test_search_does_not_activate_tool_earlier_in_same_batch(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", ['{"query":""}', '{"query":"buffer","limit":3}'])
+@pytest.mark.parametrize("arguments", ['{"query":""}', '{"query":"buffer","limit":3}', '{"query":"buffer","english_query":""}', '{"query":"buffer","english_query":123}'])
 async def test_invalid_tool_search_arguments_return_a_tool_observation(tmp_path, arguments):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "invalid_search", "function": {"name": "tool.search", "arguments": arguments}}]),
@@ -266,11 +266,10 @@ async def test_invalid_tool_search_arguments_return_a_tool_observation(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_chinese_and_english_searches_deduplicate_shared_tools(tmp_path):
+async def test_one_bilingual_search_deduplicates_shared_tools_and_counts_once(tmp_path):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[
-            {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
-            {"id": "chinese", "function": {"name": "tool.search", "arguments": '{"query":"缓冲区"}'}},
+            {"id": "bilingual", "function": {"name": "tool.search", "arguments": '{"query":"缓冲区","english_query":"buffer"}'}},
         ]),
         ModelResponse(tool_calls=[{"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
         ModelResponse(content="检查完成，中文提问和回复不受限制。"),
@@ -287,16 +286,17 @@ async def test_chinese_and_english_searches_deduplicate_shared_tools(tmp_path):
     assert store.latest_checkpoint(result.trace_id).state["activated_tool_names"] == ["vector.buffer"]
     assert "去重取并集" in adapter.requests[0].messages[0]["content"]
     observations = {item["tool_call_id"]: item["content"] for item in adapter.requests[1].messages if item["role"] == "tool"}
-    assert '"status": "SUCCESS"' in observations["chinese"]
+    assert set(observations) == {"bilingual"}
+    assert '"status": "SUCCESS"' in observations["bilingual"]
+    assert store.get_run(result.trace_id).tool_call_count == 2
+    assert "只调用一次 tool.search" in adapter.requests[0].messages[0]["content"]
     names = [item["function"]["name"] for item in adapter.requests[1].tools]
     assert names.count("vector.buffer") == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["distinct", "overlap", "empty"])
-async def test_bilingual_search_batch_preserves_union_and_executes_each_tool_once(tmp_path, mode):
-    import json
-
+async def test_one_bilingual_search_preserves_union_and_executes_each_tool_once(tmp_path, mode):
     english_names = {"test.en_a", "test.en_b"}
     chinese_names = {"test.zh_a", "test.zh_b"}
     if mode == "overlap":
@@ -307,8 +307,7 @@ async def test_bilingual_search_batch_preserves_union_and_executes_each_tool_onc
     chinese_query = "唯一中文能力" if mode != "empty" else "虚空玄冥"
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[
-            {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"quantum_marker"}'}},
-            {"id": "chinese", "function": {"name": "tool.search", "arguments": json.dumps({"query": chinese_query})}},
+            {"id": "bilingual", "function": {"name": "tool.search", "arguments": json.dumps({"query": chinese_query, "english_query": "quantum_marker"})}},
             {"id": "premature", "function": {"name": "test.en_a", "arguments": "{}"}},
         ]),
         ModelResponse(tool_calls=[{"id": name, "function": {"name": name, "arguments": "{}"}} for name in sorted(expected)]),
@@ -331,20 +330,41 @@ async def test_bilingual_search_batch_preserves_union_and_executes_each_tool_onc
     names = [item["function"]["name"] for item in adapter.requests[1].tools]
     assert all(names.count(name) == 1 for name in expected)
     observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[1].messages if item["role"] == "tool"}
-    assert {item["name"] for item in observations["english"]["output"]["tools"]} == english_names
-    assert {item["name"] for item in observations["chinese"]["output"]["tools"]} == chinese_names
+    assert {item["name"] for item in observations["bilingual"]["output"]["tools"]} == expected
+    assert len(observations["bilingual"]["output"]["tools"]) == len(expected)
     assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
     assert executed == [f"{result.trace_id}:{name}" for name in sorted(expected)]
     assert set(store.latest_checkpoint(result.trace_id).state["activated_tool_names"]) == expected
+    assert store.get_run(result.trace_id).tool_call_count == 2 + len(expected)
 
 
 @pytest.mark.asyncio
-async def test_interrupted_search_batch_restores_first_result_before_merging_second(tmp_path):
+async def test_bilingual_query_does_not_skip_english_branch_when_primary_name_is_cached(tmp_path):
     adapter = SequenceAdapter(
-        ModelResponse(tool_calls=[
-            {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
-            {"id": "chinese", "function": {"name": "tool.search", "arguments": '{"query":"坡度"}'}},
-        ]),
+        ModelResponse(tool_calls=[{"id": "first", "function": {"name": "tool.search", "arguments": '{"query":"slope"}'}}]),
+        ModelResponse(tool_calls=[{"id": "bilingual", "function": {"name": "tool.search", "arguments": '{"query":"raster.slope","english_query":"buffer"}'}}]),
+        ModelResponse(content="已合并两路发现结果。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    _, result = await _run(loop, store, "检查组合查询与缓存边界")
+    observation = json.loads(next(item["content"] for item in adapter.requests[2].messages if item.get("tool_call_id") == "bilingual"))
+    assert "source" not in observation["output"]
+    assert {"raster.slope", "vector.buffer"} <= {item["name"] for item in observation["output"]["tools"]}
+    assert {"raster.slope", "vector.buffer"} <= {item["function"]["name"] for item in adapter.requests[2].tools}
+    assert store.get_run(result.trace_id).tool_call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combined", [False, True])
+async def test_interrupted_search_restores_union_without_double_counting(tmp_path, combined):
+    search_calls = [
+        {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
+        {"id": "chinese", "function": {"name": "tool.search", "arguments": '{"query":"坡度"}'}},
+    ]
+    if combined:
+        search_calls = [{"id": "bilingual", "function": {"name": "tool.search", "arguments": '{"query":"坡度","english_query":"buffer"}'}}]
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=search_calls),
         ModelResponse(content="已获得缓冲和坡度工具。"),
     )
     store, loop = _loop(tmp_path, adapter)
@@ -358,21 +378,31 @@ async def test_interrupted_search_batch_restores_first_result_before_merging_sec
         nonlocal interrupted
         original(*args, **kwargs)
         pending = kwargs.get("pending_tool_calls", [])
-        if not interrupted and args[4] == "tool_pending" and pending and pending[0][0] == "chinese":
+        if not combined and not interrupted and args[4] == "tool_pending" and pending and pending[0][0] == "chinese":
             interrupted = True
             raise RuntimeError("模拟两次检索之间进程中断")
 
     loop._save_checkpoint = interrupt_between_searches
+    original_search = loop.catalog.search
+
+    def interrupt_internal_search(query, context, limit):
+        nonlocal interrupted
+        if combined and not interrupted and query == "buffer":
+            interrupted = True
+            raise RuntimeError("模拟内部两路检索之间进程中断")
+        return original_search(query, context, limit)
+
+    loop.catalog.search = interrupt_internal_search
     with pytest.raises(RuntimeError, match="进程中断"):
         await loop.run(request, prepared=prepared)
     checkpoint = store.latest_checkpoint(prepared.run.id)
-    assert checkpoint.state["batch_next_activations"] == ["vector.buffer"]
+    assert checkpoint.state["batch_next_activations"] == (None if combined else ["vector.buffer"])
     result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(prepared.run.id)),
                             resume_from=checkpoint, continuation={"type": "technical_resume"})
     assert result.status is AgentResultStatus.SUCCESS
     names = {item["function"]["name"] for item in adapter.requests[1].tools}
     assert {"vector.buffer", "raster.slope"}.issubset(names)
-    assert store.get_run(prepared.run.id).tool_call_count == 2
+    assert store.get_run(prepared.run.id).tool_call_count == (1 if combined else 2)
     assert len(adapter.requests) == 2
 
 
