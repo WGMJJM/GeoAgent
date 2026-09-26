@@ -70,7 +70,18 @@ SEARCH_HISTORY_TOOL = {
     },
 }
 
-TOOL_CARDS_PREFIX = "已发现但未提供完整参数 Schema 的工具卡片；需要使用时，用 tool.search 精确查询工具名称以恢复 Schema，不必双语重新发现：\n"
+TOOL_VISIBILITY_PREFIX = "本轮工具状态：callable 已提供完整 Schema，直接按参数调用；cached 仅有卡片，需用 tool.search 精确查询工具名称恢复。历史检索只表示曾经发现，以本轮状态为准。callable 为空时不能调用工具；权限与审批仍由服务端校验。\n"
+
+
+def _tool_visibility(definitions, cards) -> dict[str, Any]:
+    return {"callable": [item["function"]["name"] for item in definitions], "cached": cards}
+
+
+def _tool_visibility_message(definitions, cards) -> dict[str, str]:
+    return {
+        "role": "system",
+        "content": TOOL_VISIBILITY_PREFIX + json.dumps(_tool_visibility(definitions, cards), ensure_ascii=False, separators=(",", ":")),
+    }
 
 @dataclass(slots=True)
 class LoopPreparedRequest:
@@ -222,6 +233,8 @@ class AgentLoop:
             services = self._execution_services(request, run)
             runtime_context = self._discovery_context(request, services, run)
             tools, cards, activated_names = self._tool_context(runtime_context, discovered_names)
+            model_tools = tools if tool_call_count < self.settings.max_tool_calls else []
+            model_cards = cards if tool_call_count < self.settings.max_tool_calls else []
             current = self.store.get_run(run.id) or run
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
@@ -230,8 +243,8 @@ class AgentLoop:
                 if not resume_pending:
                     response = await model.complete(
                         ModelRequest(
-                            messages=self._tool_context_messages(messages, cards),
-                            tools=tools if tool_call_count < self.settings.max_tool_calls else [],
+                            messages=self._tool_context_messages(messages, model_tools, model_cards),
+                            tools=model_tools,
                             max_tokens=self.settings.max_tokens,
                         )
                     )
@@ -264,6 +277,7 @@ class AgentLoop:
                 ask_question: str | None = None
                 delegate_wait: ToolResult | None = None
                 execution_uncertain = False
+                searches = []
                 next_activations: set[str] | None = None
                 permitted_this_batch = frozenset(activated_names)
                 if restoring_batch and resume_from:
@@ -340,9 +354,14 @@ class AgentLoop:
                                 query = arguments["query"].strip().casefold()
                                 cached_name = next((name for name in discovered_names if name.casefold() == query), None)
                                 if "english_query" not in arguments and cached_name in self._available_activations(set(discovered_names), search_context):
-                                    search_output = {"tools": [self.catalog.card(cached_name).public()], "source": "run_cache"}
+                                    already_callable = cached_name in {item["function"]["name"] for item in model_tools}
+                                    search_output = {"tools": [self.catalog.card(cached_name).public()], "source": "run_cache", "already_callable": already_callable}
+                                    if already_callable:
+                                        search_output["message"] = "该工具在本轮已提供完整 Schema，可直接按 Schema 调用，无需再次搜索。"
+                                    searches.append({"call_id": persisted_id, "source": "run_cache", "already_callable": already_callable, "tools": [cached_name]})
                                 else:
                                     search_output = self.catalog.tool_search(arguments, search_context)
+                                    searches.append({"call_id": persisted_id, "source": "catalog", "tools": [item["name"] for item in search_output["tools"]]})
                             except ValueError as exc:
                                 result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", str(exc))
                             else:
@@ -452,7 +471,7 @@ class AgentLoop:
                     current.id,
                     EventType.DECISION_MADE,
                     "模型提出工具动作，执行结果已作为观察返回",
-                    payload={"action": "tool_call", "tool_count": len(pending)},
+                    payload={"action": "tool_call", "tool_count": len(pending), "tool_visibility": _tool_visibility(model_tools, model_cards), "searches": searches},
                     agent_id=current.agent_id,
                 )
                 if delegate_wait is not None:
@@ -557,13 +576,12 @@ class AgentLoop:
     @staticmethod
     def _tool_context_tokens(definitions, cards) -> int:
         tokens = estimate_tokens(json.dumps(definitions, ensure_ascii=False, separators=(",", ":")))
-        if cards:
-            tokens += estimate_tokens(TOOL_CARDS_PREFIX + json.dumps(cards, ensure_ascii=False, separators=(",", ":")))
+        tokens += estimate_tokens(_tool_visibility_message(definitions, cards)["content"])
         return tokens
 
     @staticmethod
-    def _tool_context_messages(messages, cards):
-        """只裁剪模型视图；原始搜索观察与 Checkpoint 保留，不重复注入历史卡片。"""
+    def _tool_context_messages(messages, definitions, cards):
+        """仅在本轮模型视图提供实际工具状态；原始搜索观察与 Checkpoint 不变。"""
         searches = {
             call["id"]
             for message in messages if message.get("role") == "assistant"
@@ -578,8 +596,7 @@ class AgentLoop:
                     result["output"]["tools"] = [{"name": item["name"]} for item in result["output"]["tools"]]
                     message = {**message, "content": json.dumps(result, ensure_ascii=False)}
             view.append(message)
-        if cards:
-            view.insert(1, {"role": "system", "content": TOOL_CARDS_PREFIX + json.dumps(cards, ensure_ascii=False, separators=(",", ":"))})
+        view.insert(1, _tool_visibility_message(definitions, cards))
         return view
 
     def _tool_definitions(

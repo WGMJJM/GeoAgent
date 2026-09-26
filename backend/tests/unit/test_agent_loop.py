@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.loop import AgentLoop
+from app.agent.loop import TOOL_VISIBILITY_PREFIX, AgentLoop
 from app.auth.approval import ApprovalService
 from app.core.models import (
     AgentRequest,
@@ -17,6 +17,7 @@ from app.core.models import (
     RunStatus,
     ToolMetadata,
 )
+from app.core.tokens import estimate_tokens
 from app.execution.tools import ToolExecutor, ToolRegistry
 from app.models import ModelAdapter, ModelRequest, ModelResponse
 from app.observability import TraceRecorder
@@ -76,6 +77,22 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     return store, loop
 
 
+def _assert_tool_visibility(loop, request):
+    messages = [item for item in request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX)]
+    assert len(messages) == 1
+    visibility = json.loads(messages[0]["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
+    assert set(visibility) == {"callable", "cached"}
+    assert visibility["callable"] == [item["function"]["name"] for item in request.tools]
+    card_names = {item["name"] for item in visibility["cached"]}
+    assert not (set(visibility["callable"]) & card_names)
+    assert len(card_names) + sum(loop.registry.is_deferred(name) for name in visibility["callable"]) <= 8
+    tokens = estimate_tokens(json.dumps(request.tools, ensure_ascii=False, separators=(",", ":")))
+    tokens += estimate_tokens(messages[0]["content"])
+    assert tokens == loop._tool_context_tokens(request.tools, visibility["cached"])
+    assert tokens <= loop.settings.tool_context_tokens
+    return visibility
+
+
 async def _run(loop: AgentLoop, store: StateStore, text: str):
     conversation = store.create_conversation("测试")
     request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input=text)
@@ -109,6 +126,8 @@ async def test_dataset_list_uses_tool_result_in_same_model_loop(tmp_path):
         "agent.ask_user",
         "conversation.search_history",
     }
+    for model_request in adapter.requests:
+        assert _assert_tool_visibility(loop, model_request)["cached"] == []
 
 
 @pytest.mark.asyncio
@@ -166,6 +185,7 @@ async def test_tool_budget_allows_final_answer_from_last_observation(tmp_path):
     assert result.status is AgentResultStatus.SUCCESS
     assert result.summary == "已到工具上限；查询结果中有 roads 数据集。"
     assert adapter.requests[1].tools == []
+    assert _assert_tool_visibility(loop, adapter.requests[1]) == {"callable": [], "cached": []}
 
 
 @pytest.mark.asyncio
@@ -217,6 +237,45 @@ async def test_search_injects_deferred_tool_on_next_turn_and_executes_it(tmp_pat
     assert store.get_run(result.trace_id).tool_call_count == 2
     checkpoint = store.latest_checkpoint(result.trace_id)
     assert checkpoint.state["activated_tool_names"] == ["vector.buffer"]
+    assert "vector.buffer" in _assert_tool_visibility(loop, adapter.requests[1])["callable"]
+    assert not any(item["role"] == "system" for item in checkpoint.state["protocol_messages"])
+
+
+@pytest.mark.asyncio
+async def test_visible_schema_cache_query_reports_availability_without_search_or_execution(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
+        ModelResponse(tool_calls=[{"id": "redundant", "function": {"name": "tool.search", "arguments": '{"query":"vector.buffer"}'}}]),
+        ModelResponse(tool_calls=[{"id": "execute", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
+        ModelResponse(content="直接使用已提供 Schema 的工具。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    executed = []
+    metadata = loop.registry.get("vector.buffer").metadata
+    loop.registry.unregister("vector.buffer")
+    loop.registry.register(metadata, lambda arguments, _context: executed.append(arguments) or {"output": {"checked": True}}, deferred=True)
+    searches = []
+    original_search = loop.catalog.tool_search
+
+    def record_search(arguments, context):
+        searches.append(arguments)
+        return original_search(arguments, context)
+
+    loop.catalog.tool_search = record_search
+    _, result = await _run(loop, store, "复用缓冲工具")
+    assert result.status is AgentResultStatus.SUCCESS
+    assert searches == [{"query": "buffer"}]
+    assert executed == [{"dataset_id": "ds_roads", "distance": 25}]
+    assert store.get_run(result.trace_id).tool_call_count == 3
+    observation = json.loads(next(item["content"] for item in adapter.requests[2].messages if item.get("tool_call_id") == "redundant"))
+    assert observation["output"]["source"] == "run_cache"
+    assert observation["output"]["already_callable"] is True
+    assert "本轮已提供完整 Schema" in observation["output"]["message"]
+    for model_request in adapter.requests:
+        _assert_tool_visibility(loop, model_request)
+    decisions = [item for item in store.list_events(result.trace_id) if item.event_type == "DecisionMade"]
+    assert decisions[1].payload["tool_visibility"]["callable"] == [item["function"]["name"] for item in adapter.requests[1].tools]
+    assert decisions[1].payload["searches"] == [{"call_id": f"{result.trace_id}:redundant", "source": "run_cache", "already_callable": True, "tools": ["vector.buffer"]}]
 
 
 @pytest.mark.asyncio
@@ -404,6 +463,8 @@ async def test_interrupted_search_restores_union_without_double_counting(tmp_pat
     assert {"vector.buffer", "raster.slope"}.issubset(names)
     assert store.get_run(prepared.run.id).tool_call_count == (1 if combined else 2)
     assert len(adapter.requests) == 2
+    for model_request in adapter.requests:
+        _assert_tool_visibility(loop, model_request)
 
 
 @pytest.mark.asyncio
@@ -486,11 +547,11 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
     assert names[0] in {item["function"]["name"] for item in adapter.requests[11].tools}
     observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[11].messages if item["role"] == "tool"}
     assert observations["restore"]["output"]["source"] == "run_cache"
+    assert observations["restore"]["output"]["already_callable"] is False
     assert observations["evicted"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
     assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
     for request in adapter.requests:
-        assert sum(loop.registry.is_deferred(item["function"]["name"]) for item in request.tools) <= 8
-        assert loop._tool_context_tokens(request.tools, []) <= 2500
+        _assert_tool_visibility(loop, request)
     checkpoint = store.latest_checkpoint(result.trace_id)
     assert set(checkpoint.state["discovered_tool_names"]) == set(names)
     assert len(checkpoint.state["activated_tool_names"]) == 8
@@ -517,8 +578,13 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
     else:
         assert active == set()
         assert [item["name"] for item in cards] == [name]
-        messages = loop._tool_context_messages([{"role": "system", "content": "original"}], cards)
+        messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards)
         assert "精确查询工具名称" in messages[1]["content"]
+    original = [{"role": "system", "content": "original"}, {"role": "user", "content": "需要这个工具"}]
+    messages = loop._tool_context_messages(original, definitions, cards)
+    visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
+    assert visibility["cached"] == cards
+    assert original == [{"role": "system", "content": "original"}, {"role": "user", "content": "需要这个工具"}]
 
 
 def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
@@ -538,6 +604,10 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     assert "test.forbidden" not in visible
     assert loop._tool_context_tokens(definitions, cards) <= 2500
     assert visible <= set(names[-8:])
+    messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards)
+    visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
+    assert "test.forbidden" not in visibility["callable"]
+    assert "test.forbidden" not in {item["name"] for item in visibility["cached"]}
 
 
 @pytest.mark.asyncio
@@ -574,6 +644,7 @@ async def test_active_tools_are_run_local_and_inspect_is_read_only(tmp_path):
     assert second.status is AgentResultStatus.SUCCESS
     third_names = {tool["function"]["name"] for tool in adapter.requests[2].tools}
     assert "vector.buffer" not in third_names
+    assert "vector.buffer" not in _assert_tool_visibility(loop, adapter.requests[2])["callable"]
 
     inspect_schema = loop.registry.get("dataset.inspect").metadata.input_schema
     assert inspect_schema["required"] == ["dataset_id"]
@@ -623,6 +694,9 @@ async def test_checkpoint_restore_revalidates_current_environment(tmp_path):
     output = json.loads(cached["content"])["output"]
     assert "vector.buffer" not in {item["name"] for item in output["tools"]}
     assert "source" not in output
+    visibility = _assert_tool_visibility(loop, adapter.requests[2])
+    assert "vector.buffer" not in visibility["callable"]
+    assert "vector.buffer" not in {item["name"] for item in visibility["cached"]}
 
 
 @pytest.mark.asyncio
