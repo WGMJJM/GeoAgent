@@ -23,7 +23,7 @@ TOOL_SEARCH_DEFINITION = {
     "type": "function",
     "function": {
         "name": "tool.search",
-        "description": "Discover a necessary capability missing from the tools currently provided. Use provided tools first; when their results satisfy the user's goal, answer without searching. Before searching, briefly state the necessary capability gap and why provided tools or observations cannot satisfy it. Search accessible tools using Chinese or English capability keywords or tool names. Each search returns at most two tools. Submit Chinese and English discovery searches together in one batch; results are deduplicated by tool name and merged for the next model turn, not automatically executed. For a previously discovered tool without a currently provided schema, query its exact tool name once to restore it from this Run's cache, subject to the context budget; do not repeat bilingual discovery. Do not call newly discovered or restored tools in the search batch. No match does not prove a capability is absent.",
+        "description": "Discover a necessary capability missing from the tools currently provided. Use provided tools first; when their results satisfy the user's goal, answer without searching. Before searching, briefly state the necessary capability gap and why provided tools or observations cannot satisfy it. Search accessible tools using Chinese or English capability keywords or tool names. For bilingual discovery, make ONE tool.search call with Chinese query and english_query for the same capability; do not make separate Chinese and English tool calls. The server searches both internally, returns at most two tools per query, and returns their deduplicated union (up to four tools) for the next model turn, not automatically executed. For a previously discovered tool without a currently provided schema, send only query with its exact tool name once to restore it from this Run's cache, subject to the context budget; omit english_query. Do not call newly discovered or restored tools in the search batch. No match does not prove a capability is absent.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -31,9 +31,15 @@ TOOL_SEARCH_DEFINITION = {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MAX_QUERY_LENGTH,
-                    "description": "Chinese or English capability keywords or tool names, e.g. 栅格检查, raster metadata CRS or raster.inspect.",
+                    "description": "Chinese or English capability keywords or an exact tool name. For bilingual discovery, put Chinese keywords here and English keywords in english_query in the SAME call; for cache restoration, use only the exact tool name here.",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": MAX_RESULTS},
+                "english_query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_QUERY_LENGTH,
+                    "description": "English keywords for the same capability as query; the server merges both searches within this one tool call. Omit for exact-name cache restoration.",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": MAX_RESULTS, "description": "Maximum results PER query, before union and deduplication."},
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -105,8 +111,14 @@ class ToolCatalog:
     def tool_search(self, arguments: dict[str, Any], context: ToolDiscoveryContext) -> dict[str, Any]:
         """tool.search 的轻量响应包装，供 AgentLoop 作为标准工具观察返回。"""
 
-        cards = self.search(arguments.get("query"), context, arguments.get("limit", MAX_RESULTS))
-        response: dict[str, Any] = {"tools": [item.public() for item in cards]}
+        queries = [arguments.get("query")]
+        if "english_query" in arguments:
+            queries.append(arguments["english_query"])
+        cards: dict[str, ToolCard] = {}
+        for query in queries:
+            for card in self.search(query, context, arguments.get("limit", MAX_RESULTS)):
+                cards.setdefault(card.name, card)
+        response: dict[str, Any] = {"tools": [item.public() for item in cards.values()]}
         if not cards:
             response["message"] = "未找到匹配工具，可改用工具名称或简短中文/英文能力词重新搜索。"
         return response

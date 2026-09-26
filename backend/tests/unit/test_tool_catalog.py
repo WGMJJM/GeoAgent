@@ -111,6 +111,35 @@ def test_search_caps_results_at_two_and_honors_smaller_limit():
     assert len(catalog.search("geometry", _context(), limit=2)) <= 2
 
 
+@pytest.mark.parametrize("overlap", [False, True])
+def test_one_bilingual_call_returns_deduplicated_union_with_per_query_limit(overlap):
+    metadata = [
+        *[_metadata(f"test.zh_{index}", "唯一中文能力") for index in range(3)],
+        *[_metadata(f"test.en_{index}", "quantum_marker") for index in range(3)],
+        _metadata("test.forbidden", "唯一中文能力 quantum_marker", scopes=["system.admin"]),
+    ]
+    if overlap:
+        metadata.append(_metadata("test.a_shared", "唯一中文能力 quantum_marker"))
+    _, catalog = _catalog(*metadata)
+    for limit in (1, 2):
+        chinese = catalog.search("唯一中文能力", _context(), limit)
+        english = catalog.search("quantum_marker", _context(), limit)
+        expected = list(dict.fromkeys(item.name for item in [*chinese, *english]))
+        response = catalog.tool_search({"query": "唯一中文能力", "english_query": "quantum_marker", "limit": limit}, _context())
+        assert [item["name"] for item in response["tools"]] == expected
+        assert len(response["tools"]) == 2 * limit - int(overlap)
+        assert "test.forbidden" not in expected
+
+
+@pytest.mark.parametrize("query,english_query", [("无关中文", "buffer"), ("缓冲区", "unknown_marker"), ("无关中文", "unknown_marker")])
+def test_bilingual_call_preserves_nonempty_branch_and_reports_only_total_miss(query, english_query):
+    _, catalog = _catalog(_metadata("vector.buffer", "矢量缓冲区 / Create vector buffers"))
+    response = catalog.tool_search({"query": query, "english_query": english_query}, _context())
+    expected = [] if english_query == "unknown_marker" and query == "无关中文" else ["vector.buffer"]
+    assert [item["name"] for item in response["tools"]] == expected
+    assert ("message" in response) == (not expected)
+
+
 @pytest.mark.parametrize("limit", [0, 3, 5, True, 1.5, "2"])
 def test_invalid_limit_has_a_clear_error(limit):
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
@@ -244,7 +273,7 @@ def test_raster_sample_statistics_are_discoverable_with_honest_limits(query):
     assert registry.is_deferred("raster.inspect")
 
 
-def test_tool_search_protocol_is_structured_and_capped_at_two():
+def test_tool_search_protocol_supports_one_bilingual_call_and_caps_each_query_at_two():
     function = TOOL_SEARCH_DEFINITION["function"]
     assert function["name"] == "tool.search"
     assert function["parameters"]["required"] == ["query"]
@@ -252,9 +281,13 @@ def test_tool_search_protocol_is_structured_and_capped_at_two():
     assert function["parameters"]["properties"]["limit"]["default"] == 2
     query = function["parameters"]["properties"]["query"]
     assert query["maxLength"] == 160
+    english_query = function["parameters"]["properties"]["english_query"]
+    assert english_query["minLength"] == 1
+    assert english_query["maxLength"] == 160
     assert "English" in query["description"]
     assert "Chinese or English" in function["description"]
-    assert "merged" in function["description"]
+    assert "ONE tool.search call" in function["description"]
+    assert "up to four tools" in function["description"]
     assert "Use provided tools first" in function["description"]
     assert "necessary capability gap" in function["description"]
     assert "not automatically executed" in function["description"]

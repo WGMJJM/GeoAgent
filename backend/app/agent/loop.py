@@ -339,7 +339,7 @@ class AgentLoop:
                             try:
                                 query = arguments["query"].strip().casefold()
                                 cached_name = next((name for name in discovered_names if name.casefold() == query), None)
-                                if cached_name in self._available_activations(set(discovered_names), search_context):
+                                if "english_query" not in arguments and cached_name in self._available_activations(set(discovered_names), search_context):
                                     search_output = {"tools": [self.catalog.card(cached_name).public()], "source": "run_cache"}
                                 else:
                                     search_output = self.catalog.tool_search(arguments, search_context)
