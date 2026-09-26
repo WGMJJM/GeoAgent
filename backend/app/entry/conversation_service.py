@@ -82,7 +82,7 @@ class ConversationService:
         if conversation is None or (user_id is not None and conversation.user_id not in {None, user_id}):
             return None
         for run in self.store.list_runs_for_conversation(conversation_id, limit=100):
-            if run.status is RunStatus.WAITING_USER and self.store.latest_checkpoint(run.id) is not None:
+            if not run.parent_run_id and run.status is RunStatus.WAITING_USER and self.store.latest_checkpoint(run.id) is not None:
                 return run
         return None
 
@@ -110,7 +110,7 @@ class ConversationService:
     async def wait(self, run_id: str, *, force_assistant: bool = False) -> AgentResult:
         result = await self.run_manager.wait(run_id)
         run = self.store.get_run(run_id)
-        if run and run.conversation_id:
+        if run and run.conversation_id and not run.parent_run_id:
             messages = self.store.list_messages(run.conversation_id, limit=1000)
             if force_assistant or not any(message.role == "assistant" and message.run_id == result.trace_id for message in messages):
                 conversation = self.store.get_conversation(run.conversation_id)

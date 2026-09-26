@@ -106,7 +106,8 @@ class RunManager:
                 "attachment_ids": list(dict.fromkeys([*saved_request.attachment_ids, *(attachment_ids or [])])),
             }
         )
-        resumed, _ = resume_lifecycle(self.store, current, metadata={"last_continuation": continuation["type"]})
+        domain_task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
+        resumed, _ = resume_lifecycle(self.store, current, domain_task, metadata={"last_continuation": continuation["type"]})
         prepared = self.agent_loop.prepare_resume(request, resumed)
         if on_run is not None:
             await on_run(resumed)
@@ -117,6 +118,27 @@ class RunManager:
         if self.metrics:
             self.metrics.increment("runs.continued")
         return resumed
+
+    async def submit_child(self, request: AgentRequest, child: Run) -> Run:
+        """只执行调度器已经持久化的子身份，不接受外部请求指定父子关系。"""
+
+        current = self.store.get_run(child.id)
+        if current is None or current.status is not RunStatus.CREATED or not current.parent_run_id:
+            raise RuntimeError("子 Run 未处于已准备状态")
+        if not request.user_id or not self.store.run_belongs_to_user(current.id, request.user_id):
+            raise PermissionError("子 Run 身份无效")
+        prepared = self.agent_loop.prepare_child_request(request, current)
+        self._active[current.id] = asyncio.create_task(self._execute(prepared))
+        return prepared.run
+
+    async def cancel_children(self, parent_run_id: str) -> None:
+        for child in self.store.list_child_runs(parent_run_id):
+            if child.status is RunStatus.CREATED:
+                result = AgentResult(agent_id=child.agent_id, status=AgentResultStatus.CANCELLED,
+                                     summary="父运行已停止，子任务没有启动。", error="CANCELLED", trace_id=child.id)
+                persist_result(self.store, child, None, result, run_status=RunStatus.CANCELLED)
+            elif is_cancellable_run(child):
+                await self.cancel(child.id)
 
     async def _execute(
         self,
@@ -146,6 +168,9 @@ class RunManager:
             return result
         except TimeoutError:
             self.agent_loop.executor.cancel_run(run.id)
+            await self.cancel_children(run.id)
+            if self.agent_loop.delegation is not None:
+                await self.agent_loop.delegation.record_stopped(run.id)
             current = self.store.get_run(run.id) or run
             result = AgentResult(
                 agent_id=current.agent_id,
@@ -154,12 +179,16 @@ class RunManager:
                 error="BUDGET_EXCEEDED",
                 trace_id=current.id,
             )
-            persist_result(self.store, current, None, result, run_status=RunStatus.BUDGET_EXCEEDED)
+            task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
+            persist_result(self.store, current, task, result, run_status=RunStatus.BUDGET_EXCEEDED)
             await self.agent_loop.trace.emit(current.id, "RunDeadlineExceeded", result.summary, payload={"timeout_seconds": self.execution_timeout_seconds}, agent_id=current.agent_id)
             self._finished[run.id] = result
             return result
         except asyncio.CancelledError:
             self.agent_loop.executor.cancel_run(run.id)
+            await self.cancel_children(run.id)
+            if self.agent_loop.delegation is not None:
+                await self.agent_loop.delegation.record_stopped(run.id)
             current = self.store.get_run(run.id) or run
             result = AgentResult(
                 agent_id=current.agent_id,
@@ -168,7 +197,22 @@ class RunManager:
                 error="CANCELLED",
                 trace_id=current.id,
             )
-            persist_result(self.store, current, None, result, run_status=RunStatus.CANCELLED)
+            task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
+            persist_result(self.store, current, task, result, run_status=RunStatus.CANCELLED)
+            await self.agent_loop.trace.emit(current.id, EventType.RUN_CANCELLED, result.summary, agent_id=current.agent_id)
+            self._finished[run.id] = result
+            return result
+        except Exception as exc:
+            await self.cancel_children(run.id)
+            if self.agent_loop.delegation is not None:
+                await self.agent_loop.delegation.record_stopped(run.id)
+            current = self.store.get_run(run.id) or run
+            result = AgentResult(agent_id=current.agent_id, status=AgentResultStatus.FAILED,
+                                 summary="执行过程中发生异常，运行已停止。", error="RUNTIME_ERROR", trace_id=current.id)
+            task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
+            persist_result(self.store, current, task, result)
+            await self.agent_loop.trace.emit(current.id, EventType.RUN_FAILED, result.summary,
+                                            payload={"error_type": type(exc).__name__}, agent_id=current.agent_id)
             self._finished[run.id] = result
             return result
         finally:
@@ -216,6 +260,9 @@ class RunManager:
             if self.metrics:
                 self.metrics.increment("runs.cancelled")
             return True
+        await self.cancel_children(run_id)
+        if self.agent_loop.delegation is not None:
+            await self.agent_loop.delegation.record_stopped(run_id)
         result = AgentResult(
             agent_id=run.agent_id,
             status=AgentResultStatus.CANCELLED,
@@ -223,11 +270,18 @@ class RunManager:
             error="CANCELLED",
             trace_id=run_id,
         )
-        persist_result(self.store, run, None, result, run_status=RunStatus.CANCELLED)
+        domain_task = self.store.get_task(run.task_id) if run.task_id and not run.parent_run_id else None
+        persist_result(self.store, run, domain_task, result, run_status=RunStatus.CANCELLED)
+        await self.agent_loop.trace.emit(run.id, EventType.RUN_CANCELLED, result.summary, agent_id=run.agent_id)
         self._finished[run_id] = result
         if self.metrics:
             self.metrics.increment("runs.cancelled")
         return True
+
+    async def close(self) -> None:
+        for run_id in list(self._active):
+            if self.is_active(run_id):
+                await self.cancel(run_id)
 
 
 __all__ = ["RunManager"]

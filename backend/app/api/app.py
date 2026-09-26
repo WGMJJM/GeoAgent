@@ -31,9 +31,9 @@ from app.core.models import (
     new_id,
 )
 from app.gis.preview import DatasetPreview
+from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import record_approval_decision
 from app.run.predicates import is_cancellable_run, is_resumable_run
-from app.run.checkpoints import RunCheckpointCodec
 
 
 class AskBody(BaseModel):
@@ -401,7 +401,7 @@ def create_app(application: Application | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="approval not found")
         if record_approval_decision(geoagent.store, approved) is None:
             raise HTTPException(status_code=409, detail="审批来源运行不存在")
-        run = await geoagent.run_manager.continue_run(source.id, user_id=current_user.id, approval_id=approval_id, approved=True)
+        run = await geoagent.run_manager.continue_run(source.parent_run_id or source.id, user_id=current_user.id, approval_id=approval_id, approved=True)
         await geoagent.trace.emit(source.id, "ApprovalGranted", "用户已批准工具执行", payload={"approval_id": approval_id, "tool": item.tool_name, "status": approved.status.value}, agent_id="main")
         result = await geoagent.conversations.wait(run.id, force_assistant=True)
         final_approval = geoagent.approvals.get(approval_id, user_id=current_user.id) or approved
@@ -421,7 +421,8 @@ def create_app(application: Application | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="approval not found")
         if record_approval_decision(geoagent.store, item) is None:
             raise HTTPException(status_code=409, detail="审批来源运行不存在")
-        run = await geoagent.run_manager.continue_run(item.source_run_id, user_id=current_user.id, approval_id=approval_id, approved=False)
+        source = geoagent.store.get_run(item.source_run_id)
+        run = await geoagent.run_manager.continue_run(source.parent_run_id or source.id, user_id=current_user.id, approval_id=approval_id, approved=False)
         await geoagent.trace.emit(item.source_run_id, "ApprovalDenied", "用户拒绝了工具执行", payload={"approval_id": item.id, "tool": item.tool_name, "status": item.status.value}, agent_id="main")
         result = await geoagent.conversations.wait(run.id, force_assistant=True)
         return {"approval": item.model_dump(mode="json"), "run": run.model_dump(mode="json"), "result": result.model_dump(mode="json")}

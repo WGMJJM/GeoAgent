@@ -45,6 +45,8 @@ class ContextBuilder:
         append_request: bool = True,
     ) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if run is not None and run.parent_run_id:
+            return self._child_messages(request, run, protocol_messages, append_request)
         trusted_context = self._trusted_context(request, run)
         if trusted_context:
             serialized = json.dumps(trusted_context, ensure_ascii=False, separators=(",", ":"))
@@ -61,14 +63,21 @@ class ContextBuilder:
         else:
             history = protocol_messages[-self.recent_message_limit * 2 :]
 
-        for item in _bounded_history(history):
+        delegate_calls = {
+            call.get("id")
+            for item in history if item.get("role") == "assistant"
+            for call in item.get("tool_calls", []) if isinstance(call, dict)
+            if isinstance(call.get("function"), dict) and call["function"].get("name") == "agent.delegate"
+        }
+        for item in _bounded_history(history, preserve_tool_calls=delegate_calls):
             role = item.get("role")
             if role not in _ALLOWED_ROLES:
                 continue
             content = item.get("content", "")
             if not isinstance(content, str):
                 continue
-            clean: dict[str, Any] = {"role": role, "content": content[-_MAX_MESSAGE_CHARS:]}
+            preserved = role == "tool" and item.get("tool_call_id") in delegate_calls
+            clean: dict[str, Any] = {"role": role, "content": content if preserved else content[-_MAX_MESSAGE_CHARS:]}
             if role == "assistant" and isinstance(item.get("tool_calls"), list):
                 clean["tool_calls"] = item["tool_calls"]
             if role == "tool" and isinstance(item.get("tool_call_id"), str):
@@ -78,6 +87,30 @@ class ContextBuilder:
         if append_request and not (
             messages[-1].get("role") == "user" and messages[-1].get("content") == request.user_input
         ):
+            messages.append({"role": "user", "content": request.user_input})
+        return messages
+
+    def _child_messages(self, request: AgentRequest, run: Run, protocol_messages, append_request) -> list[dict[str, Any]]:
+        """子任务只读取自己的请求、已验证输入及局部协议，不读取会话/主任务记忆。"""
+
+        current = self.store.get_run(run.id) or run
+        selected = self._verified_selected_datasets(request)
+        bindings = current.metadata.get("upstream_inputs", {})
+        visible = {item["id"] for item in selected}
+        context = {
+            "subtask_id": current.metadata.get("subtask_id"),
+            "goal": current.metadata.get("original_request"),
+            "allowed_tools": current.metadata.get("allowed_tool_names", []),
+            "selected_datasets": selected,
+            "upstream_inputs": {name: item for name, item in bindings.items() if item.get("dataset_id") in visible},
+            "expected_outputs": current.metadata.get("output_roles", {}),
+        }
+        messages = [{"role": "system", "content": SYSTEM_PROMPT + "\n你是独立子任务执行者；禁止再次委派或读取无关会话历史。先搜索所需工具，必须用真实工具证据完成任务。"},
+                    {"role": "system", "content": json.dumps(context, ensure_ascii=False)}]
+        for item in protocol_messages or []:
+            if item.get("role") in _ALLOWED_ROLES:
+                messages.append(dict(item))
+        if append_request and not (messages[-1].get("role") == "user" and messages[-1].get("content") == request.user_input):
             messages.append({"role": "user", "content": request.user_input})
         return messages
 
@@ -186,18 +219,27 @@ class ContextBuilder:
         return self.store.run_belongs_to_user(run_id, request.user_id) if request.user_id else self.store.get_run(run_id) is not None
 
 
-def _bounded_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _bounded_history(history: list[dict[str, Any]], *, preserve_tool_calls: set[str] | None = None) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     size = 0
+    preserve_tool_calls = preserve_tool_calls or set()
+    exhausted = False
     for item in reversed(history):
         content = item.get("content", "")
         if not isinstance(content, str):
             continue
         bounded = dict(item)
-        bounded["content"] = content[-_MAX_MESSAGE_CHARS:]
+        preserved = item.get("role") == "tool" and item.get("tool_call_id") in preserve_tool_calls
+        required = preserved or (
+            item.get("role") == "assistant"
+            and any(call.get("id") in preserve_tool_calls for call in item.get("tool_calls", []) if isinstance(call, dict))
+        )
+        bounded["content"] = content if preserved else content[-_MAX_MESSAGE_CHARS:]
         item_size = len(bounded["content"])
-        if selected and size + item_size > _MAX_HISTORY_CHARS:
-            break
+        if exhausted or (selected and size + item_size > _MAX_HISTORY_CHARS):
+            exhausted = True
+            if not required:
+                continue
         selected.append(bounded)
         size += item_size
     selected.reverse()

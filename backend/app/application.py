@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.agent.delegation import DelegationCoordinator
 from app.agent.loop import AgentLoop
 from app.auth import ApprovalService, AuthService, PermissionPolicy
 from app.config import Settings
@@ -110,6 +111,8 @@ class Application:
             self.metrics,
             execution_timeout_seconds=self.settings.max_execution_seconds,
         )
+        self.delegation = DelegationCoordinator(self.store, self.agent_loop, self.run_manager, self.settings)
+        self.agent_loop.delegation = self.delegation
         self.conversations = ConversationService(
             self.store,
             self.run_manager,
@@ -163,6 +166,7 @@ class Application:
             self.model_adapter = self.model_adapters[selected.id]
 
     async def close(self) -> None:
+        await self.run_manager.close()
         adapters = list(self.model_adapters.values())
         if self.model_adapter is not None and all(id(self.model_adapter) != id(item) for item in adapters):
             adapters.append(self.model_adapter)

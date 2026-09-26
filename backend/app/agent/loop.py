@@ -36,6 +36,7 @@ from app.run.lifecycle import persist_result
 from app.state import StateStore
 
 from .context import ContextBuilder
+from .delegation import DELEGATE_TOOL
 
 ASK_USER_TOOL = {
     "type": "function",
@@ -110,6 +111,7 @@ class AgentLoop:
         self.model_adapter: ModelAdapter | None = None
         self.model_adapters: dict[str, ModelAdapter] = {}
         self.default_model_profile: str | None = None
+        self.delegation = None
 
     async def prepare_request(
         self,
@@ -138,6 +140,12 @@ class AgentLoop:
     def prepare_resume(self, request: AgentRequest, run: Run) -> LoopPreparedRequest:
         return LoopPreparedRequest(request=request, run=run)
 
+    def prepare_child_request(self, request: AgentRequest, child: Run) -> LoopPreparedRequest:
+        run = child.model_copy(update={"status": RunStatus.RUNNING, "started_at": datetime.now(UTC)})
+        self.store.save_run(run)
+        self._save_checkpoint(request, run, [], None, "child_prepared", set(), [], pending_tool_calls=[])
+        return LoopPreparedRequest(request=request, run=run)
+
     async def run(
         self,
         request: AgentRequest,
@@ -163,9 +171,11 @@ class AgentLoop:
             )
 
         messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
-        activated_names = self._restore_activated_names(resume_from, request)
+        activated_names = self._restore_activated_names(resume_from, request, run)
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
+        saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
+        resume_pending = [tuple(item) for item in saved_pending if isinstance(item, list) and len(item) == 6]
 
         if pending_approvals:
             if isinstance(continuation, dict) and continuation.get("type") == "user_input":
@@ -203,22 +213,25 @@ class AgentLoop:
             if resumed is not None:
                 return resumed
 
-        for turn in range(1, self.settings.max_agent_turns + 1):
-            services = self.services_factory(request.user_id)
-            runtime_context = self._discovery_context(request, services)
+        remaining_turns = max(0, self.settings.max_agent_turns - run.turn_count)
+        for turn in range(remaining_turns + bool(resume_pending)):
+            services = self._execution_services(request, run)
+            runtime_context = self._discovery_context(request, services, run)
             activated_names = self._available_activations(activated_names, runtime_context)
             tools = self._tool_definitions(runtime_context, activated_names)
             current = self.store.get_run(run.id) or run
-            current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + 1})
+            current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
+            response = None
             try:
-                response = await model.complete(
-                    ModelRequest(
-                        messages=messages,
-                        tools=tools if tool_call_count < self.settings.max_tool_calls else [],
-                        max_tokens=self.settings.max_tokens,
+                if not resume_pending:
+                    response = await model.complete(
+                        ModelRequest(
+                            messages=messages,
+                            tools=tools if tool_call_count < self.settings.max_tool_calls else [],
+                            max_tokens=self.settings.max_tokens,
+                        )
                     )
-                )
             except Exception:
                 return await self._finish(
                     current,
@@ -232,44 +245,79 @@ class AgentLoop:
                     ),
                 )
 
-            if response.tool_calls:
-                assistant_calls, pending = _decode_tool_calls(response.tool_calls, current.id)
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": response.content or "",
-                        "tool_calls": assistant_calls,
-                    }
-                )
+            if response is None or response.tool_calls:
+                restoring_batch = bool(resume_pending)
+                if restoring_batch:
+                    pending, resume_pending = resume_pending, []
+                else:
+                    assistant_calls, pending = _decode_tool_calls(response.tool_calls, current.id)
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": assistant_calls,
+                        }
+                    )
                 ask_question: str | None = None
+                delegate_wait: ToolResult | None = None
+                execution_uncertain = False
                 next_activations: set[str] | None = None
                 permitted_this_batch = frozenset(activated_names)
+                if restoring_batch and resume_from:
+                    permitted_this_batch = frozenset(resume_from.state.get("batch_activated_names", activated_names))
+                    saved_next = resume_from.state.get("batch_next_activations")
+                    next_activations = set(saved_next) if isinstance(saved_next, list) else None
                 available_names_this_batch = self._available_tool_names(
-                    self._discovery_context(request, self.services_factory(request.user_id)),
+                    self._discovery_context(request, self._execution_services(request, current), current),
                     permitted_this_batch,
                 )
-                for provider_call_id, name, arguments, decode_error, persisted_id in pending:
-                    within_budget = tool_call_count < self.settings.max_tool_calls
+                mixed_delegation = len(pending) > 1 and any(item[1] == "agent.delegate" for item in pending)
+                for index, (provider_call_id, name, arguments, decode_error, persisted_id, counted) in enumerate(pending):
+                    within_budget = counted or tool_call_count < self.settings.max_tool_calls
                     if not within_budget:
                         result = _blocked_result(
                             persisted_id,
                             "BUDGET_EXCEEDED",
                             "已达到本次运行的工具调用上限。",
                         )
-                    else:
+                    elif not counted:
                         tool_call_count += 1
                         latest = self.store.get_run(current.id) or current
                         current = latest.model_copy(update={"tool_call_count": tool_call_count})
                         self.store.save_run(current)
+                        pending[index] = (provider_call_id, name, arguments, decode_error, persisted_id, True)
+
+                    # 模型已提出的原子调用先保存；恢复用原 ID 读取结果，禁止重新询问模型制造新副作用。
+                    self._save_checkpoint(request, current, messages, cursor_id, "tool_pending", activated_names,
+                                          pending_approvals, pending_tool_calls=pending[index:],
+                                          batch_activated_names=permitted_this_batch, batch_next_activations=next_activations)
 
                     if not within_budget:
                         pass
+                    elif mixed_delegation:
+                        result = _failed_result(persisted_id, "DELEGATION_MIXED_BATCH", "agent.delegate 必须独占一个模型工具批次。")
                     elif decode_error:
                         result = ToolResult(
                             call_id=persisted_id,
                             status=ToolStatus.FAILED,
                             error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=decode_error),
                         )
+                    elif name == "agent.delegate":
+                        if current.parent_run_id:
+                            result = _blocked_result(persisted_id, "SUBAGENT_DELEGATION_FORBIDDEN", "子 Agent 不能再次委派。")
+                        elif self.delegation is None:
+                            result = _failed_result(persisted_id, "DELEGATION_UNAVAILABLE", "委派调度器未配置。")
+                        else:
+                            result = await self.delegation.execute(arguments, request=request, parent=current,
+                                                                   call_id=persisted_id, continuation=continuation)
+                            if result.error and result.error.code in {"WAITING_USER", "APPROVAL_REQUIRED"}:
+                                delegate_wait = result
+                            elif isinstance(result.output, dict) and "delegation_id" in result.output:
+                                latest = self.store.get_run(current.id) or current
+                                current = latest.model_copy(update={"metadata": {**latest.metadata, "last_delegation_status": result.output["status"],
+                                                                                 "delegation_dataset_ids": result.datasets,
+                                                                                 "delegation_artifact_ids": result.artifacts}})
+                                self.store.save_run(current)
                     elif name == "agent.ask_user":
                         problem = validate_arguments(arguments, ASK_USER_TOOL["function"]["parameters"])
                         if problem:
@@ -282,8 +330,8 @@ class AgentLoop:
                         if problem:
                             result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
                         else:
-                            search_services = self.services_factory(request.user_id)
-                            search_context = self._discovery_context(request, search_services)
+                            search_services = self._execution_services(request, current)
+                            search_context = self._discovery_context(request, search_services, current)
                             try:
                                 search_output = self.catalog.tool_search(arguments, search_context)
                             except ValueError as exc:
@@ -293,7 +341,9 @@ class AgentLoop:
                                 next_activations = {item["name"] for item in search_output["tools"]}
                     elif name == "conversation.search_history":
                         problem = validate_arguments(arguments, SEARCH_HISTORY_TOOL["function"]["parameters"])
-                        if problem:
+                        if current.parent_run_id:
+                            result = _blocked_result(persisted_id, "SUBAGENT_HISTORY_FORBIDDEN", "子任务不能读取主会话历史。")
+                        elif problem:
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.FAILED, error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=problem))
                         else:
                             limit = int(arguments.get("limit", 5))
@@ -334,8 +384,8 @@ class AgentLoop:
                                 if problem:
                                     result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
                                 else:
-                                    execution_services = self.services_factory(request.user_id)
-                                    execution_context = self._discovery_context(request, execution_services)
+                                    execution_services = self._execution_services(request, current)
+                                    execution_context = self._discovery_context(request, execution_services, current)
                                     allowed_now = self._available_tool_names(execution_context, permitted_this_batch)
                                     call = ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id, agent_id=current.agent_id)
                                     result = await self.executor.execute(
@@ -357,13 +407,18 @@ class AgentLoop:
                                                 "arguments": arguments,
                                             }
                                             pending_approvals.append(approval)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": provider_call_id,
-                            "content": _tool_observation(result),
-                        }
-                    )
+                    if current.parent_run_id and name not in {"agent.ask_user", "tool.search", "conversation.search_history", "agent.delegate"}:
+                        approval_waiting = result.error is not None and result.error.code == "APPROVAL_REQUIRED" and result.error.details.get("approval_id")
+                        if not approval_waiting and self.store.get_tool_call(persisted_id) is None:
+                            self.store.save_tool_call(ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id), result)
+                    _replace_tool_observation(messages, provider_call_id, _tool_observation(result))
+                    remaining = pending[index:] if delegate_wait else pending[index + 1:]
+                    self._save_checkpoint(request, current, messages, cursor_id, "tool_observation", activated_names,
+                                          pending_approvals, pending_tool_calls=remaining,
+                                          batch_activated_names=permitted_this_batch, batch_next_activations=next_activations)
+                    if result.error and result.error.code == "SIDE_EFFECT_UNCERTAIN":
+                        execution_uncertain = True
+                        break
                 if next_activations is not None:
                     activated_names = next_activations
                 self._save_checkpoint(
@@ -374,6 +429,7 @@ class AgentLoop:
                     "tool_observation",
                     activated_names,
                     pending_approvals,
+                    pending_tool_calls=remaining,
                 )
                 await self.trace.emit(
                     current.id,
@@ -382,6 +438,17 @@ class AgentLoop:
                     payload={"action": "tool_call", "tool_count": len(pending)},
                     agent_id=current.agent_id,
                 )
+                if delegate_wait is not None:
+                    details = delegate_wait.error.details
+                    return await self._finish(current, request=request, result=AgentResult(
+                        agent_id=current.agent_id, task_id=(self.store.get_run(current.id) or current).task_id,
+                        status=AgentResultStatus.BLOCKED, summary=delegate_wait.error.message,
+                        error=delegate_wait.error.code, needs_input=details, trace_id=current.id))
+                if execution_uncertain:
+                    return await self._finish(current, request=request, result=AgentResult(
+                        agent_id=current.agent_id, status=AgentResultStatus.FAILED,
+                        summary="工具清理未完成，副作用无法确认；运行已停止，需要人工处理。",
+                        error="SIDE_EFFECT_UNCERTAIN", trace_id=current.id))
                 if ask_question:
                     return await self._finish(
                         current,
@@ -456,7 +523,11 @@ class AgentLoop:
         activated_names: set[str] | frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         context = context or ToolDiscoveryContext()
-        definitions = [TOOL_SEARCH_DEFINITION, ASK_USER_TOOL, SEARCH_HISTORY_TOOL]
+        definitions = [TOOL_SEARCH_DEFINITION, ASK_USER_TOOL]
+        if context.allowed_tool_names is None:
+            definitions.append(SEARCH_HISTORY_TOOL)
+            if self.delegation is not None:
+                definitions.append(DELEGATE_TOOL)
         available = self._available_tool_names(context, activated_names)
         for item in self.registry.definitions():
             if item.name not in available:
@@ -464,8 +535,23 @@ class AgentLoop:
             definitions.append(_tool_definition(item.name, item.description, item.input_schema))
         return definitions
 
-    def _discovery_context(self, request: AgentRequest, services: dict[str, Any]) -> ToolDiscoveryContext:
-        return self.policy.discovery_context(authenticated_user=bool(request.user_id), services=services)
+    def _discovery_context(self, request: AgentRequest, services: dict[str, Any], run: Run | None = None) -> ToolDiscoveryContext:
+        context = self.policy.discovery_context(authenticated_user=bool(request.user_id), services=services)
+        current = self.store.get_run(run.id) if run is not None else None
+        parent = self.store.get_run(current.parent_run_id) if current is not None and current.parent_run_id else None
+        return self.policy.restrict_to_run(context, current, parent)
+
+    def _execution_services(self, request: AgentRequest, run: Run) -> dict[str, Any]:
+        services = self.services_factory(request.user_id)
+        if run.parent_run_id:
+            services = dict(services)
+            workspace = services.get("workspace")
+            if hasattr(workspace, "for_run"):
+                services["workspace"] = workspace.for_run(run.id)
+            registry = services.get("registry")
+            if hasattr(registry, "for_run"):
+                services["registry"] = registry.for_run(request.dataset_ids, run.id)
+        return services
 
     def _available_activations(
         self,
@@ -497,14 +583,14 @@ class AgentLoop:
                 names.add(metadata.name)
         return frozenset(names)
 
-    def _restore_activated_names(self, checkpoint: Checkpoint | None, request: AgentRequest) -> set[str]:
+    def _restore_activated_names(self, checkpoint: Checkpoint | None, request: AgentRequest, run: Run | None = None) -> set[str]:
         if checkpoint is None:
             return set()
         raw = checkpoint.state.get("activated_tool_names")
         if not isinstance(raw, list):
             return set()
         services = self.services_factory(request.user_id)
-        context = self._discovery_context(request, services)
+        context = self._discovery_context(request, services, run)
         return self._available_activations({name for name in raw if isinstance(name, str)}, context)
 
     @staticmethod
@@ -575,8 +661,8 @@ class AgentLoop:
             )
 
         if continuation.get("approved") is True:
-            services = self.services_factory(request.user_id)
-            context = self._discovery_context(request, services)
+            services = self._execution_services(request, run)
+            context = self._discovery_context(request, services, run)
             available = self._available_tool_names(context, activated_names)
             result = await self.executor.execute(
                 ToolCall(id=call_id, name=name, arguments=arguments, run_id=run.id, agent_id=run.agent_id),
@@ -588,6 +674,8 @@ class AgentLoop:
             )
         elif continuation.get("approved") is False:
             result = _blocked_result(call_id, "APPROVAL_DENIED", "用户拒绝了此工具操作；工具没有执行。")
+            if run.parent_run_id:
+                self.store.save_tool_call(ToolCall(id=call_id, name=name, arguments=arguments, run_id=run.id), result)
         else:
             return await self._finish(
                 run,
@@ -646,12 +734,18 @@ class AgentLoop:
         phase: str,
         activated_names: set[str] | frozenset[str],
         pending_approvals: list[dict[str, Any]],
+        *,
+        pending_tool_calls=None,
+        batch_activated_names=None,
+        batch_next_activations=None,
     ) -> None:
         protocol_messages = [
             item
             for item in messages
             if item.get("role") in {"user", "assistant", "tool"}
         ]
+        previous = self.store.latest_checkpoint(run.id)
+        pending_tool_calls = pending_tool_calls if pending_tool_calls is not None else (previous.state.get("pending_tool_calls", []) if previous else [])
         self.store.save_checkpoint(
             Checkpoint(
                 run_id=run.id,
@@ -663,6 +757,9 @@ class AgentLoop:
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
                     "pending_approvals": pending_approvals,
+                    "pending_tool_calls": pending_tool_calls,
+                    "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),
+                    "batch_next_activations": sorted(batch_next_activations) if batch_next_activations is not None else None,
                     "tool_call_count": run.tool_call_count,
                 },
             )
@@ -670,6 +767,14 @@ class AgentLoop:
 
     async def _finish(self, run: Run, result: AgentResult, *, request: AgentRequest) -> AgentResult:
         current = self.store.get_run(run.id) or run
+        if current.task_id:
+            result = result.model_copy(update={"task_id": current.task_id})
+        if not current.parent_run_id and result.status is AgentResultStatus.SUCCESS and current.metadata.get("last_delegation_status"):
+            delegated_status = AgentResultStatus(current.metadata["last_delegation_status"])
+            result = result.model_copy(update={"status": delegated_status,
+                                               "error": "DELEGATION_FAILED" if delegated_status is AgentResultStatus.FAILED else "CANCELLED" if delegated_status is AgentResultStatus.CANCELLED else None,
+                                               "datasets": current.metadata.get("delegation_dataset_ids", []),
+                                               "artifacts": current.metadata.get("delegation_artifact_ids", [])})
         status = {
             AgentResultStatus.SUCCESS: RunStatus.COMPLETED,
             AgentResultStatus.PARTIAL: RunStatus.PARTIAL_COMPLETED,
@@ -677,7 +782,8 @@ class AgentLoop:
             AgentResultStatus.CANCELLED: RunStatus.CANCELLED,
             AgentResultStatus.FAILED: RunStatus.FAILED,
         }[result.status]
-        persist_result(self.store, current, None, result, run_status=status, task_status=None)
+        task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
+        persist_result(self.store, current, task, result, run_status=status, task_status=None)
         previous = self.store.latest_checkpoint(current.id)
         state = dict(previous.state) if previous is not None else {}
         state.update({"schema_version": 1, "request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
@@ -690,6 +796,8 @@ class AgentLoop:
             if result.error == "WAITING_USER"
             else EventType.RUN_WAITING_APPROVAL
             if result.error == "APPROVAL_REQUIRED"
+            else EventType.RUN_CANCELLED
+            if result.status is AgentResultStatus.CANCELLED
             else EventType.RUN_FAILED
         )
         await self.trace.emit(current.id, event_type, result.summary, payload={"status": status.value, "error": result.error}, agent_id=current.agent_id)
@@ -730,7 +838,7 @@ def _decode_tool_calls(raw_calls: list[dict[str, Any]], run_id: str):
                 "function": {"name": name, "arguments": protocol_arguments},
             }
         )
-        decoded.append((provider_id, name, arguments, error, persisted_id))
+        decoded.append((provider_id, name, arguments, error, persisted_id, False))
     return messages, decoded
 
 
@@ -754,6 +862,7 @@ def _replace_tool_observation(messages: list[dict[str, Any]], provider_call_id: 
         if item.get("role") == "tool" and item.get("tool_call_id") == provider_call_id:
             item["content"] = content
             return
+    messages.append({"role": "tool", "tool_call_id": provider_call_id, "content": content})
 
 
 def _tool_observation(result: ToolResult) -> str:
@@ -766,6 +875,8 @@ def _tool_observation(result: ToolResult) -> str:
         "error": result.error.model_dump(mode="json") if result.error else None,
     }
     text = json.dumps(payload, ensure_ascii=False, default=str)
+    if isinstance(result.output, dict) and "delegation_id" in result.output:
+        return text  # 委派观察已按字段裁剪，不从中间截断关键 ID/状态或破坏 JSON。
     return text if len(text) <= 16000 else text[:16000] + "…(结果截断)"
 
 
