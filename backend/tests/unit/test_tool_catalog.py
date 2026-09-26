@@ -293,5 +293,8 @@ def test_tool_search_protocol_supports_one_bilingual_call_and_caps_each_query_at
     assert "historical search results do not establish current availability" in function["description"]
     assert "necessary capability gap" in function["description"]
     assert "not automatically executed" in function["description"]
+    assert "without a separate selection call" in function["description"]
+    assert "uncalled candidates become cached cards" in function["description"]
+    assert "approval is pending" in function["description"]
     assert "granted_scopes" not in function["parameters"]["properties"]
     assert "available_envs" not in function["parameters"]["properties"]

@@ -147,6 +147,8 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
     assert "未检索到或未开放某项能力不代表项目中不存在" in prompt
     assert "callable 中的工具已经提供完整 Schema" in prompt
     assert "历史搜索只表示曾经发现" in prompt
+    assert "未调用候选降为卡片" in prompt
+    assert "不需要额外发起一次选择加载" in prompt
     search_description = next(item["function"]["description"] for item in adapter.requests[0].tools if item["function"]["name"] == "tool.search")
     assert "Use callable tools directly" in search_description
     if needs_statistics:
