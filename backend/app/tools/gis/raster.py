@@ -11,7 +11,7 @@ from .common import dataset_from_context, output_path, register_derived
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(metadata("raster.inspect", "检查栅格尺寸、分辨率和 NoData / Inspect raster dimensions, resolution and NoData", tags=["gis", "raster"], required_envs=["gis.raster"]), inspect, deferred=True)
+    registry.register(metadata("raster.inspect", "检查栅格尺寸、CRS、范围、分辨率、NoData和首波段采样统计：最小值、最大值、均值、有效像元（最多512×512，无直方图） / Inspect raster metadata and first-band sampled statistics: min, max, mean, valid cells (up to 512x512; no histogram)", tags=["gis", "raster"], required_envs=["gis.raster"]), inspect, deferred=True)
     registry.register(metadata("raster.clip", "使用矢量边界裁剪栅格 / Clip a raster with a vector boundary", write=True, tags=["gis", "raster"], required_envs=["gis.raster", "workspace"]), clip, deferred=True)
     registry.register(metadata("raster.reproject", "重投影栅格数据 / Reproject raster data", write=True, tags=["gis", "raster"], required_envs=["gis.raster", "workspace"]), reproject, deferred=True)
     registry.register(metadata("raster.slope", "从 DEM 计算坡度 / Calculate slope from a DEM", write=True, tags=["gis", "raster", "terrain"], required_envs=["gis.raster", "workspace"]), slope, deferred=True)
