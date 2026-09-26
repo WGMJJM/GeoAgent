@@ -38,6 +38,5 @@
 .run-progress-marker.waiting{background:#fff7e7;color:#b07a35}
 .run-summary-current,.run-progress-current{flex-wrap:wrap;row-gap:5px}
 .run-token-usage{margin-left:12px;color:#718b9a;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
-.run-token-breakdown{display:inline-block;color:#8b989f}
 @media(max-width:600px){.run-token-usage{flex-basis:100%;margin-left:25px}}
 @media(max-width:800px){.chat-layout{max-width:100%}}

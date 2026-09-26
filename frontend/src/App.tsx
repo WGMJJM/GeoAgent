@@ -730,9 +730,9 @@ export function TokenUsageSummary({ usage }: { usage?: TokenUsage | null }) {
   const reported = usage.reported_calls === usage.model_calls;
   const input = reported ? usage.reported_input_tokens : usage.local_input_tokens;
   const output = reported ? usage.reported_output_tokens : usage.local_output_tokens;
-  const format = (value: number) => value.toLocaleString("zh-CN");
+  const format = (value: number) => `${(value / 1000).toFixed(2)}k`;
   const source = reported ? "模型返回的实际用量" : "本地分词估算，不等同于账单用量";
-  return <span className="run-token-usage" title={`${source}；累计 ${usage.model_calls} 次模型调用（包含子运行），每轮输入重复计入。每次模型响应结束后更新。`}>Token{reported ? "" : "（本地估算）"} {format(input + output)}<span className="run-token-breakdown">（输入 {format(input)} / 输出 {format(output)}）</span></span>;
+  return <span className="run-token-usage" title={`${source}；输入 ${input.toLocaleString("zh-CN")} tokens，输出 ${output.toLocaleString("zh-CN")} tokens；累计 ${usage.model_calls} 次模型调用（包含子运行），每轮输入重复计入。每次模型响应结束后更新。`}>输入 {format(input)} · 输出 {format(output)}{reported ? "" : "（本地估算）"}</span>;
 }
 
 export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage }: { events: Event[]; durationMs: number; phase: ExecutionPhase; tokenUsage?: TokenUsage | null }) {
