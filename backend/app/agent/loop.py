@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -32,7 +33,7 @@ from app.execution.tools import (
     ToolRegistry,
     validate_arguments,
 )
-from app.models import ModelAdapter, ModelRequest
+from app.models import ModelAdapter, ModelRequest, ModelResponse
 from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
 from app.state import StateStore
@@ -264,7 +265,24 @@ class AgentLoop:
                         {"messages": model_request.messages, "tools": model_request.tools},
                         ensure_ascii=False, separators=(",", ":"),
                     ))
-                    response = await model.complete(model_request)
+                    await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在生成本轮回复",
+                                          agent_id=current.agent_id, payload={"turn": current.turn_count})
+                    content_parts = []
+                    async with aclosing(model.stream(model_request)) as stream:
+                        async for chunk in stream:
+                            if chunk.content:
+                                content_parts.append(chunk.content)
+                                if on_model_delta is not None:
+                                    await on_model_delta(chunk.content)
+                            if chunk.done:
+                                response = ModelResponse(
+                                    content="".join(content_parts), tool_calls=chunk.tool_calls,
+                                    input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
+                                    model=chunk.model, finish_reason=chunk.finish_reason,
+                                )
+                                break
+                    if response is None:
+                        raise ValueError("模型流未返回结束片段。")
             except Exception:
                 return await self._finish(
                     current,
@@ -570,8 +588,6 @@ class AgentLoop:
                         trace_id=current.id,
                     ),
                 )
-            if on_model_delta is not None:
-                await on_model_delta(answer)
             return await self._finish(
                 current,
                 request=request,

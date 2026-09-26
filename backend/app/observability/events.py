@@ -13,6 +13,7 @@ class EventType(StrEnum):
     INTENT_RESOLVED = "IntentResolved"
     DECISION_MADE = "DecisionMade"
     TOKEN_USAGE_UPDATED = "TokenUsageUpdated"
+    MODEL_RESPONSE_STARTED = "ModelResponseStarted"
     SUBTASK_CREATED = "SubTaskCreated"
     SUBAGENT_SPAWNED = "SubAgentSpawned"
     TOOL_STARTED = "ToolStarted"

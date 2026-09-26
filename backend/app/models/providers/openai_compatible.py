@@ -68,48 +68,44 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 model=self.config.model,
                 messages=request.messages,
                 tools=request.tools or None if _capability(self, "supports_tools", True) else None,
+                response_format=request.response_format if _capability(self, "supports_json_object", True) or _capability(self, "supports_json_schema", False) else None,
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
                 stream=True,
+                stream_options={"include_usage": True},
             )
-            async for chunk in stream:
-                model = getattr(chunk, "model", None) or model
-                usage = getattr(chunk, "usage", None)
-                if usage is not None:
-                    input_tokens = usage.prompt_tokens or 0
-                    output_tokens = usage.completion_tokens or 0
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                finish_reason = getattr(choice, "finish_reason", None) or finish_reason
-                delta = choice.delta
-                content = delta.content or ""
-                if content:
-                    yield ModelStreamChunk(content=content, model=model)
-                for raw_call in delta.tool_calls or []:
-                    index = raw_call.index if raw_call.index is not None else len(tool_calls)
-                    call = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                    if raw_call.id:
-                        call["id"] = raw_call.id
-                    if raw_call.type:
-                        call["type"] = raw_call.type
-                    if raw_call.function:
-                        if raw_call.function.name:
-                            call["function"]["name"] += raw_call.function.name
-                        if raw_call.function.arguments:
-                            call["function"]["arguments"] += raw_call.function.arguments
-                # finish_reason 是模型协议层的 terminal signal。收到它后立即
-                # 发布聚合后的 ToolCall，避免 provider 在尾部不关闭时让 Run 永久等待。
-                if finish_reason:
-                    yield ModelStreamChunk(
-                        tool_calls=[tool_calls[index] for index in sorted(tool_calls)],
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        model=model,
-                        finish_reason=finish_reason,
-                        done=True,
-                    )
-                    return
+            try:
+                async for chunk in stream:
+                    model = getattr(chunk, "model", None) or model
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        input_tokens = usage.prompt_tokens
+                        output_tokens = usage.completion_tokens
+                    if chunk.choices:
+                        choice = chunk.choices[0]
+                        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+                        delta = choice.delta
+                        content = delta.content or ""
+                        if content:
+                            yield ModelStreamChunk(content=content, model=model)
+                        for raw_call in delta.tool_calls or []:
+                            index = raw_call.index if raw_call.index is not None else len(tool_calls)
+                            call = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                            if raw_call.id:
+                                call["id"] = raw_call.id
+                            if raw_call.type:
+                                call["type"] = raw_call.type
+                            if raw_call.function:
+                                if raw_call.function.name:
+                                    call["function"]["name"] += raw_call.function.name
+                                if raw_call.function.arguments:
+                                    call["function"]["arguments"] += raw_call.function.arguments
+                    # include_usage 的统计包通常位于 finish_reason 之后，choices 为空。
+                    # 正文即时推送，决策聚合到统计包或正常 EOF；仍受现有请求超时约束。
+                    if finish_reason and usage is not None:
+                        break
+            finally:
+                await stream.close()
         # 某些兼容服务没有发送 finish_reason，但正常关闭了流；仍然给上层
         # 一个明确 terminal chunk，兼容旧服务，同时不会把“正文已到齐”当作结束。
         yield ModelStreamChunk(

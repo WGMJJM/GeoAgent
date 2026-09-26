@@ -22,7 +22,7 @@ from app.core.models import (
 )
 from app.core.tokens import estimate_tokens
 from app.execution.tools import ToolExecutor, ToolRegistry
-from app.models import ModelAdapter, ModelRequest, ModelResponse
+from app.models import ModelAdapter, ModelRequest, ModelResponse, ModelStreamChunk
 from app.observability import TraceRecorder
 from app.run.lifecycle import record_approval_decision
 from app.state import StateStore
@@ -98,12 +98,75 @@ def _assert_tool_visibility(loop, request):
     return visibility
 
 
-async def _run(loop: AgentLoop, store: StateStore, text: str):
+async def _run(loop: AgentLoop, store: StateStore, text: str, on_model_delta=None):
     conversation = store.create_conversation("测试")
     request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input=text)
     store.save_message(Message(conversation_id=conversation.id, role="user", content=text))
     prepared = await loop.prepare_request(request)
-    return request, await loop.run(request, prepared=prepared)
+    return request, await loop.run(request, prepared=prepared, on_model_delta=on_model_delta)
+
+
+@pytest.mark.asyncio
+async def test_streamed_tool_batch_waits_for_terminal_and_does_not_duplicate_answer(tmp_path):
+    fragments = []
+
+    class StreamingAdapter(SequenceAdapter):
+        async def complete(self, request):
+            raise AssertionError("不能另发非流式请求")
+
+        async def stream(self, request):
+            self.requests.append(request)
+            run = store.list_runs()[0]
+            if len(self.requests) == 1:
+                yield ModelStreamChunk(content="先查询")
+                assert fragments == ["先查询"]
+                assert store.get_run(run.id).tool_call_count == 0
+                yield ModelStreamChunk(content="数据。")
+                assert store.get_run(run.id).tool_call_count == 0
+                yield ModelStreamChunk(done=True, finish_reason="tool_calls", input_tokens=100, output_tokens=10,
+                                       tool_calls=[{"id": "list", "function": {"name": "dataset.list", "arguments": "{}"}}])
+            else:
+                assert store.get_run(run.id).tool_call_count == 1
+                yield ModelStreamChunk(content="没有")
+                yield ModelStreamChunk(content="数据。")
+                yield ModelStreamChunk(done=True, finish_reason="stop", input_tokens=200, output_tokens=20)
+
+    adapter = StreamingAdapter()
+    store, loop = _loop(tmp_path, adapter)
+
+    async def capture(content):
+        fragments.append(content)
+
+    _, result = await _run(loop, store, "查看数据", capture)
+    assert result.status is AgentResultStatus.SUCCESS
+    assert result.summary == "没有数据。"
+    assert fragments == ["先查询", "数据。", "没有", "数据。"]
+    run = store.get_run(result.trace_id)
+    assert run.token_usage.reported_input_tokens == 300
+    assert run.token_usage.reported_output_tokens == 30
+    assert run.token_usage.model_calls == 2
+    assert sum(event.event_type == "ModelResponseStarted" for event in store.list_events(run.id)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["connection", "missing_terminal"])
+async def test_incomplete_stream_does_not_execute_tools_or_report_success(tmp_path, failure):
+    class BrokenAdapter(SequenceAdapter):
+        async def stream(self, request):
+            self.requests.append(request)
+            yield ModelStreamChunk(content="未完成", tool_calls=[{"id": "list", "function": {"name": "dataset.list", "arguments": "{}"}}])
+            if failure == "connection":
+                raise RuntimeError("断流")
+
+    adapter = BrokenAdapter()
+    store, loop = _loop(tmp_path, adapter)
+    _, result = await _run(loop, store, "查看数据")
+    run = store.get_run(result.trace_id)
+    assert result.status is AgentResultStatus.FAILED
+    assert result.error == "MODEL_UNAVAILABLE"
+    assert run.tool_call_count == 0
+    assert run.token_usage is None
+    assert len(adapter.requests) == 1
 
 
 @pytest.mark.asyncio
