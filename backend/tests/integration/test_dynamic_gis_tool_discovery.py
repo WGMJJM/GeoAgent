@@ -166,7 +166,8 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
         assert application.agent_loop._tool_context_tokens(model_request.tools, visibility["cached"]) <= 2500
 
 
-def test_reprojection_discovery_keeps_slope_available_for_real_execution(application):
+@pytest.mark.parametrize("attempt_slope_first", [False, True])
+def test_reprojection_reuses_called_slope_or_restores_unused_card(application, attempt_slope_first):
     user_id = "gis-slope-cache-user"
     path = application.workspace.for_user(user_id).resolve("input/dem.tif")
     with rasterio.open(path, "w", driver="GTiff", height=8, width=8, count=1, dtype="float32",
@@ -184,18 +185,35 @@ def test_reprojection_discovery_keeps_slope_available_for_real_execution(applica
             if turn == 1:
                 return ModelResponse(tool_calls=[call("tool.search", {"query": "坡度", "english_query": "slope"}, "find_slope")])
             if turn == 2:
+                if attempt_slope_first:
+                    return ModelResponse(tool_calls=[call("raster.slope", {"dataset_id": source.id}, "initial_slope")])
                 return ModelResponse(tool_calls=[call("tool.search", {"query": "栅格重投影", "english_query": "raster reproject"}, "find_projection")])
             if turn == 3:
+                if attempt_slope_first:
+                    observation = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "initial_slope"))
+                    assert observation["error"]["code"] == "CRS_UNIT_MISMATCH"
+                    return ModelResponse(tool_calls=[call("tool.search", {"query": "栅格重投影", "english_query": "raster reproject"}, "find_projection")])
                 return ModelResponse(tool_calls=[call("raster.reproject", {"dataset_id": source.id, "target_crs": "EPSG:32650"}, "project")])
             if turn == 4:
-                assert "raster.slope" in {item["function"]["name"] for item in request.tools}
+                status = next(item for item in request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX))
+                visibility = json.loads(status["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
+                if attempt_slope_first:
+                    assert "raster.slope" in visibility["callable"]
+                    return ModelResponse(tool_calls=[call("raster.reproject", {"dataset_id": source.id, "target_crs": "EPSG:32650"}, "project")])
+                assert "raster.slope" not in visibility["callable"]
+                assert "raster.slope" in {item["name"] for item in visibility["cached"]}
+                return ModelResponse(tool_calls=[call("tool.search", {"query": "raster.slope"}, "restore_slope")])
+            if turn == 5:
                 status = next(item for item in request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX))
                 visibility = json.loads(status["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
                 assert "raster.slope" in visibility["callable"]
                 assert "raster.slope" not in {item["name"] for item in visibility["cached"]}
+                if not attempt_slope_first:
+                    restored = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "restore_slope"))
+                    assert restored["output"]["source"] == "run_cache"
                 observation = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "project"))
                 return ModelResponse(tool_calls=[call("raster.slope", {"dataset_id": observation["output"]["id"]}, "slope")])
-            return ModelResponse(content="已重投影并计算坡度，没有重复发现坡度工具。")
+            return ModelResponse(content="已复用或从卡片恢复坡度工具，完成真实坡度计算。")
 
     adapter = SlopeAdapter(source.id)
     application.agent_loop.model_provider = lambda _profile: adapter
@@ -209,10 +227,14 @@ def test_reprojection_discovery_keeps_slope_available_for_real_execution(applica
 
     result = asyncio.run(execute())
     assert result.status is AgentResultStatus.SUCCESS
-    assert application.store.get_run(result.trace_id).tool_call_count == 4
+    assert application.store.get_run(result.trace_id).tool_call_count == 5
+    assert len(adapter.requests) == 6
     calls = application.store.list_tool_calls(result.trace_id)
-    assert [item[0].name for item in calls] == ["raster.reproject", "raster.slope"]
-    assert all(item[2].status.value == "SUCCESS" for item in calls)
+    assert [item[0].name for item in calls] == (["raster.slope"] if attempt_slope_first else []) + ["raster.reproject", "raster.slope"]
+    assert all(item[2].status.value == "SUCCESS" for item in calls[-2:])
+    checkpoint = application.store.latest_checkpoint(result.trace_id)
+    assert set(checkpoint.state["used_tool_names"]) == {"raster.reproject", "raster.slope"}
+    assert set(checkpoint.state["activated_tool_names"]) == {"raster.reproject", "raster.slope"}
     output = application.store.get_dataset_for_user(calls[-1][2].datasets[0], user_id)
     assert output.crs.authority == "EPSG:32650"
     assert application.workspace.for_user(user_id).resolve(output.path, allow_missing=False).exists()

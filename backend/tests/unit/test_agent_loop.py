@@ -242,6 +242,146 @@ async def test_search_injects_deferred_tool_on_next_turn_and_executes_it(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("selected_count", [1, 2])
+@pytest.mark.parametrize("first_result", ["success", "failure", "invalid_arguments"])
+async def test_unused_candidates_become_cards_and_used_schemas_survive_resume(tmp_path, selected_count, first_result):
+    names = [f"test.candidate_{index}" for index in range(3)]
+
+    def call(name, arguments, call_id):
+        return {"id": call_id, "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[call("tool.search", {"query": "primary_marker", "english_query": "secondary_marker"}, "find")]),
+        ModelResponse(tool_calls=[call(name, {} if first_result == "invalid_arguments" else {"value": 1}, f"selected_{index}")
+                                  for index, name in enumerate(names[:selected_count])]),
+        ModelResponse(tool_calls=[call("agent.ask_user", {"question": "继续使用已选择工具吗？"}, "pause")]),
+        ModelResponse(tool_calls=[call(names[0], {"value": 2}, "reuse")]),
+        ModelResponse(content="已直接复用完整 Schema，未调用候选保留卡片。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    executed = []
+
+    def execute(arguments, context):
+        executed.append(context.call_id)
+        if first_result == "failure" and arguments["value"] == 1:
+            raise ValueError("模拟执行失败")
+        return {"output": {"value": arguments["value"]}}
+
+    for index, name in enumerate(names):
+        loop.registry.register(ToolMetadata(name=name, description="primary_marker" if index < 2 else "secondary_marker",
+                                           input_schema={"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}),
+                               execute, deferred=True)
+    request, waiting = await _run(loop, store, "查找候选后只使用选中的工具")
+    assert waiting.error == "WAITING_USER"
+    assert set(names) <= set(_assert_tool_visibility(loop, adapter.requests[1])["callable"])
+    selected = set(names[:selected_count])
+    checkpoint = store.latest_checkpoint(waiting.trace_id)
+    assert set(checkpoint.state["used_tool_names"]) == selected
+    assert set(checkpoint.state["activated_tool_names"]) == selected
+    visibility = _assert_tool_visibility(loop, adapter.requests[2])
+    assert selected <= set(visibility["callable"])
+    assert set(names) - selected == {item["name"] for item in visibility["cached"]}
+    observations = [json.loads(item["content"]) for item in adapter.requests[2].messages
+                    if str(item.get("tool_call_id", "")).startswith("selected_")]
+    assert {item["status"] for item in observations} == ({"SUCCESS"} if first_result == "success" else {"FAILED"})
+
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(waiting.trace_id)),
+                            resume_from=checkpoint, continuation={"type": "user_input", "content": "继续"})
+    assert result.status is AgentResultStatus.SUCCESS
+    assert executed == ([] if first_result == "invalid_arguments" else [f"{result.trace_id}:selected_{index}" for index in range(selected_count)]) + [f"{result.trace_id}:reuse"]
+    assert len(adapter.requests) == 5
+    assert store.get_run(result.trace_id).tool_call_count == selected_count + 3
+    assert selected <= set(_assert_tool_visibility(loop, adapter.requests[3])["callable"])
+    for model_request in adapter.requests:
+        _assert_tool_visibility(loop, model_request)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_tool_batch_keeps_schemas_until_all_saved_calls_finish(tmp_path):
+    names = [f"test.batch_{index}" for index in range(3)]
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"batch_primary","english_query":"batch_secondary"}'}}]),
+        ModelResponse(tool_calls=[{"id": f"execute_{index}", "function": {"name": name, "arguments": "{}"}} for index, name in enumerate(names[:2])]),
+        ModelResponse(content="已恢复剩余调用，未用候选已降为卡片。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    executed = []
+    for index, name in enumerate(names):
+        loop.registry.register(ToolMetadata(name=name, description="batch_primary" if index < 2 else "batch_secondary", input_schema={"type": "object"}),
+                               lambda _args, context: executed.append(context.call_id) or {"output": "ok"}, deferred=True)
+    conversation = store.create_conversation("批次恢复", user_id="test-user")
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="调用两个候选")
+    prepared = await loop.prepare_request(request)
+    original = loop._save_checkpoint
+
+    def interrupt_after_first_call(*args, **kwargs):
+        original(*args, **kwargs)
+        pending = kwargs.get("pending_tool_calls", [])
+        if args[4] == "tool_observation" and pending and pending[0][0] == "execute_1":
+            raise RuntimeError("模拟批次中断")
+
+    loop._save_checkpoint = interrupt_after_first_call
+    with pytest.raises(RuntimeError, match="批次中断"):
+        await loop.run(request, prepared=prepared)
+    checkpoint = store.latest_checkpoint(prepared.run.id)
+    assert set(checkpoint.state["activated_tool_names"]) == set(names)
+    assert checkpoint.state["used_tool_names"] == [names[0]]
+    assert checkpoint.state["pending_tool_calls"][0][0] == "execute_1"
+    loop._save_checkpoint = original
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(prepared.run.id)),
+                            resume_from=checkpoint, continuation={"type": "technical_resume"})
+    assert result.status is AgentResultStatus.SUCCESS
+    assert executed == [f"{result.trace_id}:execute_0", f"{result.trace_id}:execute_1"]
+    assert len(adapter.requests) == 3
+    assert store.get_run(result.trace_id).tool_call_count == 3
+    visibility = _assert_tool_visibility(loop, adapter.requests[2])
+    assert set(names[:2]) <= set(visibility["callable"])
+    assert {item["name"] for item in visibility["cached"]} == {names[2]}
+
+
+@pytest.mark.asyncio
+async def test_unused_card_restores_from_cache_without_research_or_same_batch_execution(tmp_path):
+    names = [f"test.restore_{index}" for index in range(3)]
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"restore_primary","english_query":"restore_secondary"}'}}]),
+        ModelResponse(tool_calls=[{"id": "first", "function": {"name": names[0], "arguments": "{}"}}]),
+        ModelResponse(tool_calls=[
+            {"id": "restore", "function": {"name": "tool.search", "arguments": json.dumps({"query": names[2]})}},
+            {"id": "premature", "function": {"name": names[2], "arguments": "{}"}},
+        ]),
+        ModelResponse(tool_calls=[{"id": "second", "function": {"name": names[2], "arguments": "{}"}}]),
+        ModelResponse(content="只恢复卡片，不重复语义检索。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    executed = []
+    for index, name in enumerate(names):
+        loop.registry.register(ToolMetadata(name=name, description="restore_primary" if index < 2 else "restore_secondary", input_schema={"type": "object"}),
+                               lambda _args, context: executed.append(context.call_id) or {"output": "ok"}, deferred=True)
+    searches = []
+    original_search = loop.catalog.tool_search
+
+    def record_search(arguments, context):
+        searches.append(arguments)
+        return original_search(arguments, context)
+
+    loop.catalog.tool_search = record_search
+    _, result = await _run(loop, store, "先使用一个工具，再恢复另一个候选")
+    assert result.status is AgentResultStatus.SUCCESS
+    assert searches == [{"query": "restore_primary", "english_query": "restore_secondary"}]
+    assert {item["name"] for item in _assert_tool_visibility(loop, adapter.requests[2])["cached"]} == set(names[1:])
+    observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[3].messages if item["role"] == "tool"}
+    assert observations["restore"]["output"]["source"] == "run_cache"
+    assert observations["restore"]["output"]["already_callable"] is False
+    assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
+    assert executed == [f"{result.trace_id}:first", f"{result.trace_id}:second"]
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert set(checkpoint.state["used_tool_names"]) == {names[0], names[2]}
+    assert set(checkpoint.state["activated_tool_names"]) == {names[0], names[2]}
+    for model_request in adapter.requests:
+        _assert_tool_visibility(loop, model_request)
+
+
+@pytest.mark.asyncio
 async def test_visible_schema_cache_query_reports_availability_without_search_or_execution(tmp_path):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
@@ -468,7 +608,7 @@ async def test_interrupted_search_restores_union_without_double_counting(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_later_search_preserves_prior_tools_and_empty_search_does_not_clear_them(tmp_path):
+async def test_later_search_preserves_used_schema_and_empty_search_keeps_unused_card(tmp_path):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "search_buffer", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
         ModelResponse(
@@ -501,8 +641,10 @@ async def test_later_search_preserves_prior_tools_and_empty_search_does_not_clea
     )
     empty_store, empty_loop = _loop(tmp_path / "empty", empty_adapter)
     _, empty_result = await _run(empty_loop, empty_store, "查询能力")
-    assert "vector.buffer" in {tool["function"]["name"] for tool in empty_adapter.requests[2].tools}
-    assert empty_store.latest_checkpoint(empty_result.trace_id).state["activated_tool_names"] == ["vector.buffer"]
+    assert "vector.buffer" not in {tool["function"]["name"] for tool in empty_adapter.requests[2].tools}
+    assert {item["name"] for item in _assert_tool_visibility(empty_loop, empty_adapter.requests[2])["cached"]} == {"vector.buffer"}
+    assert empty_store.latest_checkpoint(empty_result.trace_id).state["activated_tool_names"] == []
+    assert empty_store.latest_checkpoint(empty_result.trace_id).state["used_tool_names"] == []
 
 
 @pytest.mark.asyncio
@@ -554,7 +696,8 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
         _assert_tool_visibility(loop, request)
     checkpoint = store.latest_checkpoint(result.trace_id)
     assert set(checkpoint.state["discovered_tool_names"]) == set(names)
-    assert len(checkpoint.state["activated_tool_names"]) == 8
+    assert checkpoint.state["activated_tool_names"] == [names[0]]
+    assert checkpoint.state["used_tool_names"] == [names[0]]
     raw = next(item for item in saved.state["protocol_messages"] if item.get("tool_call_id") == "search_0")
     assert "description" in json.loads(raw["content"])["output"]["tools"][0]
     assert observations["search_8"]["output"]["tools"] == [{"name": names[8]}]
@@ -569,7 +712,7 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
     context = loop._discovery_context(AgentRequest(conversation_id="test", user_id="test-user", user_input="test"), loop.services_factory("test-user"))
     full_definitions = loop._tool_definitions(context, {name})
     loop.settings.tool_context_tokens = loop._tool_context_tokens(full_definitions, []) + budget_delta
-    definitions, cards, active = loop._tool_context(context, [name])
+    definitions, cards, active = loop._tool_context(context, [name], {name})
     assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
     if budget_delta == 0:
         assert active == {name}
@@ -596,7 +739,7 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
         }), lambda *_: {}, deferred=True)
     loop.registry.register(ToolMetadata(name="test.forbidden", description="Unavailable", required_scopes=["system.admin"]), lambda *_: {}, deferred=True)
     context = loop._discovery_context(AgentRequest(conversation_id="test", user_id="test-user", user_input="test"), loop.services_factory("test-user"))
-    definitions, cards, active = loop._tool_context(context, [*names, "test.forbidden"])
+    definitions, cards, active = loop._tool_context(context, [*names, "test.forbidden"], set(names) | {"test.forbidden"})
     assert cards and active
     visible = active | {item["name"] for item in cards}
     assert len(visible) <= 8
@@ -675,7 +818,8 @@ async def test_checkpoint_restore_revalidates_current_environment(tmp_path):
 
     waiting = await loop.run(request, prepared=await loop.prepare_request(request))
     checkpoint = store.latest_checkpoint(waiting.trace_id)
-    assert checkpoint.state["activated_tool_names"] == ["vector.buffer"]
+    assert checkpoint.state["activated_tool_names"] == []
+    assert checkpoint.state["discovered_tool_names"] == ["vector.buffer"]
     services.pop("vectors")
     store.save_message(Message(conversation_id=conversation.id, role="user", content="采用25米"))
     resumed_request = request.model_copy(update={"user_input": "采用25米"})
@@ -731,6 +875,8 @@ async def test_approval_pauses_and_resumes_saved_call_once(tmp_path, approved_by
     assert store.get_run(waiting.trace_id).status is RunStatus.WAITING_APPROVAL
     checkpoint = store.latest_checkpoint(waiting.trace_id)
     pending = checkpoint.state["pending_approvals"][0]
+    assert checkpoint.state["used_tool_names"] == ["test.sensitive_write"]
+    assert checkpoint.state["activated_tool_names"] == ["test.sensitive_write"]
     assert pending["tool_name"] == "test.sensitive_write"
     assert pending["arguments"] == {"value": 7}
     assert store.get_tool_call(pending["call_id"]) is None

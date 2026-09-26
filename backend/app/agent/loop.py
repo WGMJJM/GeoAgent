@@ -187,6 +187,7 @@ class AgentLoop:
         messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
         activated_names = self._restore_activated_names(resume_from, request, run)
         discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names))) if resume_from else []
+        used_names = set(resume_from.state.get("used_tool_names", [])) if resume_from else set()
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
@@ -232,7 +233,7 @@ class AgentLoop:
         for turn in range(remaining_turns + bool(resume_pending)):
             services = self._execution_services(request, run)
             runtime_context = self._discovery_context(request, services, run)
-            tools, cards, activated_names = self._tool_context(runtime_context, discovered_names)
+            tools, cards, activated_names = self._tool_context(runtime_context, discovered_names, activated_names)
             model_tools = tools if tool_call_count < self.settings.max_tool_calls else []
             model_cards = cards if tool_call_count < self.settings.max_tool_calls else []
             current = self.store.get_run(run.id) or run
@@ -308,7 +309,7 @@ class AgentLoop:
                     self._save_checkpoint(request, current, messages, cursor_id, "tool_pending", activated_names,
                                           pending_approvals, pending_tool_calls=pending[index:],
                                           batch_activated_names=permitted_this_batch, batch_next_activations=next_activations,
-                                          discovered_names=discovered_names)
+                                          discovered_names=discovered_names, used_names=used_names)
 
                     if not within_budget:
                         pass
@@ -412,6 +413,9 @@ class AgentLoop:
                                     "当前用户权限或运行环境不允许使用该工具。",
                                 )
                             else:
+                                if self.registry.is_deferred(name):
+                                    used_names.add(name)
+                                    _remember_tools(discovered_names, [name])
                                 problem = validate_arguments(arguments, registered.metadata.input_schema)
                                 if problem:
                                     result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
@@ -427,8 +431,6 @@ class AgentLoop:
                                         active_tool_names=allowed_now,
                                         discovery_context=execution_context,
                                     )
-                                    if self.registry.is_deferred(name):
-                                        _remember_tools(discovered_names, [name])
                                     if result.error and result.error.code == "APPROVAL_REQUIRED":
                                         approval_id = result.error.details.get("approval_id")
                                         if approval_id:
@@ -450,12 +452,13 @@ class AgentLoop:
                     self._save_checkpoint(request, current, messages, cursor_id, "tool_observation", activated_names,
                                           pending_approvals, pending_tool_calls=remaining,
                                           batch_activated_names=permitted_this_batch, batch_next_activations=next_activations,
-                                          discovered_names=discovered_names)
+                                          discovered_names=discovered_names, used_names=used_names)
                     if result.error and result.error.code == "SIDE_EFFECT_UNCERTAIN":
                         execution_uncertain = True
                         break
-                if next_activations is not None:
-                    _, _, activated_names = self._tool_context(runtime_context, discovered_names)
+                if not remaining:
+                    # 新检索候选先获得一次完整 Schema 选择机会；批次结束后仅续留已调用工具。
+                    _, _, activated_names = self._tool_context(runtime_context, discovered_names, used_names | (next_activations or set()))
                 self._save_checkpoint(
                     request,
                     current,
@@ -466,6 +469,9 @@ class AgentLoop:
                     pending_approvals,
                     pending_tool_calls=remaining,
                     discovered_names=discovered_names,
+                    used_names=used_names,
+                    batch_activated_names=permitted_this_batch if remaining else None,
+                    batch_next_activations=next_activations if remaining else None,
                 )
                 await self.trace.emit(
                     current.id,
@@ -553,8 +559,8 @@ class AgentLoop:
             ),
         )
 
-    def _tool_context(self, context: ToolDiscoveryContext, discovered_names: list[str]):
-        """按最近发现/使用顺序分配有限上下文，发现记录不随可见 Schema 淘汰。"""
+    def _tool_context(self, context: ToolDiscoveryContext, discovered_names: list[str], schema_names: set[str] | frozenset[str]):
+        """新候选和已调用工具可提供 Schema，其他发现记录仅提供卡片。"""
         definitions = self._tool_definitions(context)
         cards = []
         if self._tool_context_tokens(definitions, cards) > self.settings.tool_context_tokens:
@@ -564,7 +570,7 @@ class AgentLoop:
         for name in candidates:
             metadata = self.registry.get(name).metadata
             definition = _tool_definition(name, metadata.description, metadata.input_schema)
-            if self._tool_context_tokens([*definitions, definition], cards) <= self.settings.tool_context_tokens:
+            if name in schema_names and self._tool_context_tokens([*definitions, definition], cards) <= self.settings.tool_context_tokens:
                 definitions.append(definition)
             else:
                 card = self.catalog.card(name).public()
@@ -821,6 +827,7 @@ class AgentLoop:
         batch_activated_names=None,
         batch_next_activations=None,
         discovered_names=None,
+        used_names=None,
     ) -> None:
         protocol_messages = [
             item
@@ -840,6 +847,7 @@ class AgentLoop:
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
                     "discovered_tool_names": discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else []),
+                    "used_tool_names": sorted(used_names) if used_names is not None else (previous.state.get("used_tool_names", []) if previous else []),
                     "pending_approvals": pending_approvals,
                     "pending_tool_calls": pending_tool_calls,
                     "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),

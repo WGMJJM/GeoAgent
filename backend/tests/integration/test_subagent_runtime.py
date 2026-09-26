@@ -644,8 +644,8 @@ async def test_resume_tightened_environment_removes_child_activation_and_blocks_
         plan,
         {
             "a": [
-                call("tool.search", {"query": "buffer"}, "search"),
-                call("agent.ask_user", {"question": "距离是多少？"}, "question"),
+                ModelResponse(tool_calls=call("tool.search", {"query": "buffer"}, "search").tool_calls
+                              + call("agent.ask_user", {"question": "距离是多少？"}, "question").tool_calls),
                 call("vector.buffer", {"dataset_id": source.id, "distance": 100}, "buffer"),
                 ModelResponse(content="我自称完成"),
             ]
@@ -668,7 +668,7 @@ async def test_resume_tightened_environment_removes_child_activation_and_blocks_
     assert result.status is AgentResultStatus.FAILED
     assert app.store.latest_checkpoint(child.id).state["activated_tool_names"] == []
     assert "vector.buffer" not in {
-        tool["function"]["name"] for tool in model.requests["a"][2].tools
+        tool["function"]["name"] for tool in model.requests["a"][1].tools
     }
     assert app.store.list_datasets_for_user("owner") == [source]
     assert (
