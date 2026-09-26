@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import geopandas as gpd
+import numpy as np
+import pytest
+import rasterio
+from rasterio.transform import from_origin
 from shapely.geometry import Point
 
-from app.core.models import AgentRequest, Message
+from app.core.models import AgentRequest, AgentResultStatus, Message
 from app.models import ModelAdapter, ModelRequest, ModelResponse
 
 
@@ -76,3 +81,76 @@ def test_search_activates_and_runs_real_vector_buffer(application):
     assert output is not None
     assert output.source_dataset_ids == [dataset.id]
     assert workspace.resolve(output.path, allow_missing=False).exists()
+
+
+@pytest.mark.parametrize("needs_statistics", [False, True])
+def test_inspection_can_answer_directly_or_discover_only_missing_statistics(application, needs_statistics):
+    """用可预测模型验证两条执行路径与提示契约，不声称验证真实 LLM 的选择。"""
+    user_id = "gis-inspection-user"
+    path = application.workspace.for_user(user_id).resolve("input/dem.tif")
+    values = np.arange(64, dtype="float32").reshape(8, 8)
+    values[0, 0] = -9999
+    with rasterio.open(path, "w", driver="GTiff", height=8, width=8, count=1,
+                       dtype="float32", crs="EPSG:4326", transform=from_origin(114, 23, 0.002, 0.002),
+                       nodata=-9999) as raster:
+        raster.write(values, 1)
+    dataset = application.execution_services(user_id)["registry"].register_path(path, name="dem")
+
+    def call(name, arguments, call_id):
+        return {"id": call_id, "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    responses = [ModelResponse(tool_calls=[call("dataset.inspect", {"dataset_id": dataset.id}, "inspect")])]
+    if needs_statistics:
+        responses.extend([
+            ModelResponse(content="用户要求平均高程，当前检查结果不足以给出像元统计，需要发现栅格统计能力。", tool_calls=[
+                call("tool.search", {"query": "栅格统计 最小值 最大值"}, "chinese"),
+                call("tool.search", {"query": "raster statistics min max"}, "english"),
+            ]),
+            ModelResponse(tool_calls=[call("raster.inspect", {"dataset_id": dataset.id}, "statistics")]),
+        ])
+    responses.append(ModelResponse(content="已取得所需统计摘要。" if needs_statistics else "这是一份 GeoTIFF 栅格数据。"))
+
+    class InspectionAdapter(ModelAdapter):
+        supports_tools = True
+
+        def __init__(self):
+            self.requests = []
+
+        async def complete(self, request):
+            self.requests.append(request)
+            return responses.pop(0)
+
+    adapter = InspectionAdapter()
+    application.agent_loop.model_provider = lambda _profile: adapter
+    conversation = application.store.create_conversation("按目标检查数据", user_id=user_id)
+    request = AgentRequest(conversation_id=conversation.id, user_id=user_id, dataset_ids=[dataset.id],
+                           user_input="查看这个 DEM 的平均高程" if needs_statistics else "查看这个是什么数据")
+    application.store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
+
+    async def execute():
+        prepared = await application.agent_loop.prepare_request(request)
+        return await application.agent_loop.run(request, prepared=prepared)
+
+    result = asyncio.run(execute())
+    assert result.status is AgentResultStatus.SUCCESS
+    assert application.store.get_run(result.trace_id).tool_call_count == (4 if needs_statistics else 1)
+    calls = application.store.list_tool_calls(result.trace_id)
+    assert [item[0].name for item in calls] == (["dataset.inspect", "raster.inspect"] if needs_statistics else ["dataset.inspect"])
+    assert all(item[2].status.value == "SUCCESS" for item in calls)
+    prompt = adapter.requests[0].messages[0]["content"]
+    assert "当前工具能够满足目标且参数齐全时直接调用" in prompt
+    assert "不要在尚未看到检查结果时" in prompt
+    assert "缺少必须由用户提供的参数时使用 agent.ask_user" in prompt
+    assert "证据足够时立即回答" in prompt
+    assert "权限不足或临时执行失败不等于缺少能力" in prompt
+    assert "未检索到或未开放某项能力不代表项目中不存在" in prompt
+    if needs_statistics:
+        tool_definitions = adapter.requests[2].tools
+        assert sum(item["function"]["name"] == "raster.inspect" for item in tool_definitions) == 1
+        assert "采样统计" in next(item["function"]["description"] for item in tool_definitions if item["function"]["name"] == "raster.inspect")
+        statistics = calls[-1][2].output["statistics"]
+        assert statistics["valid_cell_count"] == 63
+        assert statistics["min"] == 1
+        assert statistics["max"] == 63
+        assert statistics["mean"] == 32
+    assert len(adapter.requests) == (4 if needs_statistics else 2)

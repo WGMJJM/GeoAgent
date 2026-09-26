@@ -232,6 +232,18 @@ def test_registered_tools_are_split_into_two_resident_and_deferred_capabilities(
     assert all(registry.get(name).metadata.required_envs for name in registry.deferred_names())
 
 
+@pytest.mark.parametrize("query", ["栅格统计 最小值 最大值", "raster statistics min max"])
+def test_raster_sample_statistics_are_discoverable_with_honest_limits(query):
+    registry = ToolRegistry()
+    register_gis_tools(registry)
+    cards = ToolCatalog(registry).search(query, _context())
+    assert cards[0].name == "raster.inspect"
+    assert "first-band sampled statistics" in cards[0].description
+    assert "512x512" in cards[0].description
+    assert "no histogram" in cards[0].description
+    assert registry.is_deferred("raster.inspect")
+
+
 def test_tool_search_protocol_is_structured_and_capped_at_two():
     function = TOOL_SEARCH_DEFINITION["function"]
     assert function["name"] == "tool.search"
@@ -243,5 +255,8 @@ def test_tool_search_protocol_is_structured_and_capped_at_two():
     assert "English" in query["description"]
     assert "Chinese or English" in function["description"]
     assert "merged" in function["description"]
+    assert "Use provided tools first" in function["description"]
+    assert "necessary capability gap" in function["description"]
+    assert "not automatically executed" in function["description"]
     assert "granted_scopes" not in function["parameters"]["properties"]
     assert "available_envs" not in function["parameters"]["properties"]

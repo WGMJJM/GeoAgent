@@ -23,7 +23,7 @@ TOOL_SEARCH_DEFINITION = {
     "type": "function",
     "function": {
         "name": "tool.search",
-        "description": "Search accessible tools using Chinese or English capability keywords or tool names. Each search returns at most two tools. Submit Chinese and English searches together in one batch; their results are deduplicated by tool name and merged for the next model turn. Do not call newly discovered tools in the search batch.",
+        "description": "Discover a necessary capability missing from the tools currently provided. Use provided tools first; when their results satisfy the user's goal, answer without searching. Before searching, briefly state the necessary capability gap and why provided tools or observations cannot satisfy it. Search accessible tools using Chinese or English capability keywords or tool names. Each search returns at most two tools. Submit Chinese and English searches together in one batch; results are deduplicated by tool name and merged for the next model turn, not automatically executed. Do not call newly discovered tools in the search batch. No match does not prove a capability is absent.",
         "parameters": {
             "type": "object",
             "properties": {
