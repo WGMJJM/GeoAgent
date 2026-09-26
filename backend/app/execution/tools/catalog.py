@@ -1,4 +1,4 @@
-"""对延迟工具做权限与环境过滤后的轻量关键词发现。"""
+"""对延迟工具做权限与环境过滤后的中英文关键词发现。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from app.core.models import ToolMetadata
 from .registry import ToolRegistry
 
 MAX_QUERY_LENGTH = 160
-MAX_RESULTS = 5
+MAX_RESULTS = 2
 MAX_DESCRIPTION_LENGTH = 300
 
 _ASCII_TOKEN = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
@@ -23,12 +23,17 @@ TOOL_SEARCH_DEFINITION = {
     "type": "function",
     "function": {
         "name": "tool.search",
-        "description": "Search currently accessible tools by capability keywords. Search using short Chinese or English terms; matches are automatically enabled for the next model turn.",
+        "description": "Search accessible tools using Chinese or English capability keywords or tool names. Each search returns at most two tools. Submit Chinese and English searches together in one batch; their results are deduplicated by tool name and merged for the next model turn. Do not call newly discovered tools in the search batch.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5},
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_QUERY_LENGTH,
+                    "description": "Chinese or English capability keywords or tool names, e.g. 栅格检查, raster metadata CRS or raster.inspect.",
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS, "default": MAX_RESULTS},
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -67,10 +72,10 @@ class ToolCatalog:
         policy = PermissionPolicy()
         self.is_discoverable = is_discoverable or policy.is_discoverable
 
-    def search(self, query: str, context: ToolDiscoveryContext, limit: int = 5) -> list[ToolCard]:
+    def search(self, query: str, context: ToolDiscoveryContext, limit: int = MAX_RESULTS) -> list[ToolCard]:
         normalized = _normalize_query(query)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESULTS:
-            raise ValueError("limit 必须是 1 到 5 之间的整数。")
+            raise ValueError(f"limit 必须是 1 到 {MAX_RESULTS} 之间的整数。")
 
         matches: list[ToolCard] = []
         # 每次从 Registry 读取最新延迟工具集合，不缓存索引，注册/注销立即生效。

@@ -70,6 +70,18 @@ def test_search_matches_exact_name_substring_english_description_chinese_and_par
     assert [item.name for item in catalog.search("altitude", context)] == ["analysis.custom"]
 
 
+@pytest.mark.parametrize("query", ["矢量缓冲区", "buffer", "vector 缓冲区"])
+def test_chinese_english_and_bilingual_queries_remain_supported(query):
+    _, catalog = _catalog(_metadata("vector.buffer", "按距离生成矢量缓冲区 / Create vector buffers by distance"))
+    assert [item.name for item in catalog.search(query, _context())] == ["vector.buffer"]
+    assert [item["name"] for item in catalog.tool_search({"query": query}, _context())["tools"]] == ["vector.buffer"]
+
+
+def test_english_query_keeps_tool_names_case_and_whitespace_support():
+    _, catalog = _catalog(_metadata("raster.inspect", "Inspect raster metadata CRS"))
+    assert [item.name for item in catalog.search("  RASTER.INSPECT\tmetadata CRS  ", _context())] == ["raster.inspect"]
+
+
 def test_name_matches_rank_above_description_and_ties_use_name_order():
     _, catalog = _catalog(
         _metadata("vector.buffer", "Other operation"),
@@ -84,25 +96,22 @@ def test_name_matches_rank_above_description_and_ties_use_name_order():
     assert tied[0].score == tied[1].score
 
 
-def test_search_caps_results_at_five_and_honors_smaller_limit():
+def test_search_caps_results_at_two_and_honors_smaller_limit():
     registry = ToolRegistry()
     for index in range(12):
         _register(registry, _metadata(f"analysis.operation_{index:02d}", "Geometry analysis utility"))
     catalog = ToolCatalog(registry, PermissionPolicy().is_discoverable)
 
-    assert len(catalog.search("geometry", _context(), limit=5)) == 5
+    assert len(catalog.search("geometry", _context(), limit=2)) == 2
     assert len(catalog.search("geometry", _context(), limit=1)) == 1
     assert [item.name for item in catalog.search("geometry", _context())] == [
         "analysis.operation_00",
         "analysis.operation_01",
-        "analysis.operation_02",
-        "analysis.operation_03",
-        "analysis.operation_04",
     ]
-    assert len(catalog.search("geometry", _context(), limit=5)) <= 5
+    assert len(catalog.search("geometry", _context(), limit=2)) <= 2
 
 
-@pytest.mark.parametrize("limit", [0, 6, True, 1.5, "2"])
+@pytest.mark.parametrize("limit", [0, 3, 5, True, 1.5, "2"])
 def test_invalid_limit_has_a_clear_error(limit):
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
     with pytest.raises(ValueError, match="limit"):
@@ -223,10 +232,16 @@ def test_registered_tools_are_split_into_two_resident_and_deferred_capabilities(
     assert all(registry.get(name).metadata.required_envs for name in registry.deferred_names())
 
 
-def test_tool_search_protocol_is_structured_and_capped_at_five():
+def test_tool_search_protocol_is_structured_and_capped_at_two():
     function = TOOL_SEARCH_DEFINITION["function"]
     assert function["name"] == "tool.search"
     assert function["parameters"]["required"] == ["query"]
-    assert function["parameters"]["properties"]["limit"]["maximum"] == 5
+    assert function["parameters"]["properties"]["limit"]["maximum"] == 2
+    assert function["parameters"]["properties"]["limit"]["default"] == 2
+    query = function["parameters"]["properties"]["query"]
+    assert query["maxLength"] == 160
+    assert "English" in query["description"]
+    assert "Chinese or English" in function["description"]
+    assert "merged" in function["description"]
     assert "granted_scopes" not in function["parameters"]["properties"]
     assert "available_envs" not in function["parameters"]["properties"]
