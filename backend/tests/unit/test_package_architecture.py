@@ -53,3 +53,5 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     assert settings.max_subagents == 5
     assert settings.max_parallel_agents == 3
     assert settings.max_tokens == 3200
+    assert settings.tool_context_tokens == 2500
+    assert settings.tool_context_max_cards == 8

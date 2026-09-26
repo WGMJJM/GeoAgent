@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     max_preview_fields: int = Field(default=32, ge=1, le=128)
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
     max_tokens: int = Field(default=3200, ge=1)
+    tool_context_tokens: int = Field(default=2500, ge=1)
+    tool_context_max_cards: int = Field(default=8, ge=1)
     max_execution_seconds: int = Field(default=300, ge=1)
     tool_timeout_seconds: int = Field(default=120, ge=1)
     enable_unsafe_python: bool = False

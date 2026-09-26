@@ -6,10 +6,10 @@ import asyncio
 import json
 import logging
 import re
-from math import ceil
 from typing import Any
 
 from app.core.models import ConversationMemory, ConversationMemoryEntry, Message
+from app.core.tokens import estimate_tokens
 from app.models import ModelAdapter, ModelRequest
 from app.state import StateStore
 
@@ -76,7 +76,7 @@ class ConversationSummarizer:
         eligible = unprocessed[:-self.recent_messages]
         if not eligible:
             return False
-        pending_tokens = sum(_estimate_message_tokens(item.content) for item in eligible)
+        pending_tokens = sum(estimate_tokens(item.content) for item in eligible)
         if len(eligible) < self.trigger_messages and pending_tokens < self.trigger_tokens:
             return False
 
@@ -349,18 +349,12 @@ def _bounded_batch(messages: list[Message]) -> list[Message]:
     batch: list[Message] = []
     tokens = 0
     for message in messages[:SUMMARY_MAX_BATCH_MESSAGES]:
-        estimate = _estimate_message_tokens(message.content[:5000])
+        estimate = estimate_tokens(message.content[:5000])
         if batch and tokens + estimate > SUMMARY_MAX_BATCH_TOKENS:
             break
         batch.append(message)
         tokens += estimate
     return batch
-
-
-def _estimate_message_tokens(value: str) -> int:
-    cjk = len(re.findall(r"[\u3400-\u9fff]", value))
-    other = max(0, len(value) - cjk)
-    return max(1, cjk + ceil(other / 4))
 
 
 def _supports_json_object(adapter: ModelAdapter) -> bool:
