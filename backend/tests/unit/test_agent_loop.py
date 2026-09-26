@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -54,7 +55,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     register_gis_tools(registry)
     trace = TraceRecorder(store)
     executor = ToolExecutor(registry, store, trace)
-    settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256)
+    settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256, tool_context_tokens=2500, tool_context_max_cards=8)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
         store,
@@ -376,7 +377,7 @@ async def test_interrupted_search_batch_restores_first_result_before_merging_sec
 
 
 @pytest.mark.asyncio
-async def test_latest_search_replaces_activation_and_empty_search_clears_it(tmp_path):
+async def test_later_search_preserves_prior_tools_and_empty_search_does_not_clear_them(tmp_path):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "search_buffer", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
         ModelResponse(
@@ -396,11 +397,11 @@ async def test_latest_search_replaces_activation_and_empty_search_clears_it(tmp_
     names = [{tool["function"]["name"] for tool in item.tools} for item in adapter.requests]
     assert "vector.buffer" not in names[0]
     assert "vector.buffer" in names[1]
-    assert "vector.buffer" not in names[2]
+    assert "vector.buffer" in names[2]
     assert "raster.slope" in names[2]
     assert calls == [{"dataset_id": "ds_roads", "distance": 15}]
     checkpoint = store.latest_checkpoint(result.trace_id)
-    assert checkpoint.state["activated_tool_names"] == ["raster.slope"]
+    assert checkpoint.state["activated_tool_names"] == ["raster.slope", "vector.buffer"]
 
     empty_adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "search_buffer", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
@@ -409,8 +410,104 @@ async def test_latest_search_replaces_activation_and_empty_search_clears_it(tmp_
     )
     empty_store, empty_loop = _loop(tmp_path / "empty", empty_adapter)
     _, empty_result = await _run(empty_loop, empty_store, "查询能力")
-    assert "vector.buffer" not in {tool["function"]["name"] for tool in empty_adapter.requests[2].tools}
-    assert empty_store.latest_checkpoint(empty_result.trace_id).state["activated_tool_names"] == []
+    assert "vector.buffer" in {tool["function"]["name"] for tool in empty_adapter.requests[2].tools}
+    assert empty_store.latest_checkpoint(empty_result.trace_id).state["activated_tool_names"] == ["vector.buffer"]
+
+
+@pytest.mark.asyncio
+async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(tmp_path):
+    names = [f"test.operation_{index}" for index in range(9)]
+    adapter = SequenceAdapter(
+        *[ModelResponse(tool_calls=[{"id": f"search_{index}", "function": {"name": "tool.search", "arguments": json.dumps({"query": f"unique_capability_{index}"})}}]) for index in range(9)],
+        ModelResponse(tool_calls=[{"id": "pause", "function": {"name": "agent.ask_user", "arguments": '{"question":"接下来使用第一个工具吗？"}'}}]),
+        ModelResponse(tool_calls=[
+            {"id": "evicted", "function": {"name": names[0], "arguments": "{}"}},
+            {"id": "restore", "function": {"name": "tool.search", "arguments": json.dumps({"query": names[0]})}},
+            {"id": "premature", "function": {"name": names[0], "arguments": "{}"}},
+        ]),
+        ModelResponse(tool_calls=[{"id": "execute", "function": {"name": names[0], "arguments": "{}"}}]),
+        ModelResponse(content="已从发现缓存恢复并执行。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    loop.settings.max_agent_turns = 13
+    loop.settings.max_tool_calls = 16
+    executed = []
+    for index, name in enumerate(names):
+        loop.registry.register(ToolMetadata(name=name, description=f"unique_capability_{index}", input_schema={"type": "object"}),
+                               lambda _args, context: executed.append(context.call_id) or {"output": {"checked": True}}, deferred=True)
+    searches = []
+    original_search = loop.catalog.tool_search
+
+    def record_search(arguments, context):
+        searches.append(arguments["query"])
+        return original_search(arguments, context)
+
+    loop.catalog.tool_search = record_search
+    request, waiting = await _run(loop, store, "逐步发现工具后复用第一个")
+    assert waiting.error == "WAITING_USER"
+    saved = store.latest_checkpoint(waiting.trace_id)
+    assert set(saved.state["discovered_tool_names"]) == set(names)
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(waiting.trace_id)),
+                            resume_from=saved, continuation={"type": "user_input", "content": "使用第一个工具"})
+    assert result.status is AgentResultStatus.SUCCESS
+    assert executed == [f"{result.trace_id}:execute"]
+    assert searches == [f"unique_capability_{index}" for index in range(9)]
+    assert names[0] not in {item["function"]["name"] for item in adapter.requests[9].tools}
+    assert names[0] in {item["function"]["name"] for item in adapter.requests[11].tools}
+    observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[11].messages if item["role"] == "tool"}
+    assert observations["restore"]["output"]["source"] == "run_cache"
+    assert observations["evicted"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
+    assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
+    for request in adapter.requests:
+        assert sum(loop.registry.is_deferred(item["function"]["name"]) for item in request.tools) <= 8
+        assert loop._tool_context_tokens(request.tools, []) <= 2500
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert set(checkpoint.state["discovered_tool_names"]) == set(names)
+    assert len(checkpoint.state["activated_tool_names"]) == 8
+    raw = next(item for item in saved.state["protocol_messages"] if item.get("tool_call_id") == "search_0")
+    assert "description" in json.loads(raw["content"])["output"]["tools"][0]
+    assert observations["search_8"]["output"]["tools"] == [{"name": names[8]}]
+
+
+@pytest.mark.parametrize("budget_delta", [0, -1])
+def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_path, budget_delta):
+    _, loop = _loop(tmp_path, None)
+    name = "test.large_schema"
+    schema = {"type": "object", "properties": {"mode": {"type": "string", "enum": [f"choice_{index}" for index in range(120)]}}}
+    loop.registry.register(ToolMetadata(name=name, description="Large parameters", input_schema=schema), lambda *_: {}, deferred=True)
+    context = loop._discovery_context(AgentRequest(conversation_id="test", user_id="test-user", user_input="test"), loop.services_factory("test-user"))
+    full_definitions = loop._tool_definitions(context, {name})
+    loop.settings.tool_context_tokens = loop._tool_context_tokens(full_definitions, []) + budget_delta
+    definitions, cards, active = loop._tool_context(context, [name])
+    assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
+    if budget_delta == 0:
+        assert active == {name}
+        assert cards == []
+        assert next(item["function"]["parameters"] for item in definitions if item["function"]["name"] == name) == schema
+    else:
+        assert active == set()
+        assert [item["name"] for item in cards] == [name]
+        messages = loop._tool_context_messages([{"role": "system", "content": "original"}], cards)
+        assert "精确查询工具名称" in messages[1]["content"]
+
+
+def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
+    _, loop = _loop(tmp_path, None)
+    names = [f"test.detailed_{index}" for index in range(10)]
+    for name in names:
+        loop.registry.register(ToolMetadata(name=name, description="Detailed operation", input_schema={
+            "type": "object", "properties": {"mode": {"type": "string", "enum": [f"choice_{index}" for index in range(160)]}},
+        }), lambda *_: {}, deferred=True)
+    loop.registry.register(ToolMetadata(name="test.forbidden", description="Unavailable", required_scopes=["system.admin"]), lambda *_: {}, deferred=True)
+    context = loop._discovery_context(AgentRequest(conversation_id="test", user_id="test-user", user_input="test"), loop.services_factory("test-user"))
+    definitions, cards, active = loop._tool_context(context, [*names, "test.forbidden"])
+    assert cards and active
+    visible = active | {item["name"] for item in cards}
+    assert len(visible) <= 8
+    assert not (active & {item["name"] for item in cards})
+    assert "test.forbidden" not in visible
+    assert loop._tool_context_tokens(definitions, cards) <= 2500
+    assert visible <= set(names[-8:])
 
 
 @pytest.mark.asyncio
@@ -458,7 +555,10 @@ async def test_checkpoint_restore_revalidates_current_environment(tmp_path):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "search", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}}]),
         ModelResponse(tool_calls=[{"id": "question", "function": {"name": "agent.ask_user", "arguments": '{"question":"采用多少米？"}'}}]),
-        ModelResponse(tool_calls=[{"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
+        ModelResponse(tool_calls=[
+            {"id": "cached", "function": {"name": "tool.search", "arguments": '{"query":"vector.buffer"}'}},
+            {"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}},
+        ]),
         ModelResponse(content="当前环境不支持该操作，因此没有执行。"),
     )
     store, loop = _loop(tmp_path, adapter)
@@ -489,6 +589,10 @@ async def test_checkpoint_restore_revalidates_current_environment(tmp_path):
     assert "vector.buffer" not in {tool["function"]["name"] for tool in adapter.requests[2].tools}
     assert calls == []
     assert "DEFERRED_TOOL_NOT_ACTIVE" in adapter.requests[3].messages[-1]["content"]
+    cached = next(item for item in adapter.requests[3].messages if item.get("tool_call_id") == "cached")
+    output = json.loads(cached["content"])["output"]
+    assert "vector.buffer" not in {item["name"] for item in output["tools"]}
+    assert "source" not in output
 
 
 @pytest.mark.asyncio

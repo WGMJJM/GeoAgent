@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +23,7 @@ from app.core.models import (
     ToolStatus,
     new_id,
 )
+from app.core.tokens import estimate_tokens
 from app.execution.tools import (
     TOOL_SEARCH_DEFINITION,
     ToolCatalog,
@@ -68,6 +69,8 @@ SEARCH_HISTORY_TOOL = {
         },
     },
 }
+
+TOOL_CARDS_PREFIX = "已发现但未提供完整参数 Schema 的工具卡片；需要使用时，用 tool.search 精确查询工具名称以恢复 Schema，不必双语重新发现：\n"
 
 @dataclass(slots=True)
 class LoopPreparedRequest:
@@ -172,6 +175,7 @@ class AgentLoop:
 
         messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
         activated_names = self._restore_activated_names(resume_from, request, run)
+        discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names))) if resume_from else []
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
@@ -217,8 +221,7 @@ class AgentLoop:
         for turn in range(remaining_turns + bool(resume_pending)):
             services = self._execution_services(request, run)
             runtime_context = self._discovery_context(request, services, run)
-            activated_names = self._available_activations(activated_names, runtime_context)
-            tools = self._tool_definitions(runtime_context, activated_names)
+            tools, cards, activated_names = self._tool_context(runtime_context, discovered_names)
             current = self.store.get_run(run.id) or run
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
@@ -227,7 +230,7 @@ class AgentLoop:
                 if not resume_pending:
                     response = await model.complete(
                         ModelRequest(
-                            messages=messages,
+                            messages=self._tool_context_messages(messages, cards),
                             tools=tools if tool_call_count < self.settings.max_tool_calls else [],
                             max_tokens=self.settings.max_tokens,
                         )
@@ -290,7 +293,8 @@ class AgentLoop:
                     # 模型已提出的原子调用先保存；恢复用原 ID 读取结果，禁止重新询问模型制造新副作用。
                     self._save_checkpoint(request, current, messages, cursor_id, "tool_pending", activated_names,
                                           pending_approvals, pending_tool_calls=pending[index:],
-                                          batch_activated_names=permitted_this_batch, batch_next_activations=next_activations)
+                                          batch_activated_names=permitted_this_batch, batch_next_activations=next_activations,
+                                          discovered_names=discovered_names)
 
                     if not within_budget:
                         pass
@@ -333,7 +337,12 @@ class AgentLoop:
                             search_services = self._execution_services(request, current)
                             search_context = self._discovery_context(request, search_services, current)
                             try:
-                                search_output = self.catalog.tool_search(arguments, search_context)
+                                query = arguments["query"].strip().casefold()
+                                cached_name = next((name for name in discovered_names if name.casefold() == query), None)
+                                if cached_name in self._available_activations(set(discovered_names), search_context):
+                                    search_output = {"tools": [self.catalog.card(cached_name).public()], "source": "run_cache"}
+                                else:
+                                    search_output = self.catalog.tool_search(arguments, search_context)
                             except ValueError as exc:
                                 result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", str(exc))
                             else:
@@ -342,6 +351,7 @@ class AgentLoop:
                                 if next_activations is None:
                                     next_activations = set()
                                 next_activations.update(item["name"] for item in search_output["tools"])
+                                _remember_tools(discovered_names, reversed([item["name"] for item in search_output["tools"]]))
                     elif name == "conversation.search_history":
                         problem = validate_arguments(arguments, SEARCH_HISTORY_TOOL["function"]["parameters"])
                         if current.parent_run_id:
@@ -398,6 +408,8 @@ class AgentLoop:
                                         active_tool_names=allowed_now,
                                         discovery_context=execution_context,
                                     )
+                                    if self.registry.is_deferred(name):
+                                        _remember_tools(discovered_names, [name])
                                     if result.error and result.error.code == "APPROVAL_REQUIRED":
                                         approval_id = result.error.details.get("approval_id")
                                         if approval_id:
@@ -418,12 +430,13 @@ class AgentLoop:
                     remaining = pending[index:] if delegate_wait else pending[index + 1:]
                     self._save_checkpoint(request, current, messages, cursor_id, "tool_observation", activated_names,
                                           pending_approvals, pending_tool_calls=remaining,
-                                          batch_activated_names=permitted_this_batch, batch_next_activations=next_activations)
+                                          batch_activated_names=permitted_this_batch, batch_next_activations=next_activations,
+                                          discovered_names=discovered_names)
                     if result.error and result.error.code == "SIDE_EFFECT_UNCERTAIN":
                         execution_uncertain = True
                         break
                 if next_activations is not None:
-                    activated_names = next_activations
+                    _, _, activated_names = self._tool_context(runtime_context, discovered_names)
                 self._save_checkpoint(
                     request,
                     current,
@@ -433,6 +446,7 @@ class AgentLoop:
                     activated_names,
                     pending_approvals,
                     pending_tool_calls=remaining,
+                    discovered_names=discovered_names,
                 )
                 await self.trace.emit(
                     current.id,
@@ -519,6 +533,54 @@ class AgentLoop:
                 trace_id=current.id,
             ),
         )
+
+    def _tool_context(self, context: ToolDiscoveryContext, discovered_names: list[str]):
+        """按最近发现/使用顺序分配有限上下文，发现记录不随可见 Schema 淘汰。"""
+        definitions = self._tool_definitions(context)
+        cards = []
+        if self._tool_context_tokens(definitions, cards) > self.settings.tool_context_tokens:
+            raise ValueError("工具上下文预算不足以容纳常驻工具定义。")
+        available = self._available_activations(set(discovered_names), context)
+        candidates = [name for name in reversed(discovered_names) if name in available][:self.settings.tool_context_max_cards]
+        for name in candidates:
+            metadata = self.registry.get(name).metadata
+            definition = _tool_definition(name, metadata.description, metadata.input_schema)
+            if self._tool_context_tokens([*definitions, definition], cards) <= self.settings.tool_context_tokens:
+                definitions.append(definition)
+            else:
+                card = self.catalog.card(name).public()
+                if self._tool_context_tokens(definitions, [*cards, card]) <= self.settings.tool_context_tokens:
+                    cards.append(card)
+        activated = {item["function"]["name"] for item in definitions if self.registry.is_deferred(item["function"]["name"])}
+        return definitions, cards, activated
+
+    @staticmethod
+    def _tool_context_tokens(definitions, cards) -> int:
+        tokens = estimate_tokens(json.dumps(definitions, ensure_ascii=False, separators=(",", ":")))
+        if cards:
+            tokens += estimate_tokens(TOOL_CARDS_PREFIX + json.dumps(cards, ensure_ascii=False, separators=(",", ":")))
+        return tokens
+
+    @staticmethod
+    def _tool_context_messages(messages, cards):
+        """只裁剪模型视图；原始搜索观察与 Checkpoint 保留，不重复注入历史卡片。"""
+        searches = {
+            call["id"]
+            for message in messages if message.get("role") == "assistant"
+            for call in message.get("tool_calls", [])
+            if call["function"]["name"] == "tool.search"
+        }
+        view = []
+        for message in messages:
+            if message.get("role") == "tool" and message["tool_call_id"] in searches:
+                result = json.loads(message["content"])
+                if result["status"] == "SUCCESS":
+                    result["output"]["tools"] = [{"name": item["name"]} for item in result["output"]["tools"]]
+                    message = {**message, "content": json.dumps(result, ensure_ascii=False)}
+            view.append(message)
+        if cards:
+            view.insert(1, {"role": "system", "content": TOOL_CARDS_PREFIX + json.dumps(cards, ensure_ascii=False, separators=(",", ":"))})
+        return view
 
     def _tool_definitions(
         self,
@@ -741,6 +803,7 @@ class AgentLoop:
         pending_tool_calls=None,
         batch_activated_names=None,
         batch_next_activations=None,
+        discovered_names=None,
     ) -> None:
         protocol_messages = [
             item
@@ -759,6 +822,7 @@ class AgentLoop:
                     "protocol_messages": protocol_messages,
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
+                    "discovered_tool_names": discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else []),
                     "pending_approvals": pending_approvals,
                     "pending_tool_calls": pending_tool_calls,
                     "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),
@@ -843,6 +907,13 @@ def _decode_tool_calls(raw_calls: list[dict[str, Any]], run_id: str):
         )
         decoded.append((provider_id, name, arguments, error, persisted_id, False))
     return messages, decoded
+
+
+def _remember_tools(discovered_names: list[str], names: Iterable[str]) -> None:
+    for name in names:
+        if name in discovered_names:
+            discovered_names.remove(name)
+        discovered_names.append(name)
 
 
 def _tool_definition(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:

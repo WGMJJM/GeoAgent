@@ -23,7 +23,7 @@ TOOL_SEARCH_DEFINITION = {
     "type": "function",
     "function": {
         "name": "tool.search",
-        "description": "Discover a necessary capability missing from the tools currently provided. Use provided tools first; when their results satisfy the user's goal, answer without searching. Before searching, briefly state the necessary capability gap and why provided tools or observations cannot satisfy it. Search accessible tools using Chinese or English capability keywords or tool names. Each search returns at most two tools. Submit Chinese and English searches together in one batch; results are deduplicated by tool name and merged for the next model turn, not automatically executed. Do not call newly discovered tools in the search batch. No match does not prove a capability is absent.",
+        "description": "Discover a necessary capability missing from the tools currently provided. Use provided tools first; when their results satisfy the user's goal, answer without searching. Before searching, briefly state the necessary capability gap and why provided tools or observations cannot satisfy it. Search accessible tools using Chinese or English capability keywords or tool names. Each search returns at most two tools. Submit Chinese and English discovery searches together in one batch; results are deduplicated by tool name and merged for the next model turn, not automatically executed. For a previously discovered tool without a currently provided schema, query its exact tool name once to restore it from this Run's cache, subject to the context budget; do not repeat bilingual discovery. Do not call newly discovered or restored tools in the search batch. No match does not prove a capability is absent.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -72,6 +72,13 @@ class ToolCatalog:
         policy = PermissionPolicy()
         self.is_discoverable = is_discoverable or policy.is_discoverable
 
+    def card(self, name: str, *, score: int = 0) -> ToolCard:
+        metadata = self.registry.get(name).metadata
+        description = " ".join(metadata.description.split())
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            description = description[: MAX_DESCRIPTION_LENGTH - 3].rstrip() + "..."
+        return ToolCard(name, description, tuple(metadata.input_schema.get("properties", {})), score)
+
     def search(self, query: str, context: ToolDiscoveryContext, limit: int = MAX_RESULTS) -> list[ToolCard]:
         normalized = _normalize_query(query)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESULTS:
@@ -90,12 +97,7 @@ class ToolCatalog:
             score = relevance(normalized, metadata)
             if score <= 0:
                 continue
-            description = " ".join(metadata.description.split())
-            if len(description) > MAX_DESCRIPTION_LENGTH:
-                description = description[: MAX_DESCRIPTION_LENGTH - 3].rstrip() + "..."
-            properties = metadata.input_schema.get("properties", {})
-            parameter_names = tuple(str(key) for key in properties) if isinstance(properties, dict) else ()
-            matches.append(ToolCard(name, description, parameter_names, score))
+            matches.append(self.card(name, score=score))
 
         matches.sort(key=lambda item: (-item.score, item.name))
         return matches[: min(limit, MAX_RESULTS)]

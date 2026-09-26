@@ -154,3 +154,53 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
         assert statistics["max"] == 63
         assert statistics["mean"] == 32
     assert len(adapter.requests) == (4 if needs_statistics else 2)
+
+
+def test_reprojection_discovery_keeps_slope_available_for_real_execution(application):
+    user_id = "gis-slope-cache-user"
+    path = application.workspace.for_user(user_id).resolve("input/dem.tif")
+    with rasterio.open(path, "w", driver="GTiff", height=8, width=8, count=1, dtype="float32",
+                       crs="EPSG:4326", transform=from_origin(114, 23, 0.002, 0.002), nodata=-9999) as raster:
+        raster.write(np.arange(64, dtype="float32").reshape(8, 8), 1)
+    source = application.execution_services(user_id)["registry"].register_path(path, name="dem")
+
+    def call(name, arguments, call_id):
+        return {"id": call_id, "function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    class SlopeAdapter(BufferAdapter):
+        async def complete(self, request):
+            self.requests.append(request)
+            turn = len(self.requests)
+            if turn == 1:
+                return ModelResponse(tool_calls=[call("tool.search", {"query": query}, f"slope_{index}") for index, query in enumerate(("坡度", "slope"))])
+            if turn == 2:
+                return ModelResponse(tool_calls=[call("tool.search", {"query": query}, f"projection_{index}") for index, query in enumerate(("栅格重投影", "raster reproject"))])
+            if turn == 3:
+                return ModelResponse(tool_calls=[call("raster.reproject", {"dataset_id": source.id, "target_crs": "EPSG:32650"}, "project")])
+            if turn == 4:
+                assert "raster.slope" in {item["function"]["name"] for item in request.tools}
+                observation = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "project"))
+                return ModelResponse(tool_calls=[call("raster.slope", {"dataset_id": observation["output"]["id"]}, "slope")])
+            return ModelResponse(content="已重投影并计算坡度，没有重复发现坡度工具。")
+
+    adapter = SlopeAdapter(source.id)
+    application.agent_loop.model_provider = lambda _profile: adapter
+    conversation = application.store.create_conversation("坡度连续工具", user_id=user_id)
+    request = AgentRequest(conversation_id=conversation.id, user_id=user_id, dataset_ids=[source.id], user_input="计算坡度")
+    application.store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
+
+    async def execute():
+        prepared = await application.agent_loop.prepare_request(request)
+        return await application.agent_loop.run(request, prepared=prepared)
+
+    result = asyncio.run(execute())
+    assert result.status is AgentResultStatus.SUCCESS
+    assert application.store.get_run(result.trace_id).tool_call_count == 6
+    calls = application.store.list_tool_calls(result.trace_id)
+    assert [item[0].name for item in calls] == ["raster.reproject", "raster.slope"]
+    assert all(item[2].status.value == "SUCCESS" for item in calls)
+    output = application.store.get_dataset_for_user(calls[-1][2].datasets[0], user_id)
+    assert output.crs.authority == "EPSG:32650"
+    assert application.workspace.for_user(user_id).resolve(output.path, allow_missing=False).exists()
+    for model_request in adapter.requests:
+        assert application.agent_loop._tool_context_tokens(model_request.tools, []) <= 2500
