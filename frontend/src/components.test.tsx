@@ -2,14 +2,55 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./components/ApprovalCard";
-import { api, ApprovalRequest, Event, Run } from "./api";
+import { api, ApprovalRequest, Event, Run, TokenUsage } from "./api";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
-import { App, ProductChat } from "./App";
+import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
 
 afterEach(() => vi.restoreAllMocks());
 
 const approval: ApprovalRequest = { id: "approval-1", user_id: "user-1", conversation_id: "conv-1", task_id: "task-1", source_run_id: "run-1", tool_call_id: "call-1", tool_name: "vector.buffer", argument_fingerprint: "fingerprint", risk_level: "WRITE", argument_preview: { distance: "500m", path: "<已隐藏>" }, reason: "该操作将生成新的结果数据。", status: "PENDING", created_at: "2026-01-01T00:00:00Z" };
+
+describe("运行累计 Token 用量", () => {
+  const usage: TokenUsage = { local_input_tokens: 900, local_output_tokens: 100, reported_input_tokens: 1200, reported_output_tokens: 250, model_calls: 2, reported_calls: 2 };
+
+  it("完成摘要在工具调用数后显示供应商实际累计量", () => {
+    const { container } = render(<CompletedRunSummary run={{ ...runRecord("COMPLETED"), tool_call_count: 9, token_usage: usage }} />);
+    expect(screen.getByText("运行完成 · 9 次工具调用")).toBeTruthy();
+    expect(screen.getByText("Token 1,450")).toBeTruthy();
+    expect(screen.getByText("（输入 1,200 / 输出 250）")).toBeTruthy();
+    expect(container.querySelector(".run-summary-current .run-token-usage")?.getAttribute("title")).toContain("模型返回的实际用量");
+  });
+
+  it("任一轮缺少 usage 时不混合实际量和估算量", () => {
+    render(<TokenUsageSummary usage={{ ...usage, reported_calls: 1 }} />);
+    expect(screen.getByText("Token（本地估算） 1,000")).toBeTruthy();
+    expect(screen.getByText("（输入 900 / 输出 100）")).toBeTruthy();
+  });
+
+  it("没有用量的旧 Run 不显示虚假的零消耗，真实零用量可以显示", () => {
+    const { container, rerender } = render(<TokenUsageSummary />);
+    expect(container.querySelector(".run-token-usage")).toBeNull();
+    rerender(<TokenUsageSummary usage={{ ...usage, reported_input_tokens: 0, reported_output_tokens: 0 }} />);
+    expect(screen.getByText("Token 0")).toBeTruthy();
+  });
+
+  it("实时更新使用累计快照，重复事件不重复累加，也不覆盖当前执行状态", () => {
+    const progress: Event = { id: "progress", run_id: "run-1", event_type: "ToolStarted", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "检查栅格", payload: {} };
+    const measured: Event = { ...progress, id: "usage", event_type: "TokenUsageUpdated", sequence: 2, payload: { token_usage: usage } };
+    const { rerender } = render(<LiveExecutionStatus phase="running" events={[progress]} durationMs={1000} tokenUsage={{ ...usage, reported_calls: 1 }} />);
+    expect(screen.getByText("Token（本地估算） 1,000")).toBeTruthy();
+    rerender(<LiveExecutionStatus phase="running" events={[progress, measured, measured]} durationMs={2000} />);
+    expect(screen.getByText("Token 1,450")).toBeTruthy();
+    expect(screen.getByText("工具开始执行：检查栅格")).toBeTruthy();
+    expect(screen.queryByText(/模型累计用量已更新/)).toBeNull();
+    const older: Event = { ...measured, id: "older", payload: { token_usage: { ...usage, model_calls: 1, reported_calls: 1, reported_input_tokens: 100 } } };
+    rerender(<LiveExecutionStatus phase="running" events={[progress, measured, older]} durationMs={2000} />);
+    expect(screen.getByText("Token 1,450")).toBeTruthy(); // 并行子运行事件晚到不能使计数倒退。
+    rerender(<LiveExecutionStatus phase="running" events={[progress]} durationMs={0} />);
+    expect(screen.queryByText(/Token/)).toBeNull();
+  });
+});
 
 describe("统一聊天输入区", () => {
   const productChatProps = {

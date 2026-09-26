@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event, fetchRunView, MeasurementSystem, ModelStatus, ResponseStyle, Result, Run, User, UserProfile } from "./api";
+import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event, fetchRunView, MeasurementSystem, ModelStatus, ResponseStyle, Result, Run, TokenUsage, User, UserProfile } from "./api";
 import { childRunsOf, isExecutionInflight, isMainRun, runDurationMs, runTitle, runsForConversation } from "./domain";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { LineagePanel } from "./components/LineagePanel";
@@ -700,7 +700,7 @@ export function ProductChat({
     {(messages.length > 0 || busy) && <div className="chat-history" aria-live="polite">
       {messages.map((item) => <ChatBubble item={item} runs={runs} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
-        <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} /></div>
+        <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={runs.find((run) => run.id === activeRunId)?.token_usage} /></div>
         {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(streamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
       </>}
     </div>}
@@ -722,18 +722,33 @@ export function CompletedRunSummary({ run }: { run: Run }) {
   const failed = ["FAILED", "CANCELLED", "INTERRUPTED", "BUDGET_EXCEEDED"].includes(run.status);
   const waiting = ["WAITING_USER", "WAITING_APPROVAL"].includes(run.status);
   const detail = failed ? "运行未完成" : waiting ? "等待补充信息" : run.status === "PARTIAL_COMPLETED" ? "运行部分完成" : "运行完成";
-  return <div className="run-summary"><div className="run-summary-head"><span className="run-summary-time">{formatDuration(runDurationMs(run))}</span><span className={`run-summary-status ${failed ? "failed" : waiting ? "waiting" : run.status.toLowerCase()}`}>{statusLabel(run.status)}</span></div><div className="run-summary-current"><span className={`run-summary-marker ${failed ? "failed" : waiting ? "waiting" : ""}`}>{failed ? "×" : waiting ? "○" : "✓"}</span><span>{detail} · {run.tool_call_count} 次工具调用</span></div></div>;
+  return <div className="run-summary"><div className="run-summary-head"><span className="run-summary-time">{formatDuration(runDurationMs(run))}</span><span className={`run-summary-status ${failed ? "failed" : waiting ? "waiting" : run.status.toLowerCase()}`}>{statusLabel(run.status)}</span></div><div className="run-summary-current"><span className={`run-summary-marker ${failed ? "failed" : waiting ? "waiting" : ""}`}>{failed ? "×" : waiting ? "○" : "✓"}</span><span>{detail} · {run.tool_call_count} 次工具调用</span><TokenUsageSummary usage={run.token_usage} /></div></div>;
 }
 
-export function LiveExecutionStatus({ events, durationMs, phase }: { events: Event[]; durationMs: number; phase: ExecutionPhase }) {
-  return <RunProgress events={events} durationMs={durationMs} live phase={phase} />;
+export function TokenUsageSummary({ usage }: { usage?: TokenUsage | null }) {
+  if (!usage || usage.model_calls === 0) return null;
+  const reported = usage.reported_calls === usage.model_calls;
+  const input = reported ? usage.reported_input_tokens : usage.local_input_tokens;
+  const output = reported ? usage.reported_output_tokens : usage.local_output_tokens;
+  const format = (value: number) => value.toLocaleString("zh-CN");
+  const source = reported ? "模型返回的实际用量" : "本地分词估算，不等同于账单用量";
+  return <span className="run-token-usage" title={`${source}；累计 ${usage.model_calls} 次模型调用（包含子运行），每轮输入重复计入。每次模型响应结束后更新。`}>Token{reported ? "" : "（本地估算）"} {format(input + output)}<span className="run-token-breakdown">（输入 {format(input)} / 输出 {format(output)}）</span></span>;
 }
 
-export function RunProgress({ events, durationMs, status, live = false, phase = "running" }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase }) {
-  const currentEvent = events[events.length - 1];
+export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage }: { events: Event[]; durationMs: number; phase: ExecutionPhase; tokenUsage?: TokenUsage | null }) {
+  return <RunProgress events={events} durationMs={durationMs} live phase={phase} tokenUsage={tokenUsage} />;
+}
+
+export function RunProgress({ events, durationMs, status, live = false, phase = "running", tokenUsage }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase; tokenUsage?: TokenUsage | null }) {
+  const recentEvents = [...events].reverse();
+  const currentEvent = recentEvents.find((event) => event.event_type !== "TokenUsageUpdated");
+  const usage = events.filter((event) => event.event_type === "TokenUsageUpdated").reduce<TokenUsage | null | undefined>((current, event) => {
+    const snapshot = event.payload.token_usage as TokenUsage;
+    return !current || snapshot.model_calls > current.model_calls ? snapshot : current;
+  }, tokenUsage);
   const connecting = live && phase === "connecting";
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
-  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting">○</span><span>正在接入 Agent Loop…</span></> : currentEvent ? <><span className="run-progress-marker">✓</span><span>{eventLabel(currentEvent.event_type)}：{displayEventMessage(currentEvent.message)}</span></> : <><span className="run-progress-spinner" />等待智能体事件…</>}</div></div>;
+  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting">○</span><span className="run-progress-text">正在接入 Agent Loop…</span></> : currentEvent ? <><span className="run-progress-marker">✓</span><span className="run-progress-text">{eventLabel(currentEvent.event_type)}：{displayEventMessage(currentEvent.message)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} /></div></div>;
 }
 
 function DatasetPanel({ datasets, selectedDatasetIds, onToggleRequestDataset, onRegister, busy }: { datasets: Dataset[]; selectedDatasetIds: string[]; onToggleRequestDataset: (id: string) => void; onRegister: (path: string, name: string) => Promise<void>; busy: boolean }) {

@@ -46,6 +46,7 @@ export const EVENT_LABELS: Record<string, string> = {
   RunCreated: "开始处理请求",
   IntentResolved: "请求理解完成",
   DecisionMade: "已确定下一步动作",
+  TokenUsageUpdated: "Token 用量更新",
   SubTaskCreated: "已创建子任务",
   SubAgentSpawned: "已启动子智能体",
   ToolStarted: "工具开始执行",
