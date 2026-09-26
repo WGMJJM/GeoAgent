@@ -446,7 +446,7 @@ export function App() {
       },
       (event) => {
         receivedEvents = [...receivedEvents, event];
-        setExecution(targetConversationId, (current) => current ? { ...current, events: [...current.events, event] } : current);
+        setExecution(targetConversationId, (current) => current ? { ...current, events: [...current.events, event], streamingReply: event.event_type === "ModelResponseStarted" ? "" : current.streamingReply } : current);
       },
       (content) => setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: current.streamingReply + content } : current),
       targetConversationId,

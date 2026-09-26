@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./components/ApprovalCard";
-import { api, ApprovalRequest, Event, Run, TokenUsage } from "./api";
+import { api, ApprovalRequest, Event, MessageResponse, Run, TokenUsage } from "./api";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
 import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
@@ -267,5 +267,47 @@ describe("对话删除", () => {
     expect(remove.getAttribute("title")).toBe("删除对话");
     fireEvent.click(remove);
     expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
+  });
+});
+
+describe("流式回答", () => {
+  it("片段立即显示，每轮重置过程文本，完成时只留下最终回答", async () => {
+    const user = { id: "user-stream", username: "streamer", display_name: "测试", is_active: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
+    const conversation = { id: "conversation-stream", title: "流式测试", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
+    vi.spyOn(api, "me").mockResolvedValue(user);
+    vi.spyOn(api, "profile").mockResolvedValue({ user_id: user.id, language: "zh-CN", response_style: "balanced", measurement_system: "metric", updated_at: user.updated_at });
+    vi.spyOn(api, "datasets").mockResolvedValue([]);
+    vi.spyOn(api, "runs").mockResolvedValue([]);
+    vi.spyOn(api, "approvals").mockResolvedValue([]);
+    vi.spyOn(api, "conversations").mockResolvedValue([conversation]);
+    vi.spyOn(api, "messages").mockResolvedValue([]);
+    vi.spyOn(api, "modelStatus").mockResolvedValue({ configured: true, source: "test", profiles: [] });
+
+    let callbacks!: Parameters<typeof api.streamMessage>;
+    let finish!: (response: MessageResponse) => void;
+    const pending = Object.assign(new Promise<MessageResponse>((resolve) => { finish = resolve; }), { cancel: vi.fn() });
+    vi.spyOn(api, "streamMessage").mockImplementation((...args) => { callbacks = args; return pending; });
+    const { container } = render(<App />);
+    await screen.findByRole("button", { name: "删除对话 流式测试" });
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input, { target: { value: "查看数据" } });
+    await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    const run = { ...runRecord("RUNNING"), conversation_id: conversation.id };
+    const started: Event = { id: "start-1", run_id: run.id, event_type: "ModelResponseStarted", message: "正在生成本轮回复", sequence: 1, timestamp: user.created_at, payload: { turn: 1 } };
+    act(() => { callbacks[3](run); callbacks[4](started); callbacks[5]("先检查"); });
+    expect(container.querySelector(".streaming-message")?.textContent).toBe("先检查");
+    act(() => callbacks[5]("数据。"));
+    expect(container.querySelector(".streaming-message")?.textContent).toBe("先检查数据。");
+    act(() => callbacks[4]({ ...started, id: "start-2", sequence: 2, payload: { turn: 2 } }));
+    expect(container.querySelector(".streaming-message")).toBeNull();
+    act(() => { callbacks[5]("最终"); callbacks[5]("答案。"); });
+    expect(container.querySelector(".streaming-message")?.textContent).toBe("最终答案。");
+    await act(async () => finish({ request_id: "request-stream", route: "execution", message: "最终答案。", run: { ...run, status: "COMPLETED" },
+      result: { agent_id: "main", status: "SUCCESS", summary: "最终答案。", findings: [], datasets: [], artifacts: [], evidence: [], warnings: [], trace_id: run.id } }));
+    expect(container.querySelector(".streaming-message")).toBeNull();
+    expect(screen.getAllByText("最终答案。")).toHaveLength(1);
+    expect(screen.queryByText("先检查数据。")).toBeNull();
+    expect(api.streamMessage).toHaveBeenCalledOnce();
   });
 });
