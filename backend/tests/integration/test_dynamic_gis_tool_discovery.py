@@ -165,7 +165,7 @@ def test_inspection_can_answer_directly_or_discover_only_missing_statistics(appl
         status = next(item for item in model_request.messages if item["role"] == "system" and item["content"].startswith(TOOL_VISIBILITY_PREFIX))
         visibility = json.loads(status["content"].removeprefix(TOOL_VISIBILITY_PREFIX))
         assert visibility["callable"] == [item["function"]["name"] for item in model_request.tools]
-        assert application.agent_loop._tool_context_tokens(model_request.tools, visibility["cached"]) <= 2500
+        assert application.agent_loop._tool_context_tokens(model_request.tools, visibility["cached"]) <= application.settings.tool_context_tokens
 
 
 @pytest.mark.parametrize("attempt_slope_first", [False, True])
@@ -247,4 +247,4 @@ def test_reprojection_reuses_called_slope_or_restores_unused_card(application, a
         assert visibility["callable"] == [item["function"]["name"] for item in model_request.tools]
         tokens = estimate_tokens(json.dumps(model_request.tools, ensure_ascii=False, separators=(",", ":"))) + estimate_tokens(statuses[0]["content"])
         assert tokens == application.agent_loop._tool_context_tokens(model_request.tools, visibility["cached"])
-        assert tokens <= 2500
+        assert tokens <= application.settings.tool_context_tokens

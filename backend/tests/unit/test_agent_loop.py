@@ -56,7 +56,9 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     register_gis_tools(registry)
     trace = TraceRecorder(store)
     executor = ToolExecutor(registry, store, trace)
-    settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256, tool_context_tokens=2500, tool_context_max_cards=8)
+    settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
+                               protocol_history_tokens=25600, tool_result_compaction_ratio=0.2,
+                               tool_context_tokens=3200, tool_context_max_cards=8)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
         store,
@@ -745,7 +747,7 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     assert len(visible) <= 8
     assert not (active & {item["name"] for item in cards})
     assert "test.forbidden" not in visible
-    assert loop._tool_context_tokens(definitions, cards) <= 2500
+    assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
     assert visible <= set(names[-8:])
     messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards)
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
