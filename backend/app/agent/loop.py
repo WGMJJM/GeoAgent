@@ -338,7 +338,10 @@ class AgentLoop:
                                 result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", str(exc))
                             else:
                                 result = ToolResult(call_id=persisted_id, status=ToolStatus.SUCCESS, output=search_output)
-                                next_activations = {item["name"] for item in search_output["tools"]}
+                                # 本批次多个检索取并集；只在下一轮启用，不覆盖前一次结果。
+                                if next_activations is None:
+                                    next_activations = set()
+                                next_activations.update(item["name"] for item in search_output["tools"])
                     elif name == "conversation.search_history":
                         problem = validate_arguments(arguments, SEARCH_HISTORY_TOOL["function"]["parameters"])
                         if current.parent_run_id:

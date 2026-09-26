@@ -67,7 +67,9 @@ AgentLoop.run（主 Run，处理 agent.delegate）
 
 ## 权限、上下文与写入隔离
 
-最终权限 = 当前认证用户/真实环境权限 ∩ 持久化父 Run 限制 ∩ 子任务工具名单。发现、Schema 注入、Checkpoint 恢复及执行前都重新取交集。`tool.search` 仍最多返回 5 项，同一批次不能提前使用刚搜索激活的工具。
+最终权限 = 当前认证用户/真实环境权限 ∩ 持久化父 Run 限制 ∩ 子任务工具名单。发现、Schema 注入、Checkpoint 恢复及执行前都重新取交集。`tool.search` 每次最多返回 2 项，同一批次不能提前使用刚搜索激活的工具。
+
+中英文查询放在同一模型工具批次，各自最多返回 2 个工具；同批次所有搜索结果按工具名称去重取并集，通常最多 4 个不同的延迟工具，下一轮统一提供模型。空结果不会覆盖本批次其他有效结果。新搜索批次仍替换旧批次激活集，不无限积累所有历史工具；恢复时从已有 Checkpoint 读取本批次并集并重新过滤权限。
 
 子上下文只有自身目标、经验证输入元数据、上游绑定、预期输出、允许工具及自己的协议消息；不复制父会话历史、长期记忆、主 WorkingMemory，也不允许调用历史检索工具。
 
@@ -117,7 +119,9 @@ Checkpoint 增加待执行批次、稳定 ToolCall ID、已计预算标记和批
 & 'D:\Python3.12\venvs\GeoAgent\Scripts\python.exe' -m pytest -q
 ```
 
-最终完整回归：**158 passed，0 failed，9 项已有依赖弃用警告，89.66 秒**。其中原有 114 项测试保持通过，新增 20 项单测、24 项集成测试，只新增两个测试文件。
+SubAgent 实现阶段完整回归：**158 passed，0 failed，9 项已有依赖弃用警告，89.66 秒**。其中原有 114 项测试保持通过，新增 20 项单测、24 项集成测试，只新增两个测试文件。
+
+中英文工具检索合并调整后完整回归：**170 passed，0 failed，9 项已有依赖弃用警告，100.14 秒**。本次复用已有测试文件，覆盖每次最多两项、同批次去重取并集、空结果不覆盖、下一轮统一提供工具，以及两次检索之间中断后的 Checkpoint 恢复；权限与原有执行流程测试保持通过。
 
 对本次全部修改的 Python 文件执行 `ruff check`：通过；`git diff --check`：通过。全仓库 `ruff check app evaluation tests --output-format concise` 仍报 5 项修改前已存在的问题：`app/run/__init__.py` 的导入排序、`app/run/lifecycle.py` 的两个未使用导入、`tests/integration/test_conversation_memory.py` 的两个未使用局部变量。未为追求全绿修改无关文件。
 

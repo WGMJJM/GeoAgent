@@ -247,7 +247,7 @@ async def test_search_does_not_activate_tool_earlier_in_same_batch(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("arguments", ['{"query":""}', '{"query":"buffer","limit":6}'])
+@pytest.mark.parametrize("arguments", ['{"query":""}', '{"query":"buffer","limit":3}'])
 async def test_invalid_tool_search_arguments_return_a_tool_observation(tmp_path, arguments):
     adapter = SequenceAdapter(
         ModelResponse(tool_calls=[{"id": "invalid_search", "function": {"name": "tool.search", "arguments": arguments}}]),
@@ -262,6 +262,117 @@ async def test_invalid_tool_search_arguments_return_a_tool_observation(tmp_path,
     assert len(tool_messages) == 1
     assert tool_messages[0]["tool_call_id"] == "invalid_search"
     assert "INVALID_TOOL_ARGUMENTS" in tool_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_chinese_and_english_searches_deduplicate_shared_tools(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[
+            {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
+            {"id": "chinese", "function": {"name": "tool.search", "arguments": '{"query":"缓冲区"}'}},
+        ]),
+        ModelResponse(tool_calls=[{"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
+        ModelResponse(content="检查完成，中文提问和回复不受限制。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    writes = []
+    metadata = loop.registry.get("vector.buffer").metadata
+    loop.registry.unregister("vector.buffer")
+    loop.registry.register(metadata, lambda arguments, _context: writes.append(arguments) or {"output": {"created": True}}, deferred=True)
+    _, result = await _run(loop, store, "检查这个中文请求")
+
+    assert result.status is AgentResultStatus.SUCCESS
+    assert writes == [{"dataset_id": "ds_roads", "distance": 25}]
+    assert store.latest_checkpoint(result.trace_id).state["activated_tool_names"] == ["vector.buffer"]
+    assert "去重取并集" in adapter.requests[0].messages[0]["content"]
+    observations = {item["tool_call_id"]: item["content"] for item in adapter.requests[1].messages if item["role"] == "tool"}
+    assert '"status": "SUCCESS"' in observations["chinese"]
+    names = [item["function"]["name"] for item in adapter.requests[1].tools]
+    assert names.count("vector.buffer") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["distinct", "overlap", "empty"])
+async def test_bilingual_search_batch_preserves_union_and_executes_each_tool_once(tmp_path, mode):
+    import json
+
+    english_names = {"test.en_a", "test.en_b"}
+    chinese_names = {"test.zh_a", "test.zh_b"}
+    if mode == "overlap":
+        chinese_names = {"test.en_a", "test.zh_a"}
+    if mode == "empty":
+        chinese_names = set()
+    expected = english_names | chinese_names
+    chinese_query = "唯一中文能力" if mode != "empty" else "虚空玄冥"
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[
+            {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"quantum_marker"}'}},
+            {"id": "chinese", "function": {"name": "tool.search", "arguments": json.dumps({"query": chinese_query})}},
+            {"id": "premature", "function": {"name": "test.en_a", "arguments": "{}"}},
+        ]),
+        ModelResponse(tool_calls=[{"id": name, "function": {"name": name, "arguments": "{}"}} for name in sorted(expected)]),
+        ModelResponse(content="已统一调用合并后的工具。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    executed = []
+    for name in sorted(expected):
+        description = " ".join([
+            "quantum_marker" if name in english_names else "",
+            "唯一中文能力" if name in chinese_names else "",
+        ])
+        loop.registry.register(
+            ToolMetadata(name=name, description=description, input_schema={"type": "object", "additionalProperties": False}),
+            lambda _args, context: executed.append(context.call_id) or {"output": {"checked": True}},
+            deferred=True,
+        )
+    _, result = await _run(loop, store, "合并中英文工具检索")
+    assert result.status is AgentResultStatus.SUCCESS
+    names = [item["function"]["name"] for item in adapter.requests[1].tools]
+    assert all(names.count(name) == 1 for name in expected)
+    observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[1].messages if item["role"] == "tool"}
+    assert {item["name"] for item in observations["english"]["output"]["tools"]} == english_names
+    assert {item["name"] for item in observations["chinese"]["output"]["tools"]} == chinese_names
+    assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
+    assert executed == [f"{result.trace_id}:{name}" for name in sorted(expected)]
+    assert set(store.latest_checkpoint(result.trace_id).state["activated_tool_names"]) == expected
+
+
+@pytest.mark.asyncio
+async def test_interrupted_search_batch_restores_first_result_before_merging_second(tmp_path):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[
+            {"id": "english", "function": {"name": "tool.search", "arguments": '{"query":"buffer"}'}},
+            {"id": "chinese", "function": {"name": "tool.search", "arguments": '{"query":"坡度"}'}},
+        ]),
+        ModelResponse(content="已获得缓冲和坡度工具。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    conversation = store.create_conversation("检索恢复", user_id="test-user")
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="查找缓冲和坡度工具")
+    prepared = await loop.prepare_request(request)
+    original = loop._save_checkpoint
+    interrupted = False
+
+    def interrupt_between_searches(*args, **kwargs):
+        nonlocal interrupted
+        original(*args, **kwargs)
+        pending = kwargs.get("pending_tool_calls", [])
+        if not interrupted and args[4] == "tool_pending" and pending and pending[0][0] == "chinese":
+            interrupted = True
+            raise RuntimeError("模拟两次检索之间进程中断")
+
+    loop._save_checkpoint = interrupt_between_searches
+    with pytest.raises(RuntimeError, match="进程中断"):
+        await loop.run(request, prepared=prepared)
+    checkpoint = store.latest_checkpoint(prepared.run.id)
+    assert checkpoint.state["batch_next_activations"] == ["vector.buffer"]
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(prepared.run.id)),
+                            resume_from=checkpoint, continuation={"type": "technical_resume"})
+    assert result.status is AgentResultStatus.SUCCESS
+    names = {item["function"]["name"] for item in adapter.requests[1].tools}
+    assert {"vector.buffer", "raster.slope"}.issubset(names)
+    assert store.get_run(prepared.run.id).tool_call_count == 2
+    assert len(adapter.requests) == 2
 
 
 @pytest.mark.asyncio
