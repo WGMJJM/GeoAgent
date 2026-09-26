@@ -66,7 +66,13 @@ class ContextBuilder:
             )
 
         if protocol_messages is None:
-            persisted = self.store.list_messages(request.conversation_id, limit=self.recent_message_limit)
+            # 使用已装入上下文的同一摘要快照，避免并发更新后摘要与覆盖边界错配。
+            memory = trusted_context.get("conversation_memory", {})
+            through_message_id = memory.get("summarized_through_message_id") if memory.get("summary") else None
+            if through_message_id is not None:
+                persisted = self.store.list_messages_after(request.conversation_id, through_message_id)
+            else:
+                persisted = self.store.list_messages(request.conversation_id, limit=self.recent_message_limit)
             history = [{"role": item.role, "content": item.content} for item in persisted]
         else:
             history = protocol_messages[-self.recent_message_limit * 2 :]
@@ -139,6 +145,8 @@ class ContextBuilder:
             if memory is not None:
                 context["conversation_memory"] = {
                     "summary": memory.summary,
+                    "summary_version": memory.summary_version,
+                    "summarized_through_message_id": memory.summarized_through_message_id,
                     "key_facts": [_memory_entry(item) for item in memory.key_facts[-8:]],
                     "decisions": [_memory_entry(item) for item in memory.decisions[-8:]],
                     "unresolved_topics": [_memory_entry(item) for item in memory.unresolved_topics[-8:]],
