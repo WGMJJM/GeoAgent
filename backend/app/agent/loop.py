@@ -36,7 +36,7 @@ from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
 from app.state import StateStore
 
-from .context import ContextBuilder
+from .context import ContextBuilder, compact_tool_results
 from .delegation import DELEGATE_TOOL
 
 ASK_USER_TOOL = {
@@ -188,6 +188,7 @@ class AgentLoop:
         activated_names = self._restore_activated_names(resume_from, request, run)
         discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names))) if resume_from else []
         used_names = set(resume_from.state.get("used_tool_names", [])) if resume_from else set()
+        compacted_ids = set(resume_from.state.get("compacted_tool_call_ids", [])) if resume_from else set()
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
@@ -242,9 +243,19 @@ class AgentLoop:
             response = None
             try:
                 if not resume_pending:
+                    previous_compacted_ids = set(compacted_ids)
+                    model_messages = self._tool_context_messages(
+                        messages, model_tools, model_cards, run_id=current.id, compacted_ids=compacted_ids,
+                    )
+                    if compacted_ids != previous_compacted_ids:
+                        self._save_checkpoint(
+                            request, current, messages, cursor_id, "context_compacted", activated_names,
+                            pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                            compacted_ids=compacted_ids,
+                        )
                     response = await model.complete(
                         ModelRequest(
-                            messages=self._tool_context_messages(messages, model_tools, model_cards),
+                            messages=model_messages,
                             tools=model_tools,
                             max_tokens=self.settings.max_tokens,
                         )
@@ -585,8 +596,7 @@ class AgentLoop:
         tokens += estimate_tokens(_tool_visibility_message(definitions, cards)["content"])
         return tokens
 
-    @staticmethod
-    def _tool_context_messages(messages, definitions, cards):
+    def _tool_context_messages(self, messages, definitions, cards, *, run_id: str, compacted_ids: set[str]):
         """仅在本轮模型视图提供实际工具状态；原始搜索观察与 Checkpoint 不变。"""
         searches = {
             call["id"]
@@ -602,6 +612,10 @@ class AgentLoop:
                     result["output"]["tools"] = [{"name": item["name"]} for item in result["output"]["tools"]]
                     message = {**message, "content": json.dumps(result, ensure_ascii=False)}
             view.append(message)
+        view = compact_tool_results(
+            view, token_budget=self.settings.protocol_history_tokens,
+            ratio=self.settings.tool_result_compaction_ratio, run_id=run_id, compacted_ids=compacted_ids,
+        )
         view.insert(1, _tool_visibility_message(definitions, cards))
         return view
 
@@ -828,6 +842,7 @@ class AgentLoop:
         batch_next_activations=None,
         discovered_names=None,
         used_names=None,
+        compacted_ids=None,
     ) -> None:
         protocol_messages = [
             item
@@ -848,6 +863,7 @@ class AgentLoop:
                     "activated_tool_names": sorted(activated_names),
                     "discovered_tool_names": discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else []),
                     "used_tool_names": sorted(used_names) if used_names is not None else (previous.state.get("used_tool_names", []) if previous else []),
+                    "compacted_tool_call_ids": sorted(compacted_ids) if compacted_ids is not None else (previous.state.get("compacted_tool_call_ids", []) if previous else []),
                     "pending_approvals": pending_approvals,
                     "pending_tool_calls": pending_tool_calls,
                     "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),
@@ -973,10 +989,7 @@ def _tool_observation(result: ToolResult) -> str:
         "warnings": result.warnings,
         "error": result.error.model_dump(mode="json") if result.error else None,
     }
-    text = json.dumps(payload, ensure_ascii=False, default=str)
-    if isinstance(result.output, dict) and "delegation_id" in result.output:
-        return text  # 委派观察已按字段裁剪，不从中间截断关键 ID/状态或破坏 JSON。
-    return text if len(text) <= 16000 else text[:16000] + "…(结果截断)"
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _latest_user_message_id(store: StateStore, conversation_id: str) -> str | None:

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.loop import TOOL_VISIBILITY_PREFIX, AgentLoop
+from app.agent.context import compact_tool_results
+from app.agent.loop import TOOL_VISIBILITY_PREFIX, AgentLoop, _tool_observation
 from app.auth.approval import ApprovalService
 from app.core.models import (
     AgentRequest,
@@ -16,6 +17,8 @@ from app.core.models import (
     RiskLevel,
     RunStatus,
     ToolMetadata,
+    ToolResult,
+    ToolStatus,
 )
 from app.core.tokens import estimate_tokens
 from app.execution.tools import ToolExecutor, ToolRegistry
@@ -723,10 +726,11 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
     else:
         assert active == set()
         assert [item["name"] for item in cards] == [name]
-        messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards)
+        messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards,
+                                              run_id="test-run", compacted_ids=set())
         assert "精确查询工具名称" in messages[1]["content"]
     original = [{"role": "system", "content": "original"}, {"role": "user", "content": "需要这个工具"}]
-    messages = loop._tool_context_messages(original, definitions, cards)
+    messages = loop._tool_context_messages(original, definitions, cards, run_id="test-run", compacted_ids=set())
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
     assert visibility["cached"] == cards
     assert original == [{"role": "system", "content": "original"}, {"role": "user", "content": "需要这个工具"}]
@@ -749,7 +753,8 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     assert "test.forbidden" not in visible
     assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
     assert visible <= set(names[-8:])
-    messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards)
+    messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards,
+                                          run_id="test-run", compacted_ids=set())
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
     assert "test.forbidden" not in visibility["callable"]
     assert "test.forbidden" not in {item["name"] for item in visibility["cached"]}
@@ -930,3 +935,164 @@ async def test_model_can_search_original_messages_on_demand(tmp_path):
     assert result.status is AgentResultStatus.SUCCESS
     assert "500 米" in adapter.requests[1].messages[-1]["content"]
     assert store.get_run(result.trace_id).tool_call_count == 1
+
+
+def _history_tokens(messages):
+    history = [item for item in messages if item["role"] != "system"]
+    return estimate_tokens(json.dumps(history, ensure_ascii=False, separators=(",", ":")))
+
+
+def _compaction_history(count, *, body="结果" * 2000):
+    calls = [{"id": f"call_{index}", "type": "function", "function": {
+        "name": "test.report", "arguments": json.dumps({"index": index, "description": "完整参数" * 100})
+    }} for index in range(count)]
+    history = [{"role": "system", "content": "固定规则" * 10000},
+               {"role": "user", "content": "当前目标不应被精简"},
+               {"role": "assistant", "content": "读取分析结果", "tool_calls": calls}]
+    for index, call in enumerate(calls):
+        result = ToolResult(call_id=call["id"], status=ToolStatus.SUCCESS, output={"body": body},
+                            datasets=[f"ds_{index}"], artifacts=[f"art_{index}"], warnings=["采样结果"])
+        history.append({"role": "tool", "tool_call_id": call["id"], "content": _tool_observation(result)})
+    return history
+
+
+@pytest.mark.parametrize("count,already_processed,ratio,expected_new", [
+    (10, 0, 0.2, 2), (6, 0, 0.2, 2), (50, 40, 0.2, 2), (1, 0, 0.2, 1), (10, 0, 0.4, 4),
+])
+def test_compaction_uses_oldest_unprocessed_fraction_and_keeps_protocol(count, already_processed, ratio, expected_new):
+    original = _compaction_history(count)
+    original_json = json.dumps(original, ensure_ascii=False)
+    previous_ids = {f"call_{index}" for index in range(already_processed)}
+    expected_ids = {f"call_{index}" for index in range(already_processed + expected_new)}
+    projected = compact_tool_results(original, token_budget=10**9, ratio=ratio,
+                                     run_id="run-test", compacted_ids=set(expected_ids))
+    budget = _history_tokens(projected)
+    marked = set(previous_ids)
+    view = compact_tool_results(original, token_budget=budget, ratio=ratio,
+                                run_id="run-test", compacted_ids=marked)
+
+    assert marked == expected_ids
+    assert _history_tokens(view) <= budget
+    assert view[:3] == original[:3]
+    assert len(view) == len(original)
+    assert json.dumps(original, ensure_ascii=False) == original_json
+    assert [item["tool_call_id"] for item in view[3:]] == [f"call_{index}" for index in range(count)]
+    for index, item in enumerate(view[3:]):
+        payload = json.loads(item["content"])
+        raw = json.loads(original[index + 3]["content"])
+        if item["tool_call_id"] in marked:
+            assert payload["context_compacted"] is True
+            assert payload["output"] is None
+            assert payload["result_reference"] == {
+                "run_id": "run-test", "tool_call_id": item["tool_call_id"], "source": "checkpoint.protocol_messages",
+            }
+            assert {key: payload[key] for key in ("status", "datasets", "artifacts", "warnings", "error")} == {
+                key: raw[key] for key in ("status", "datasets", "artifacts", "warnings", "error")
+            }
+        else:
+            assert item == original[index + 3]
+    assert compact_tool_results(original, token_budget=budget, ratio=ratio,
+                                run_id="run-test", compacted_ids=marked) == view
+    assert marked == expected_ids
+    other_run_ids = set()
+    assert compact_tool_results(original, token_budget=_history_tokens(original), ratio=ratio,
+                                run_id="another-run", compacted_ids=other_run_ids) == original
+    assert other_run_ids == set()
+
+
+def test_compaction_reestimates_between_groups_and_is_noop_at_budget():
+    original = _compaction_history(10)
+    marked = set()
+    assert compact_tool_results(original, token_budget=_history_tokens(original), ratio=0.2,
+                                run_id="run-test", compacted_ids=marked) == original
+    assert marked == set()
+    target_ids = {f"call_{index}" for index in range(4)}
+    expected = compact_tool_results(original, token_budget=10**9, ratio=0.2,
+                                   run_id="run-test", compacted_ids=set(target_ids))
+    actual = compact_tool_results(original, token_budget=_history_tokens(expected), ratio=0.2,
+                                 run_id="run-test", compacted_ids=marked)
+    assert marked == target_ids
+    assert actual == expected
+
+
+def test_compaction_keeps_errors_and_does_not_drop_oversized_arguments():
+    original = _compaction_history(1)
+    payload = json.loads(original[-1]["content"])
+    payload.update(status="FAILED", error={"code": "CRS_MISMATCH", "message": "坐标单位不匹配", "details": {"crs": "EPSG:4326"}})
+    original[-1]["content"] = json.dumps(payload, ensure_ascii=False)
+    original[2]["tool_calls"][0]["function"]["arguments"] = json.dumps({"text": "完整参数" * 10000}, ensure_ascii=False)
+    marked = set()
+    view = compact_tool_results(original, token_budget=100, ratio=0.2, run_id="run-test", compacted_ids=marked)
+    assert marked == {"call_0"}
+    assert json.loads(view[-1]["content"])["error"] == payload["error"]
+    assert json.loads(view[-1]["content"])["status"] == "FAILED"
+    assert view[:3] == original[:3]
+    assert _history_tokens(view) > 100  # 只精简结果正文，不能擅自删除调用参数或用户目标。
+    assert compact_tool_results(original[:3], token_budget=100, ratio=0.2,
+                                run_id="run-test", compacted_ids=set()) == original[:3]
+
+
+def test_large_observation_and_checkpoint_restore_keep_complete_json(tmp_path):
+    _, loop = _loop(tmp_path, None)
+    original = _compaction_history(60, body="原始结果" * 5000)
+    request = AgentRequest(conversation_id="test", user_id="test-user", user_input="恢复任务")
+    built = loop.context.build(request, protocol_messages=original[1:], append_request=False)
+    assert built[1:] == original[1:]
+    assert len(built) > 48
+    assert len(original[-1]["content"]) > 16000
+    assert json.loads(built[-1]["content"])["output"] == {"body": "原始结果" * 5000}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_failure", [False, True])
+async def test_compaction_checkpoints_restore_originals_and_never_reexecute_tools(tmp_path, monkeypatch, model_failure):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"large_report"}'}}]),
+        ModelResponse(tool_calls=[{"id": f"execute_{index}", "function": {"name": "test.large_report", "arguments": "{}"}}
+                                  for index in range(4)]),
+        ModelResponse(tool_calls=[{"id": "pause", "function": {"name": "agent.ask_user", "arguments": '{"question":"继续吗？"}'}}]),
+        ModelResponse(content="恢复完成，无需重复执行。"),
+    )
+    original_complete = adapter.complete
+
+    async def complete(request):
+        response = await original_complete(request)
+        if model_failure and len(adapter.requests) == 3:
+            raise TimeoutError("模拟精简后的模型超时")
+        return response
+
+    monkeypatch.setattr(adapter, "complete", complete)
+    store, loop = _loop(tmp_path, adapter)
+    loop.settings.protocol_history_tokens = 1800
+    executed = []
+    loop.registry.register(ToolMetadata(name="test.large_report", description="large_report", input_schema={"type": "object"}),
+                           lambda _args, context: executed.append(context.call_id) or {"output": {"body": "x" * 4000}}, deferred=True)
+    request, waiting = await _run(loop, store, "读取四项完整结果")
+    assert waiting.error == ("MODEL_UNAVAILABLE" if model_failure else "WAITING_USER")
+    checkpoint = store.latest_checkpoint(waiting.trace_id)
+    marked = set(checkpoint.state["compacted_tool_call_ids"])
+    assert "execute_0" in marked
+    assert "execute_3" not in marked
+    raw = {item["tool_call_id"]: json.loads(item["content"]) for item in checkpoint.state["protocol_messages"] if item["role"] == "tool"}
+    assert all(raw[f"execute_{index}"]["output"] == {"body": "x" * 4000} for index in range(4))
+    assert all("context_compacted" not in payload for payload in raw.values())
+    before_resume = list(executed)
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(waiting.trace_id)),
+                            resume_from=checkpoint, continuation=(
+                                {"type": "technical_resume"} if model_failure else {"type": "user_input", "content": "继续"}
+                            ))
+    assert result.status is AgentResultStatus.SUCCESS
+    assert executed == before_resume == [f"{waiting.trace_id}:execute_{index}" for index in range(4)]
+    assert len(adapter.requests) == 4
+    assert store.get_run(result.trace_id).tool_call_count == (5 if model_failure else 6)
+    for model_request in adapter.requests[2:]:
+        observations = {item["tool_call_id"]: json.loads(item["content"]) for item in model_request.messages if item["role"] == "tool"}
+        assert {f"execute_{index}" for index in range(4)} <= observations.keys()
+        assert all(observations[identifier]["context_compacted"] is True for identifier in marked)
+        assert observations["execute_3"]["output"] == {"body": "x" * 4000}
+        assert _history_tokens(model_request.messages) <= loop.settings.protocol_history_tokens
+        declared = {call["id"] for item in model_request.messages for call in item.get("tool_calls", [])}
+        assert observations.keys() == declared
+    final = store.latest_checkpoint(result.trace_id)
+    assert set(final.state["compacted_tool_call_ids"]) == marked
+    assert store.get_tool_call(f"{result.trace_id}:execute_0")[1].output == {"body": "x" * 4000}
