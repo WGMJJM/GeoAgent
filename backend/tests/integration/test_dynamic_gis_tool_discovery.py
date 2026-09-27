@@ -10,7 +10,7 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Point
 
-from app.agent.loop import TOOL_VISIBILITY_PREFIX
+from app.agent.context import TOOL_VISIBILITY_PREFIX
 from app.core.models import AgentRequest, AgentResultStatus, Message
 from app.core.tokens import estimate_tokens
 from app.models import ModelAdapter, ModelRequest, ModelResponse

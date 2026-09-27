@@ -4,6 +4,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from app.agent.context import SYSTEM_PROMPT, USER_MEMORY_PREFIX, prepare_model_messages
 from app.api import create_app
 from app.core.models import (
     AgentRequest,
@@ -19,6 +20,8 @@ from app.core.models import (
     Run,
     RunStatus,
     Task,
+    ToolResult,
+    ToolStatus,
     WorkingMemory,
 )
 from app.models import ModelAdapter, ModelRequest, ModelResponse
@@ -575,16 +578,40 @@ def test_history_search_is_conversation_scoped_and_enters_context(application):
     )
     request = AgentRequest(user_id=user_id, conversation_id=first_id, user_input="继续分析上海浦东", dataset_ids=[dataset.id])
     context = application.agent_loop.context.build(request, run=run)
-    payload = json.loads(context[1]["content"].split("\n", 1)[1])
+    user_memory = context[1]
+    assert user_memory["content"].startswith(USER_MEMORY_PREFIX)
+    assert json.loads(user_memory["content"].removeprefix(USER_MEMORY_PREFIX)) == {
+        "user_profile": {"language": "zh-CN", "response_style": "concise", "measurement_system": "metric", "preferred_output_format": None},
+    }
+    payload = json.loads(context[2]["content"].split("\n", 1)[1])
 
     assert payload["conversation_memory"]["summary"] == "摘要事实"
-    assert payload["user_profile"]["response_style"] == "concise"
+    assert "user_profile" not in payload
     assert "project_memory" not in payload
     assert payload["selected_datasets"][0]["id"] == dataset.id
     assert payload["current_task"]["goal"] == "当前任务"
     assert payload["current_task"]["working_memory"]["active_dataset_ids"] == [dataset.id]
     assert context[-2]["content"] == old.content
     assert any(item["function"]["name"] == "conversation.search_history" for item in application.agent_loop._tool_definitions())
+
+    # 会话视图精简不会改写固定系统规则、用户记忆或原始调用/结果。
+    invocation = {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "history-inspect", "type": "function", "function": {"name": "dataset.inspect", "arguments": json.dumps({"dataset_id": dataset.id})}},
+    ]}
+    result = ToolResult(call_id="history-inspect", status=ToolStatus.SUCCESS, output={"body": "x" * 4000})
+    observation = {"role": "tool", "tool_call_id": result.call_id, "content": result.model_dump_json()}
+    original = [*context, invocation, observation]
+    marked = set()
+    prepared = prepare_model_messages(original, application.agent_loop._tool_definitions(), [],
+                                      history_token_budget=100, compaction_ratio=0.2,
+                                      run_id=run.id, compacted_ids=marked)
+    assert prepared[0] == context[0] == {"role": "system", "content": SYSTEM_PROMPT}
+    assert prepared[2] == user_memory
+    assert prepared[3] == context[2]
+    assert prepared[-2] == invocation
+    assert json.loads(prepared[-1]["content"])["context_compacted"] is True
+    assert marked == {result.call_id}
+    assert json.loads(original[-1]["content"])["output"] == result.output
 
 
 def test_resumed_run_assistant_persistence_updates_memory_after_recovery(application):

@@ -38,7 +38,12 @@ from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
 from app.state import StateStore
 
-from .context import ContextBuilder, compact_tool_results
+from .context import (
+    ContextBuilder,
+    prepare_model_messages,
+    tool_visibility,
+    tool_visibility_message,
+)
 from .delegation import DELEGATE_TOOL
 
 ASK_USER_TOOL = {
@@ -71,19 +76,6 @@ SEARCH_HISTORY_TOOL = {
         },
     },
 }
-
-TOOL_VISIBILITY_PREFIX = "本轮工具状态：callable 已提供完整 Schema，直接按参数调用；cached 仅有卡片，需用 tool.search 精确查询工具名称恢复。历史检索只表示曾经发现，以本轮状态为准。callable 为空时不能调用工具；权限与审批仍由服务端校验。\n"
-
-
-def _tool_visibility(definitions, cards) -> dict[str, Any]:
-    return {"callable": [item["function"]["name"] for item in definitions], "cached": cards}
-
-
-def _tool_visibility_message(definitions, cards) -> dict[str, str]:
-    return {
-        "role": "system",
-        "content": TOOL_VISIBILITY_PREFIX + json.dumps(_tool_visibility(definitions, cards), ensure_ascii=False, separators=(",", ":")),
-    }
 
 @dataclass(slots=True)
 class LoopPreparedRequest:
@@ -244,8 +236,10 @@ class AgentLoop:
             try:
                 if not resume_pending:
                     previous_compacted_ids = set(compacted_ids)
-                    model_messages = self._tool_context_messages(
+                    model_messages = prepare_model_messages(
                         messages, model_tools, model_cards, run_id=current.id, compacted_ids=compacted_ids,
+                        history_token_budget=self.settings.protocol_history_tokens,
+                        compaction_ratio=self.settings.tool_result_compaction_ratio,
                         count_tokens=model.count_tokens,
                     )
                     if compacted_ids != previous_compacted_ids:
@@ -527,7 +521,7 @@ class AgentLoop:
                     current.id,
                     EventType.DECISION_MADE,
                     "模型提出工具动作，执行结果已作为观察返回",
-                    payload={"action": "tool_call", "tool_count": len(pending), "tool_visibility": _tool_visibility(model_tools, model_cards), "searches": searches},
+                    payload={"action": "tool_call", "tool_count": len(pending), "tool_visibility": tool_visibility(model_tools, model_cards), "searches": searches},
                     agent_id=current.agent_id,
                 )
                 if delegate_wait is not None:
@@ -630,32 +624,8 @@ class AgentLoop:
     @staticmethod
     def _tool_context_tokens(definitions, cards, count_tokens=estimate_tokens) -> int:
         tokens = count_tokens(json.dumps(definitions, ensure_ascii=False, separators=(",", ":")))
-        tokens += count_tokens(_tool_visibility_message(definitions, cards)["content"])
+        tokens += count_tokens(tool_visibility_message(definitions, cards)["content"])
         return tokens
-
-    def _tool_context_messages(self, messages, definitions, cards, *, run_id: str, compacted_ids: set[str], count_tokens=estimate_tokens):
-        """仅在本轮模型视图提供实际工具状态；原始搜索观察与 Checkpoint 不变。"""
-        searches = {
-            call["id"]
-            for message in messages if message.get("role") == "assistant"
-            for call in message.get("tool_calls", [])
-            if call["function"]["name"] == "tool.search"
-        }
-        view = []
-        for message in messages:
-            if message.get("role") == "tool" and message["tool_call_id"] in searches:
-                result = json.loads(message["content"])
-                if result["status"] == "SUCCESS":
-                    result["output"]["tools"] = [{"name": item["name"]} for item in result["output"]["tools"]]
-                    message = {**message, "content": json.dumps(result, ensure_ascii=False)}
-            view.append(message)
-        view = compact_tool_results(
-            view, token_budget=self.settings.protocol_history_tokens,
-            ratio=self.settings.tool_result_compaction_ratio, run_id=run_id, compacted_ids=compacted_ids,
-            count_tokens=count_tokens,
-        )
-        view.insert(1, _tool_visibility_message(definitions, cards))
-        return view
 
     def _tool_definitions(
         self,

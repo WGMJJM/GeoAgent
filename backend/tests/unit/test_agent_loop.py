@@ -5,8 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.agent.context import compact_tool_results
-from app.agent.loop import TOOL_VISIBILITY_PREFIX, AgentLoop, _tool_observation
+from app.agent.context import (
+    TOOL_VISIBILITY_PREFIX,
+    compact_tool_results,
+    prepare_model_messages,
+)
+from app.agent.loop import AgentLoop, _tool_observation
 from app.auth.approval import ApprovalService
 from app.core.models import (
     AgentRequest,
@@ -825,11 +829,16 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
     else:
         assert active == set()
         assert [item["name"] for item in cards] == [name]
-        messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards,
-                                              run_id="test-run", compacted_ids=set())
+        messages = prepare_model_messages([{"role": "system", "content": "original"}], definitions, cards,
+                                          history_token_budget=loop.settings.protocol_history_tokens,
+                                          compaction_ratio=loop.settings.tool_result_compaction_ratio,
+                                          run_id="test-run", compacted_ids=set())
         assert "精确查询工具名称" in messages[1]["content"]
     original = [{"role": "system", "content": "original"}, {"role": "user", "content": "需要这个工具"}]
-    messages = loop._tool_context_messages(original, definitions, cards, run_id="test-run", compacted_ids=set())
+    messages = prepare_model_messages(original, definitions, cards,
+                                      history_token_budget=loop.settings.protocol_history_tokens,
+                                      compaction_ratio=loop.settings.tool_result_compaction_ratio,
+                                      run_id="test-run", compacted_ids=set())
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
     assert visibility["cached"] == cards
     assert original == [{"role": "system", "content": "original"}, {"role": "user", "content": "需要这个工具"}]
@@ -852,8 +861,10 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     assert "test.forbidden" not in visible
     assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
     assert visible <= set(names[-8:])
-    messages = loop._tool_context_messages([{"role": "system", "content": "original"}], definitions, cards,
-                                          run_id="test-run", compacted_ids=set())
+    messages = prepare_model_messages([{"role": "system", "content": "original"}], definitions, cards,
+                                      history_token_budget=loop.settings.protocol_history_tokens,
+                                      compaction_ratio=loop.settings.tool_result_compaction_ratio,
+                                      run_id="test-run", compacted_ids=set())
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
     assert "test.forbidden" not in visibility["callable"]
     assert "test.forbidden" not in {item["name"] for item in visibility["cached"]}

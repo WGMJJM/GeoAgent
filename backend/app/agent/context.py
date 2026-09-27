@@ -1,4 +1,8 @@
-"""为单一 Agent Loop 组装可信状态与按需历史。"""
+"""组装系统提示词、用户记忆和会话内容；只在模型视图中精简会话内容。
+
+会话内容包含历史与当前请求、任务资源快照、工具执行记录和当前工具信息。
+历史与工具协议保持原有时间顺序，不为分类拆散调用与结果。
+"""
 
 from __future__ import annotations
 
@@ -30,6 +34,8 @@ SYSTEM_PROMPT = """你是 GeoAgent，一个通用 GIS 辅助 Agent。根据用�
 
 _ALLOWED_ROLES = {"user", "assistant", "tool"}
 _MAX_CONTEXT_CHARS = 16000
+USER_MEMORY_PREFIX = "以下是用户明确配置的交互偏好，不包含授权：\n"
+TOOL_VISIBILITY_PREFIX = "本轮工具状态：callable 已提供完整 Schema，直接按参数调用；cached 仅有卡片，需用 tool.search 精确查询工具名称恢复。历史检索只表示曾经发现，以本轮状态为准。callable 为空时不能调用工具；权限与审批仍由服务端校验。\n"
 
 
 class ContextBuilder:
@@ -64,6 +70,14 @@ class ContextBuilder:
             include_history=protocol_messages is None,
         )
         trusted_context = self._trusted_context(request, run, memory)
+        # 用户记忆独立发送，不参与会话状态的字符截取与工具结果精简。
+        user_profile = trusted_context.pop("user_profile", None)
+        if user_profile is not None:
+            messages.append({
+                "role": "system",
+                "content": USER_MEMORY_PREFIX + json.dumps({"user_profile": user_profile}, ensure_ascii=False, separators=(",", ":")),
+            })
+        # 会话摘要和任务快照仍使用同一个状态块，避免改变已有执行/恢复协议。
         if trusted_context:
             serialized = json.dumps(trusted_context, ensure_ascii=False, separators=(",", ":"))
             messages.append(
@@ -129,12 +143,25 @@ class ContextBuilder:
         if conversation is not None and request.user_id and conversation.user_id not in {None, request.user_id}:
             return context
 
+        profile = self._user_memory(request)
+        if profile is not None:
+            context["user_profile"] = profile
+        context.update(self._conversation_memory_context(request, memory))
+        context.update(self._task_resource_context(request, run))
+        return context
+
+    def _user_memory(self, request: AgentRequest) -> dict[str, Any] | None:
+        """固定用户记忆；只读取明确配置，不从会话事实推断偏好。"""
+
         profile = None
         if request.user_id:
             profile = self.profile_service.get(request.user_id) if self.profile_service is not None else self.store.get_user_profile(request.user_id)
-        if profile is not None:
-            context["user_profile"] = profile.model_dump(mode="json", exclude={"user_id", "updated_at"})
+        return profile.model_dump(mode="json", exclude={"user_id", "updated_at"}) if profile is not None else None
 
+    def _conversation_memory_context(self, request: AgentRequest, memory: ConversationMemory | None) -> dict[str, Any]:
+        """会话历史的摘要表示，与原文使用同一覆盖快照。"""
+
+        context: dict[str, Any] = {}
         if memory is not None:
             context["conversation_memory"] = {
                 "summary": memory.summary,
@@ -149,7 +176,12 @@ class ContextBuilder:
                     if (reference := self._verified_memory_reference(item, request)) is not None
                 ],
             }
+        return context
 
+    def _task_resource_context(self, request: AgentRequest, run: Run | None) -> dict[str, Any]:
+        """会话中的当前任务/资源快照；引用继续通过数据库和权限校验。"""
+
+        context: dict[str, Any] = {}
         selected = self._verified_selected_datasets(request)
         if selected:
             context["selected_datasets"] = selected
@@ -223,6 +255,59 @@ class ContextBuilder:
         return self.store.run_belongs_to_user(run_id, request.user_id) if request.user_id else self.store.get_run(run_id) is not None
 
 
+def tool_visibility(definitions, cards) -> dict[str, Any]:
+    """会话中的当前工具信息；可调用状态以本轮实际提供的 Schema 为准。"""
+
+    return {"callable": [item["function"]["name"] for item in definitions], "cached": cards}
+
+
+def tool_visibility_message(definitions, cards) -> dict[str, str]:
+    return {
+        "role": "system",
+        "content": TOOL_VISIBILITY_PREFIX + json.dumps(tool_visibility(definitions, cards), ensure_ascii=False, separators=(",", ":")),
+    }
+
+
+def prepare_model_messages(
+    messages: list[dict[str, Any]],
+    definitions: list[dict[str, Any]],
+    cards: list[dict[str, Any]],
+    *,
+    history_token_budget: int,
+    compaction_ratio: float,
+    run_id: str,
+    compacted_ids: set[str],
+    count_tokens: Callable[[str], int] = estimate_tokens,
+) -> list[dict[str, Any]]:
+    """发送前统一准备会话视图，原始消息、工具 Schema 和 Checkpoint 不改写。
+
+    本次仅归拢入口：沿用现有历史预算和精简策略，不将其改成总输入上限。
+    工具信息与执行记录属于会话内容；当前仍采用各自既有的预算规则。
+    """
+
+    searches = {
+        call["id"]
+        for message in messages if message.get("role") == "assistant"
+        for call in message.get("tool_calls", [])
+        if call["function"]["name"] == "tool.search"
+    }
+    view = []
+    for message in messages:
+        if message.get("role") == "tool" and message["tool_call_id"] in searches:
+            result = json.loads(message["content"])
+            if result["status"] == "SUCCESS":
+                result["output"]["tools"] = [{"name": item["name"]} for item in result["output"]["tools"]]
+                message = {**message, "content": json.dumps(result, ensure_ascii=False)}
+        view.append(message)
+    view = compact_tool_results(
+        view, token_budget=history_token_budget,
+        ratio=compaction_ratio, run_id=run_id, compacted_ids=compacted_ids,
+        count_tokens=count_tokens,
+    )
+    view.insert(1, tool_visibility_message(definitions, cards))
+    return view
+
+
 def compact_tool_results(
     messages: list[dict[str, Any]],
     *,
@@ -273,4 +358,13 @@ def _memory_entry(item) -> dict[str, str | None]:
     return {"content": item.content, "source_message_id": item.source_message_id}
 
 
-__all__ = ["ContextBuilder", "SYSTEM_PROMPT", "compact_tool_results"]
+__all__ = [
+    "ContextBuilder",
+    "SYSTEM_PROMPT",
+    "USER_MEMORY_PREFIX",
+    "TOOL_VISIBILITY_PREFIX",
+    "prepare_model_messages",
+    "tool_visibility",
+    "tool_visibility_message",
+    "compact_tool_results",
+]
