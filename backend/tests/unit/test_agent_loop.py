@@ -60,8 +60,8 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     trace = TraceRecorder(store)
     executor = ToolExecutor(registry, store, trace)
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
-                               protocol_history_tokens=25600, tool_result_compaction_ratio=0.2,
-                               tool_context_tokens=3200, tool_context_max_cards=8)
+                               protocol_history_tokens=51200, tool_result_compaction_ratio=0.2,
+                               tool_context_tokens=6400, tool_context_max_cards=8)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
         store,
