@@ -585,16 +585,6 @@ class ConversationMemory(StrictModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
-class MemoryItem(StrictModel):
-    id: str = Field(default_factory=lambda: new_id("mem"))
-    owner_user_id: str | None = None
-    scope: str = "project"
-    key: str
-    value: str
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-
 class User(StrictModel):
     """认证和资源归属使用的最小用户身份。"""
 

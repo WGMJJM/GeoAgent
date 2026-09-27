@@ -22,6 +22,36 @@ from app.run.lifecycle import persist_result, record_approval_denied
 from app.state import StateStore
 
 
+def test_initialization_does_not_create_or_modify_project_memory_table(tmp_path):
+    store = StateStore(tmp_path / "state.sqlite3")
+    store.initialize()
+    with sqlite3.connect(store.database_path) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "memories" not in tables
+        assert {"user_profiles", "conversation_memories", "working_memories"} <= tables
+        # 已有旧数据不再迁移或读取，但初始化也不能擅自删除它。
+        db.executescript(
+            """
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                scope TEXT NOT NULL,
+                memory_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO memories VALUES (
+                'mem_old', 'project', 'legacy_crs',
+                '{"key":"legacy_crs","value":"EPSG:3857"}', '2026-01-01'
+            );
+            """
+        )
+        original = db.execute("SELECT * FROM memories").fetchall()
+    store.initialize()
+    with sqlite3.connect(store.database_path) as db:
+        assert db.execute("SELECT * FROM memories").fetchall() == original
+        assert "owner_user_id" not in {row[1] for row in db.execute("PRAGMA table_info(memories)")}
+
+
 def test_token_usage_is_atomic_across_children_and_preserved_by_status_writes(tmp_path):
     store = StateStore(tmp_path / "usage.sqlite3")
     store.initialize()

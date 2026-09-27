@@ -32,7 +32,7 @@ def test_auth_register_login_me_logout_and_password_is_hashed(application):
         assert client.post("/api/v1/auth/login", json={"identifier": "alice", "password": "password123"}).status_code == 200
 
 
-def test_conversation_dataset_memory_and_artifact_are_user_scoped(application):
+def test_conversation_dataset_and_artifact_are_user_scoped(application):
     with TestClient(create_app(application)) as client_a, TestClient(create_app(application)) as client_b:
         user_a = _register(client_a, "alice")
         client_a.post("/api/v1/conversations", json={"title": "Alice 对话"})
@@ -40,7 +40,6 @@ def test_conversation_dataset_memory_and_artifact_are_user_scoped(application):
         assert upload.status_code == 200
         dataset_id = upload.json()["dataset"]["id"]
         assert upload.json()["dataset"]["owner_user_id"] == user_a["id"]
-        client_a.post("/api/v1/memories", json={"key": "默认 CRS", "value": "EPSG:3857"})
         run = Run(conversation_id=application.store.list_conversations(user_id=user_a["id"])[0].id, agent_id="main", status=RunStatus.COMPLETED)
         application.store.save_run(run)
         artifact = Artifact(name="alice.txt", kind=ArtifactKind.OTHER, path=None, run_id=run.id, owner_user_id=user_a["id"])
@@ -49,7 +48,6 @@ def test_conversation_dataset_memory_and_artifact_are_user_scoped(application):
         _register(client_b, "bob")
         assert client_b.get("/api/v1/conversations").json() == []
         assert client_b.get("/api/v1/datasets").json() == []
-        assert client_b.get("/api/v1/memories").json() == []
         assert client_b.get(f"/api/v1/runs/{run.id}").status_code == 404
         assert client_b.get(f"/api/v1/artifacts/{artifact.id}/content").status_code == 404
         assert client_b.post("/api/v1/messages", json={"message": "检查数据", "dataset_ids": [dataset_id]}).status_code == 403

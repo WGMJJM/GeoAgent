@@ -24,7 +24,6 @@ from app.core.models import (
     ConversationMemory,
     ConversationMemoryEntry,
     Dataset,
-    MemoryItem,
     Message,
     Run,
     SubTask,
@@ -154,15 +153,6 @@ CREATE TABLE IF NOT EXISTS artifacts (
     run_id TEXT,
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS memories (
-    id TEXT PRIMARY KEY,
-    owner_user_id TEXT,
-    scope TEXT NOT NULL,
-    memory_key TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(owner_user_id, scope, memory_key)
 );
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -295,29 +285,9 @@ class StateStore:
         StateStore._add_columns(db, "tool_calls", {"status": "TEXT", "updated_at": "TEXT"})
         StateStore._add_columns(db, "datasets", {"owner_user_id": "TEXT", "created_by_run_id": "TEXT"})
         StateStore._add_columns(db, "artifacts", {"owner_user_id": "TEXT", "run_id": "TEXT"})
-        memory_columns = {row[1] for row in db.execute("PRAGMA table_info(memories)").fetchall()}
-        if "owner_user_id" not in memory_columns:
-            db.execute("ALTER TABLE memories RENAME TO memories_legacy")
-            db.execute(
-                """CREATE TABLE memories (
-                id TEXT PRIMARY KEY,
-                owner_user_id TEXT,
-                scope TEXT NOT NULL,
-                memory_key TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(owner_user_id, scope, memory_key)
-                )"""
-            )
-            db.execute(
-                """INSERT INTO memories(id,owner_user_id,scope,memory_key,payload_json,updated_at)
-                SELECT id,NULL,scope,memory_key,payload_json,updated_at FROM memories_legacy"""
-            )
-            db.execute("DROP TABLE memories_legacy")
         StateStore._backfill_core_columns(db)
         db.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash)")
-        db.execute("CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories(owner_user_id, scope, updated_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_runs_conversation_updated ON runs(conversation_id, updated_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id, updated_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_conversation_updated ON tasks(conversation_id, updated_at)")
@@ -1373,27 +1343,6 @@ class StateStore:
         with self._connect() as db:
             row = db.execute("SELECT payload_json FROM artifacts WHERE id=? AND (owner_user_id IS NULL OR owner_user_id=?)", (artifact_id, user_id)).fetchone()
         return self._model(Artifact, row[0]) if row else None
-
-    def save_memory(self, memory: MemoryItem) -> None:
-        with self._connect() as db:
-            db.execute(
-                """INSERT INTO memories(id,owner_user_id,scope,memory_key,payload_json,updated_at) VALUES(?,?,?,?,?,?)
-                ON CONFLICT(owner_user_id,scope,memory_key) DO UPDATE SET id=excluded.id,
-                payload_json=excluded.payload_json,updated_at=excluded.updated_at""",
-                (memory.id, memory.owner_user_id, memory.scope, memory.key, memory.model_dump_json(), memory.updated_at.isoformat()),
-            )
-            db.commit()
-
-    def list_memories(self, scope: str = "project", *, owner_user_id: str | None = None) -> list[MemoryItem]:
-        query = "SELECT payload_json FROM memories WHERE scope=?"
-        args: tuple[Any, ...] = (scope,)
-        if owner_user_id is not None:
-            query += " AND owner_user_id=?"
-            args += (owner_user_id,)
-        query += " ORDER BY updated_at DESC"
-        with self._connect() as db:
-            rows = db.execute(query, args).fetchall()
-        return [self._model(MemoryItem, row[0]) for row in rows]
 
     def record_event(self, event: TraceEvent) -> TraceEvent:
         with self._connect() as db:

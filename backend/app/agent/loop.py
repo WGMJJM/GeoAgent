@@ -121,7 +121,6 @@ class AgentLoop:
         self.context = ContextBuilder(
             store,
             profile_service=context_services.get("profile"),
-            project_memory=context_services.get("project_memory"),
             conversation_memory=context_services.get("conversation_memory"),
         )
         self.model_adapter: ModelAdapter | None = None

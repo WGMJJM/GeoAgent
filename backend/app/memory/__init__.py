@@ -1,17 +1,11 @@
-"""Working/Project/Long-term Memory 的轻量实现。"""
+"""会话记忆、增量摘要与用户偏好。"""
 
 from .conversation import ConversationMemoryService
 from .conversation_summarizer import ConversationSummarizer
-from .manager import MemoryManager
-from .models import MemoryCandidate
-from .policy import MemoryWritePolicy
 from .profile import UserProfileService
 
 __all__ = [
     "ConversationMemoryService",
     "ConversationSummarizer",
-    "MemoryCandidate",
-    "MemoryManager",
-    "MemoryWritePolicy",
     "UserProfileService",
 ]

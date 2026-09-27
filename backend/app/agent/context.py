@@ -37,13 +37,11 @@ class ContextBuilder:
         store: StateStore,
         *,
         profile_service=None,
-        project_memory=None,
         conversation_memory=None,
         recent_message_limit: int = 24,
     ) -> None:
         self.store = store
         self.profile_service = profile_service
-        self.project_memory = project_memory
         self.conversation_memory = conversation_memory
         self.recent_message_limit = max(1, recent_message_limit)
 
@@ -153,11 +151,6 @@ class ContextBuilder:
                         if (reference := self._verified_memory_reference(item, request)) is not None
                     ],
                 }
-
-        if self.project_memory is not None:
-            items = self.project_memory.recall(request.user_input, user_id=request.user_id, limit=5)
-            if items:
-                context["project_memory"] = [{"key": item.key, "value": item.value} for item in items]
 
         selected = self._verified_selected_datasets(request)
         if selected:

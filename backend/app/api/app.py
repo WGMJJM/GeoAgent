@@ -56,13 +56,6 @@ class DatasetBody(BaseModel):
     name: str | None = None
 
 
-class MemoryBody(BaseModel):
-    key: str
-    value: str
-    scope: str = "project"
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class RunDeleteBody(BaseModel):
     run_ids: list[str] = Field(default_factory=list)
 
@@ -349,17 +342,6 @@ def create_app(application: Application | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=404, detail="artifact file not found") from exc
         return FileResponse(path, media_type=artifact.media_type, filename=artifact.name)
-
-    @api.get("/api/v1/memories")
-    async def memories(scope: str = "project", current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
-        return [item.model_dump(mode="json") for item in geoagent.memory.list(scope, user_id=current_user.id)]
-
-    @api.post("/api/v1/memories")
-    async def save_memory(body: MemoryBody, current_user: User = Depends(get_current_user)) -> dict[str, Any]:
-        if not body.key.strip() or not body.scope.strip():
-            raise HTTPException(status_code=400, detail="memory key and scope cannot be empty")
-        item = geoagent.memory.set(body.key.strip(), body.value, scope=body.scope.strip(), metadata=body.metadata, user_id=current_user.id)
-        return item.model_dump(mode="json")
 
     @api.get("/api/v1/runs/{run_id}/checkpoint")
     async def checkpoint(run_id: str, current_user: User = Depends(get_current_user)) -> dict[str, Any]:

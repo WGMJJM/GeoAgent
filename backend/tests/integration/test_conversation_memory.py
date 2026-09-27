@@ -517,7 +517,6 @@ def test_history_search_is_conversation_scoped_and_enters_context(application):
     application.store.save_dataset(dataset)
     application.store.save_working_memory(WorkingMemory(task_id=task.id, conversation_id=first_id, active_dataset_ids=[dataset.id]))
     application.profile.update(user_id, {"response_style": "concise"})
-    application.memory.set("project_default_crs", "EPSG:32651", user_id=user_id)
     application.store.save_conversation_memory(
         ConversationMemory(
             conversation_id=first_id,
@@ -527,13 +526,13 @@ def test_history_search_is_conversation_scoped_and_enters_context(application):
             key_facts=[ConversationMemoryEntry(content="研究范围=上海浦东", source_message_id=old.id)],
         )
     )
-    request = AgentRequest(user_id=user_id, conversation_id=first_id, user_input="project_default_crs 默认 CRS 是什么？", dataset_ids=[dataset.id])
+    request = AgentRequest(user_id=user_id, conversation_id=first_id, user_input="继续分析上海浦东", dataset_ids=[dataset.id])
     context = application.agent_loop.context.build(request, run=run)
     payload = json.loads(context[1]["content"].split("\n", 1)[1])
 
     assert payload["conversation_memory"]["summary"] == "摘要事实"
     assert payload["user_profile"]["response_style"] == "concise"
-    assert payload["project_memory"][0]["key"] == "project_default_crs"
+    assert "project_memory" not in payload
     assert payload["selected_datasets"][0]["id"] == dataset.id
     assert payload["current_task"]["goal"] == "当前任务"
     assert payload["current_task"]["working_memory"]["active_dataset_ids"] == [dataset.id]

@@ -27,7 +27,6 @@ from app.gis.vector import VectorService
 from app.gis.visualization import MapRenderer
 from app.memory import (
     ConversationMemoryService,
-    MemoryManager,
     UserProfileService,
 )
 from app.models import ModelAdapter
@@ -62,7 +61,6 @@ class Application:
         self.python_executor = PythonExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
         self.shell_executor = ShellExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
         self.checkpoints = CheckpointStore(self.store)
-        self.memory = MemoryManager(self.store)
         self.profile = UserProfileService(self.store)
         self.conversation_memory = ConversationMemoryService(self.store, model_provider=self.get_model_adapter)
         self.model_profiles: dict[str, ModelProfile] = {}
@@ -100,7 +98,6 @@ class Application:
             self.execution_services,
             context_services={
                 "profile": self.profile,
-                "project_memory": self.memory,
                 "conversation_memory": self.conversation_memory,
             },
             metrics=self.metrics,

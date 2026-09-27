@@ -31,6 +31,8 @@ def test_backend_uses_the_single_loop_framework_and_has_no_legacy_runtime():
         assert not (app / "agent" / file).exists()
     for file in ("message_entry.py", "message_router.py", "dataset_resolver.py"):
         assert not (app / "entry" / file).exists()
+    for file in ("manager.py", "models.py", "policy.py"):
+        assert not (app / "memory" / file).exists()
 
 
 def test_example_environment_options_have_settings_fields():
