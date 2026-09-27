@@ -17,7 +17,7 @@ class ModelRequest(BaseModel):
     messages: list[dict[str, Any]]
     tools: list[dict[str, Any]] = Field(default_factory=list)
     temperature: float | None = None
-    max_tokens: int = 3200
+    max_tokens: int = 12800
     response_format: dict[str, Any] | None = None
 
 

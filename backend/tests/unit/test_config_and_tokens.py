@@ -40,7 +40,9 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     assert settings.max_tool_calls == 40
     assert settings.max_subagents == 5
     assert settings.max_parallel_agents == 3
-    assert settings.max_tokens == 3200
+    assert settings.max_tokens == 12800
+    assert settings.model_input_tokens == 128000
+    assert settings.tool_result_compaction_ratio == 0.2
     assert settings.tool_context_tokens == Settings.model_fields["tool_context_tokens"].default == 6400
     assert settings.tool_context_max_cards == 16
 
