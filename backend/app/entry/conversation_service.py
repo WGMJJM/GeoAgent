@@ -15,6 +15,7 @@ from app.core.models import (
     RunStatus,
     new_id,
 )
+from app.memory import ConversationMemoryService
 from app.run import RunManager
 from app.run.predicates import is_execution_inflight, is_waiting_for_human
 from app.state import StateStore
@@ -35,10 +36,10 @@ def derive_conversation_title(text: str, *, limit: int = CONVERSATION_TITLE_CONT
 
 
 class ConversationService:
-    def __init__(self, store: StateStore, run_manager: RunManager, *, on_assistant_message_persisted=None) -> None:
+    def __init__(self, store: StateStore, run_manager: RunManager, *, memory: ConversationMemoryService) -> None:
         self.store = store
         self.run_manager = run_manager
-        self.on_assistant_message_persisted = on_assistant_message_persisted
+        self.memory = memory
 
     def ensure(self, conversation_id: str, title: str, *, user_id: str | None = None) -> None:
         existing = self.store.get_conversation(conversation_id)
@@ -70,7 +71,7 @@ class ConversationService:
         on_run: Callable[[Run], Awaitable[None]] | None = None,
         on_model_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> Run:
-        self._save_user_message(request)
+        await self._save_user_message(request)
         return await self.run_manager.submit(
             request,
             on_run=on_run,
@@ -94,7 +95,7 @@ class ConversationService:
         on_run: Callable[[Run], Awaitable[None]] | None = None,
         on_model_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> tuple[Run, AgentResult]:
-        self._save_user_message(request)
+        await self._save_user_message(request)
         run = await self.run_manager.continue_run(
             run_id,
             user_input=request.user_input,
@@ -111,33 +112,36 @@ class ConversationService:
         result = await self.run_manager.wait(run_id)
         run = self.store.get_run(run_id)
         if run and run.conversation_id and not run.parent_run_id:
-            messages = self.store.list_messages(run.conversation_id, limit=1000)
+            conversation = self.store.get_conversation(run.conversation_id)
+            user_id = conversation.user_id if conversation else None
+            messages = self.memory.list_messages(run.conversation_id, user_id=user_id, limit=1000)
             if force_assistant or not any(message.role == "assistant" and message.run_id == result.trace_id for message in messages):
-                conversation = self.store.get_conversation(run.conversation_id)
-                self.ensure(run.conversation_id, "GeoAgent resumed run", user_id=conversation.user_id if conversation else None)
-                await self._save_assistant_message(
+                self.ensure(run.conversation_id, "GeoAgent resumed run", user_id=user_id)
+                await self.memory.save_message(
                     Message(
                         id=new_id("msg"),
                         conversation_id=run.conversation_id,
                         role="assistant",
                         content=_assistant_text(result),
                         run_id=result.trace_id,
-                    )
+                    ),
+                    user_id=user_id,
                 )
         return result
 
-    def _save_user_message(self, request: AgentRequest) -> None:
+    async def _save_user_message(self, request: AgentRequest) -> None:
         self.ensure(request.conversation_id, DEFAULT_CONVERSATION_TITLE, user_id=request.user_id)
         self.set_title_if_default(request.conversation_id, request.user_input, user_id=request.user_id)
         dataset_ids = list(dict.fromkeys([*request.dataset_ids, *request.attachment_ids]))
-        self.store.save_message(
+        await self.memory.save_message(
             Message(
                 id=new_id("msg"),
                 conversation_id=request.conversation_id,
                 role="user",
                 content=request.user_input,
                 dataset_ids=dataset_ids,
-            )
+            ),
+            user_id=request.user_id,
         )
 
     def set_title_if_default(self, conversation_id: str, first_user_message: str, *, user_id: str | None = None) -> None:
@@ -155,20 +159,16 @@ class ConversationService:
     async def save_exchange(self, request: AgentRequest, assistant_content: str) -> None:
         """保存不创建 Run 的 Direct Chat / Query 消息。"""
 
-        self._save_user_message(request)
-        await self._save_assistant_message(
+        await self._save_user_message(request)
+        await self.memory.save_message(
             Message(
                 id=new_id("msg"),
                 conversation_id=request.conversation_id,
                 role="assistant",
                 content=assistant_content,
-            )
+            ),
+            user_id=request.user_id,
         )
-
-    async def _save_assistant_message(self, message: Message) -> None:
-        self.store.save_message(message)
-        if self.on_assistant_message_persisted is not None:
-            await self.on_assistant_message_persisted(message)
 
     async def cancel(self, run_id: str) -> bool:
         return await self.run_manager.cancel(run_id)

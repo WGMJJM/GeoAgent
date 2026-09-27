@@ -152,6 +152,40 @@ def test_conversation_memory_deduplicates_results_and_resolves_blocked_topic(app
         assert after_error.unresolved_topics == []
 
 
+def test_message_persistence_precedes_summary_and_failure_does_not_trigger_it(application, monkeypatch):
+    conversation_id, user_id = "memory-save-order", "memory-save-owner"
+    application.conversations.ensure(conversation_id, "统一保存入口", user_id=user_id)
+    model = _SummaryModel()
+    application.model_adapter = model
+    user = Message(conversation_id=conversation_id, role="user", content="分析这个数据")
+    assistant = Message(conversation_id=conversation_id, role="assistant", content="已读取检查结果")
+    summarized = []
+
+    async def summarize(identifier, owner, adapter):
+        assert (identifier, owner, adapter) == (conversation_id, user_id, model)
+        assert application.conversation_memory.list_messages(identifier, user_id=owner) == [user, assistant]
+        summarized.append(identifier)
+        return False
+
+    monkeypatch.setattr(application.conversation_memory.summarizer, "summarize_pending", summarize)
+    asyncio.run(application.conversation_memory.save_message(user, user_id=user_id))
+    assert summarized == []
+
+    def failed_save(_message):
+        raise OSError("模拟持久化失败")
+
+    with monkeypatch.context() as failed_persistence:
+        failed_persistence.setattr(application.store, "save_message", failed_save)
+        with pytest.raises(OSError, match="持久化失败"):
+            asyncio.run(application.conversation_memory.save_message(assistant, user_id=user_id))
+    assert summarized == []
+    assert application.conversation_memory.list_messages(conversation_id, user_id=user_id) == [user]
+
+    asyncio.run(application.conversation_memory.save_message(assistant, user_id=user_id))
+    assert summarized == [conversation_id]
+    assert model.requests == []
+
+
 def test_incremental_summary_advances_by_message_range_and_preserves_raw_history(application):
     conversation_id, user_id = "summary-incremental", "summary-user"
     application.conversations.ensure(conversation_id, "增量摘要", user_id=user_id)
@@ -251,7 +285,9 @@ def test_context_keeps_uncovered_backlog_after_summary_failure(application):
     raw.extend(_seed_messages(application, conversation_id, start=10, exchanges=14))
     failing_model = _SummaryModel(error=RuntimeError("model unavailable"))
     application.model_adapter = failing_model
-    asyncio.run(application.conversation_memory.summarize_after_assistant_persisted(raw[-1]))
+    pending_assistant = Message(conversation_id=conversation_id, role="assistant", content="这轮继续记录讨论。")
+    asyncio.run(application.conversation_memory.save_message(pending_assistant, user_id=user_id))
+    raw.append(pending_assistant)
 
     current_user = Message(conversation_id=conversation_id, role="user", content="继续当前分析")
     application.store.save_message(current_user)
@@ -265,7 +301,7 @@ def test_context_keeps_uncovered_backlog_after_summary_failure(application):
     assert memory["summary_version"] == old.summary_version
     assert memory["summarized_through_message_id"] == old.summarized_through_message_id
     uncovered = raw[8:]
-    assert len(uncovered) == 41
+    assert len(uncovered) == 42
     assert context[2:] == [{"role": item.role, "content": item.content} for item in uncovered]
     assert application.store.list_messages(conversation_id, limit=100) == raw
 
@@ -312,11 +348,15 @@ def test_context_uses_one_summary_snapshot_during_concurrent_coverage_advance(ap
     assert latest.summarized_through_message_id == raw[15].id
 
 
-def test_summary_boundary_does_not_filter_resumed_tool_protocol(application):
+def test_summary_boundary_does_not_filter_resumed_tool_protocol(application, monkeypatch):
     conversation_id, user_id = "context-resumed-protocol", "context-protocol-owner"
     application.conversations.ensure(conversation_id, "恢复工具协议", user_id=user_id)
     raw = _seed_messages(application, conversation_id, start=0, exchanges=10)
     assert asyncio.run(application.conversation_memory.summarizer.summarize_pending(conversation_id, user_id, _SummaryModel()))
+    def unexpected_history_read(*_args):
+        raise AssertionError("恢复时应保留 Checkpoint 协议，不再读取原始会话历史。")
+
+    monkeypatch.setattr(application.store, "list_messages_after", unexpected_history_read)
     protocol = [
         {"role": "user", "content": raw[0].content},
         {"role": "assistant", "content": "", "tool_calls": [
@@ -509,6 +549,13 @@ def test_history_search_is_conversation_scoped_and_enters_context(application):
     matches = application.conversation_memory.search_history(first_id, user_id, "上海浦东", limit=4)
     assert [item.id for item in matches] == [old.id]
     assert application.conversation_memory.search_history(first_id, "other-user", "上海浦东") == []
+    assert application.conversation_memory.list_messages(first_id, user_id="other-user") == []
+    assert application.conversation_memory.load_context(first_id, user_id="other-user", recent_message_limit=24) == (None, [])
+    with pytest.raises(PermissionError):
+        asyncio.run(application.conversation_memory.save_message(
+            Message(conversation_id=first_id, role="user", content="不应写入别人的会话"), user_id="other-user",
+        ))
+    assert application.conversation_memory.list_messages(first_id, user_id=user_id) == [old]
     task = Task(goal="当前任务", conversation_id=first_id)
     application.store.save_task(task)
     run = Run(conversation_id=first_id, task_id=task.id, agent_id="agent-loop", status=RunStatus.RUNNING, metadata={"original_request": "分析浦东投影"})

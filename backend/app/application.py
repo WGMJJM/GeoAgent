@@ -113,7 +113,7 @@ class Application:
         self.conversations = ConversationService(
             self.store,
             self.run_manager,
-            on_assistant_message_persisted=self.conversation_memory.summarize_after_assistant_persisted,
+            memory=self.conversation_memory,
         )
         self.message_entry = MessageGateway(self.store, self.conversations)
 

@@ -1,4 +1,4 @@
-"""会话级结构化记忆及增量摘要入口。"""
+"""会话原始消息、结构化记忆及增量摘要的统一入口。"""
 
 from __future__ import annotations
 
@@ -38,6 +38,50 @@ class ConversationMemoryService:
         self.store = store
         self.summarizer = summarizer or ConversationSummarizer(store)
         self.model_provider = model_provider
+
+    async def save_message(self, message: Message, *, user_id: str | None) -> None:
+        if not self._can_access(message.conversation_id, user_id):
+            raise PermissionError("当前用户无权访问该会话")
+        self.store.save_message(message)
+        await self._summarize_after_assistant_persisted(message)
+
+    def list_messages(self, conversation_id: str, *, user_id: str | None, limit: int = 100) -> list[Message]:
+        if not self._can_access(conversation_id, user_id):
+            return []
+        return self.store.list_messages(conversation_id, limit=limit)
+
+    def load_context(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None,
+        recent_message_limit: int,
+        include_history: bool = True,
+    ) -> tuple[ConversationMemory | None, list[Message]]:
+        """按同一个摘要快照读取覆盖边界之后的原文；恢复协议不受摘要过滤。"""
+
+        if not self._can_access(conversation_id, user_id):
+            return None, []
+        memory = self.get(conversation_id, user_id) if user_id else None
+        if not include_history:
+            return memory, []
+        through_message_id = memory.summarized_through_message_id if memory and memory.summary else None
+        history = (
+            self.store.list_messages_after(conversation_id, through_message_id)
+            if through_message_id is not None
+            else self.store.list_messages(conversation_id, limit=recent_message_limit)
+        )
+        return memory, history
+
+    def latest_user_message_id(self, conversation_id: str, *, user_id: str | None) -> str | None:
+        for message in reversed(self.list_messages(conversation_id, user_id=user_id, limit=100)):
+            if message.role == "user":
+                return message.id
+        return None
+
+    def _can_access(self, conversation_id: str, user_id: str | None) -> bool:
+        conversation = self.store.get_conversation(conversation_id)
+        return conversation is not None and (user_id is None or conversation.user_id in {None, user_id})
 
     def get(self, conversation_id: str, user_id: str) -> ConversationMemory | None:
         return self.store.get_conversation_memory_for_user(conversation_id, user_id)
@@ -124,7 +168,7 @@ class ConversationMemoryService:
         self.store.save_conversation_memory(updated)
         return updated
 
-    async def summarize_after_assistant_persisted(self, message: Message) -> None:
+    async def _summarize_after_assistant_persisted(self, message: Message) -> None:
         """摘要失败仅记录日志，不改变已经持久化的用户对话结果。"""
 
         if message.role != "assistant" or self.model_provider is None:
@@ -146,13 +190,16 @@ class ConversationMemoryService:
     def search_history(
         self,
         conversation_id: str,
-        user_id: str,
+        user_id: str | None,
         query: str,
         *,
         exclude_message_ids: set[str] | None = None,
         limit: int = 5,
     ) -> list[Message]:
-        if self.store.get_conversation_for_user(conversation_id, user_id) is None:
+        if user_id:
+            if self.store.get_conversation_for_user(conversation_id, user_id) is None:
+                return []
+        elif not self._can_access(conversation_id, user_id):
             return []
         return self.store.search_messages(
             conversation_id,
