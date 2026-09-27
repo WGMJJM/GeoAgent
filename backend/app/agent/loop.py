@@ -179,10 +179,25 @@ class AgentLoop:
             )
 
         messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
+        protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
+        if resume_from is None:
+            history_count = len(protocol) - 1
+        else:
+            history_count = run.metadata.get("conversation_history_count")
+            if history_count is None:
+                matches = [
+                    index for index, item in enumerate(protocol)
+                    if item.get("role") == "user" and item.get("content") == run.metadata.get("original_request")
+                ]
+                history_count = matches[-1] if matches else 0
+        if run.metadata.get("conversation_history_count") != history_count:
+            run = run.model_copy(update={"metadata": {**run.metadata, "conversation_history_count": history_count}})
+            self.store.save_run(run)
         activated_names = self._restore_activated_names(resume_from, request, run)
         discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names))) if resume_from else []
         used_names = set(resume_from.state.get("used_tool_names", [])) if resume_from else set()
         compacted_ids = set(resume_from.state.get("compacted_tool_call_ids", [])) if resume_from else set()
+        summarized_ids = set(resume_from.state.get("summarized_tool_call_ids", [])) if resume_from else set()
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
@@ -239,19 +254,51 @@ class AgentLoop:
                 if not resume_pending:
                     model_messages = prepare_model_messages(messages, model_tools, model_cards)
                     previous_compacted_ids = set(compacted_ids)
+                    previous_summarized_ids = set(summarized_ids)
+                    history_changed = False
                     model_messages = compact_model_input(
-                        model_messages, model_tools,
-                        token_budget=self.settings.model_input_tokens,
-                        ratio=self.settings.tool_result_compaction_ratio,
+                        model_messages,
                         run_id=current.id,
                         compacted_ids=compacted_ids,
-                        count_tokens=model.count_tokens,
+                        summarized_ids=summarized_ids,
+                        recent_full=self.settings.tool_result_recent_full,
+                        emergency_compact=self.settings.tool_result_emergency_compact,
                     )
-                    if compacted_ids != previous_compacted_ids:
+                    if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
+                        model_messages = compact_model_input(
+                            prepare_model_messages(messages, model_tools, model_cards),
+                            run_id=current.id,
+                            compacted_ids=compacted_ids,
+                            summarized_ids=summarized_ids,
+                            recent_full=self.settings.tool_result_recent_full,
+                            emergency_compact=self.settings.tool_result_emergency_compact,
+                            emergency=True,
+                        )
+                        start_message_id = current.metadata.get("original_request_message_id")
+                        if not current.parent_run_id and isinstance(start_message_id, str):
+                            changed = await self.context.conversation_memory.compact_history_before(request, model, start_message_id)
+                            if changed:
+                                messages, history_count = self._refresh_conversation_prefix(
+                                    messages, request, current, history_count, start_message_id
+                                )
+                                history_changed = True
+                                current = current.model_copy(update={
+                                    "metadata": {**current.metadata, "conversation_history_count": history_count}
+                                })
+                                self.store.save_run(current)
+                                model_messages = compact_model_input(
+                                    prepare_model_messages(messages, model_tools, model_cards),
+                                    run_id=current.id,
+                                    compacted_ids=compacted_ids,
+                                    summarized_ids=summarized_ids,
+                                    recent_full=self.settings.tool_result_recent_full,
+                                    emergency_compact=self.settings.tool_result_emergency_compact,
+                                )
+                    if history_changed or compacted_ids != previous_compacted_ids or summarized_ids != previous_summarized_ids:
                         self._save_checkpoint(
                             request, current, messages, cursor_id, "context_compacted", activated_names,
                             pending_approvals, discovered_names=discovered_names, used_names=used_names,
-                            compacted_ids=compacted_ids,
+                            compacted_ids=compacted_ids, summarized_ids=summarized_ids,
                         )
                     local_input_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
                     if local_input_tokens > self.settings.model_input_tokens:
@@ -260,7 +307,7 @@ class AgentLoop:
                             result=AgentResult(
                                 agent_id=current.agent_id,
                                 status=AgentResultStatus.BLOCKED,
-                                summary="本轮输入仍超过模型上下文预算；未截断当前请求或未经摘要的历史消息。",
+                                summary="本轮输入经工具结果精简和可用的会话摘要后仍超过模型上下文预算；当前请求与最近八条会话消息未被截断。",
                                 error="BUDGET_EXCEEDED",
                                 trace_id=current.id,
                             ),
@@ -848,6 +895,29 @@ class AgentLoop:
         built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
         return built, cursor_id
 
+    def _refresh_conversation_prefix(
+        self,
+        messages: list[dict[str, Any]],
+        request: AgentRequest,
+        run: Run,
+        history_count: int,
+        start_message_id: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """用最新摘要重组旧会话前缀，当前 Run 的原始工具协议保持不变。"""
+
+        _, persisted = self.context.conversation_memory.load_context(
+            request.conversation_id,
+            user_id=request.user_id,
+            recent_message_limit=self.context.recent_message_limit,
+        )
+        start = next((index for index, item in enumerate(persisted) if item.id == start_message_id), None)
+        if start is None:
+            return messages, history_count
+        history = [{"role": item.role, "content": item.content} for item in persisted[:start]]
+        prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False)
+        protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
+        return prefix + protocol[history_count:], len(history)
+
     def _save_checkpoint(
         self,
         request: AgentRequest,
@@ -864,6 +934,7 @@ class AgentLoop:
         discovered_names=None,
         used_names=None,
         compacted_ids=None,
+        summarized_ids=None,
     ) -> None:
         protocol_messages = [
             item
@@ -885,6 +956,8 @@ class AgentLoop:
                     "discovered_tool_names": discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else []),
                     "used_tool_names": sorted(used_names) if used_names is not None else (previous.state.get("used_tool_names", []) if previous else []),
                     "compacted_tool_call_ids": sorted(compacted_ids) if compacted_ids is not None else (previous.state.get("compacted_tool_call_ids", []) if previous else []),
+                    "summarized_tool_call_ids": sorted(summarized_ids) if summarized_ids is not None else (previous.state.get("summarized_tool_call_ids", []) if previous else []),
+                    "conversation_history_count": run.metadata.get("conversation_history_count", 0),
                     "pending_approvals": pending_approvals,
                     "pending_tool_calls": pending_tool_calls,
                     "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),

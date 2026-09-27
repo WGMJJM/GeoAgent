@@ -64,7 +64,8 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     trace = TraceRecorder(store)
     executor = ToolExecutor(registry, store, trace)
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
-                               model_input_tokens=128000, tool_result_compaction_ratio=0.2,
+                               model_input_tokens=128000, tool_result_recent_full=16,
+                               tool_result_emergency_compact=8,
                                tool_context_tokens=6400, tool_context_max_cards=16)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
@@ -1049,36 +1050,98 @@ def test_prepared_messages_keep_full_tool_observations():
     assert original[-1] == observation
 
 
-def test_total_input_budget_compacts_only_old_observations():
+def test_tool_results_slide_to_sixteen_and_emergency_summarizes_older_batches():
     calls = [
         {"id": call_id, "type": "function", "function": {"name": "test.report", "arguments": "{}"}}
-        for call_id in ("old", "latest")
+        for call_id in (f"call_{index}" for index in range(18))
     ]
     original = [
         {"role": "system", "content": "固定规则"},
         {"role": "user", "content": "保留当前目标"},
-        {"role": "assistant", "content": "", "tool_calls": [calls[0]]},
-        {"role": "tool", "tool_call_id": "old", "content": json.dumps({"status": "SUCCESS", "output": {"body": "x" * 4000}})},
-        {"role": "assistant", "content": "", "tool_calls": [calls[1]]},
-        {"role": "tool", "tool_call_id": "latest", "content": json.dumps({"status": "SUCCESS", "output": {"body": "y" * 4000}})},
     ]
-    definitions = [{"type": "function", "function": {"name": "test.report", "parameters": {"type": "object"}}}]
-    full_tokens = model_input_tokens(original, definitions)
+    for call in calls:
+        original.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        original.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps({"status": "SUCCESS", "output": {"body": "x" * 4000}})})
     marked: set[str] = set()
-    view = compact_model_input(original, definitions, token_budget=full_tokens - 1,
-                               ratio=0.2, run_id="run-test", compacted_ids=marked)
-    assert marked == {"old"}
-    assert model_input_tokens(view, definitions) <= full_tokens - 1
-    assert view[:3] == original[:3]
-    assert view[4:] == original[4:]
-    assert json.loads(view[3]["content"])["result_reference"] == {
-        "run_id": "run-test", "tool_call_id": "old", "source": "checkpoint.protocol_messages",
+    summarized: set[str] = set()
+    options = {"run_id": "run-test", "compacted_ids": marked, "summarized_ids": summarized,
+               "recent_full": 16, "emergency_compact": 8}
+    view = compact_model_input(original, **options)
+    assert marked == {"call_0", "call_1"}
+    assert summarized == set()
+    assert json.loads(next(item["content"] for item in view if item.get("tool_call_id") == "call_0"))["result_reference"] == {
+        "run_id": "run-test", "tool_call_id": "call_0", "source": "checkpoint.protocol_messages",
     }
-    assert json.loads(original[3]["content"])["output"] == {"body": "x" * 4000}
-    assert compact_model_input(original, definitions, token_budget=full_tokens - 1,
-                               ratio=0.2, run_id="run-test", compacted_ids=marked) == view
-    assert compact_model_input(original, definitions, token_budget=full_tokens,
-                               ratio=0.2, run_id="run-test", compacted_ids=set()) == original
+    assert json.loads(next(item["content"] for item in view if item.get("tool_call_id") == "call_17"))["output"] == {"body": "x" * 4000}
+    emergency = compact_model_input(original, emergency=True, **options)
+    assert marked == {f"call_{index}" for index in range(10)}
+    assert summarized == {"call_0", "call_1"}
+    assert sum(item.get("role") == "system" and "执行历史摘要" in item.get("content", "") for item in emergency) == 1
+    assert not any(item.get("tool_call_id") in summarized for item in emergency)
+    declared = {call["id"] for item in emergency for call in item.get("tool_calls", [])}
+    observed = {item["tool_call_id"] for item in emergency if item.get("role") == "tool"}
+    assert declared == observed
+    assert compact_model_input(original, **options) == emergency
+    assert all(json.loads(item["content"])["output"] == {"body": "x" * 4000} for item in original if item.get("role") == "tool")
+
+
+def test_tool_history_summary_keeps_remaining_calls_in_mixed_batch():
+    calls = [
+        {"id": name, "type": "function", "function": {"name": "test.report", "arguments": "{}"}}
+        for name in ("old", "still_visible", "latest")
+    ]
+    original = [
+        {"role": "system", "content": "固定规则"},
+        {"role": "assistant", "content": "", "tool_calls": calls[:2]},
+        {"role": "tool", "tool_call_id": "old", "content": '{"status":"SUCCESS","output":{"value":1}}'},
+        {"role": "tool", "tool_call_id": "still_visible", "content": '{"status":"SUCCESS","output":{"value":2}}'},
+        {"role": "assistant", "content": "", "tool_calls": calls[2:]},
+        {"role": "tool", "tool_call_id": "latest", "content": '{"status":"SUCCESS","output":{"value":3}}'},
+    ]
+    marked, summarized = {"old"}, set()
+    view = compact_model_input(original, run_id="run-test", compacted_ids=marked,
+                               summarized_ids=summarized, recent_full=16, emergency_compact=1, emergency=True)
+    assert summarized == {"old"}
+    assert marked == {"old", "still_visible"}
+    assert [call["id"] for item in view for call in item.get("tool_calls", [])] == ["still_visible", "latest"]
+    assert [item["tool_call_id"] for item in view if item.get("role") == "tool"] == ["still_visible", "latest"]
+    assert json.loads(next(item["content"] for item in view if item.get("tool_call_id") == "latest"))["output"] == {"value": 3}
+
+
+@pytest.mark.asyncio
+async def test_tool_history_summary_survives_checkpoint_restore(tmp_path):
+    store, loop = _loop(tmp_path, None)
+    conversation = store.create_conversation("恢复执行摘要", user_id="test-user")
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="检查历史")
+    store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
+    run = (await loop.prepare_request(request)).run
+    messages = loop.context.build(request, run=run)
+    for index in range(18):
+        call_id = f"result_{index}"
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{
+            "id": call_id, "type": "function", "function": {"name": "test.report", "arguments": "{}"},
+        }]})
+        messages.append({"role": "tool", "tool_call_id": call_id,
+                         "content": json.dumps({"status": "SUCCESS", "output": {"value": index}})})
+    marked, summarized = set(), set()
+    options = {"run_id": run.id, "compacted_ids": marked, "summarized_ids": summarized,
+               "recent_full": 16, "emergency_compact": 8}
+    compact_model_input(messages, **options)
+    compact_model_input(messages, emergency=True, **options)
+    loop._save_checkpoint(request, run, messages, None, "context_compacted", set(), [],
+                          compacted_ids=marked, summarized_ids=summarized)
+    checkpoint = store.latest_checkpoint(run.id)
+    assert checkpoint.state["summarized_tool_call_ids"] == ["result_0", "result_1"]
+    raw = {item["tool_call_id"]: json.loads(item["content"])["output"]
+           for item in checkpoint.state["protocol_messages"] if item["role"] == "tool"}
+    assert raw == {f"result_{index}": {"value": index} for index in range(18)}
+    restored = loop.context.build(request, run=run, protocol_messages=checkpoint.state["protocol_messages"], append_request=False)
+    replay = compact_model_input(restored, run_id=run.id,
+                                 compacted_ids=set(checkpoint.state["compacted_tool_call_ids"]),
+                                 summarized_ids=set(checkpoint.state["summarized_tool_call_ids"]),
+                                 recent_full=16, emergency_compact=8)
+    assert [item["tool_call_id"] for item in replay if item["role"] == "tool"] == [f"result_{index}" for index in range(2, 18)]
+    assert any("执行历史摘要" in item.get("content", "") for item in replay if item["role"] == "system")
 
 
 def test_trusted_state_is_not_cut_mid_json(tmp_path, monkeypatch):
@@ -1100,6 +1163,57 @@ async def test_total_input_limit_blocks_oversized_request_without_model_call(tmp
     assert adapter.requests == []
     checkpoint = store.latest_checkpoint(result.trace_id)
     assert checkpoint.state["request"]["user_input"] == "当前请求必须保持完整"
+
+
+@pytest.mark.asyncio
+async def test_over_budget_run_summarizes_old_conversation_and_keeps_latest_eight(tmp_path):
+    class SummaryAwareAdapter(ModelAdapter):
+        supports_tools = True
+        supports_json_object = True
+
+        def __init__(self):
+            self.summary_requests = []
+            self.requests = []
+
+        async def complete(self, model_request):
+            if model_request.response_format:
+                self.summary_requests.append(model_request)
+                return ModelResponse(content=json.dumps({
+                    "summary": "先前讨论了研究区域与分析条件。",
+                    "key_facts": [], "decisions": [], "unresolved_topics": [], "references": [],
+                }, ensure_ascii=False))
+            self.requests.append(model_request)
+            return ModelResponse(content="已读取最近的讨论。")
+
+    adapter = SummaryAwareAdapter()
+    store, loop = _loop(tmp_path, adapter)
+    conversation = store.create_conversation("紧急摘要", user_id="test-user")
+    old = []
+    for index in range(10):
+        content = f"历史消息 {index}：" + ("完整研究条件" * 1100 if index < 3 else "保留原文")
+        item = Message(conversation_id=conversation.id, role="user" if index % 2 == 0 else "assistant", content=content)
+        store.save_message(item)
+        old.append(item)
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="请继续当前分析")
+    current = Message(conversation_id=conversation.id, role="user", content=request.user_input)
+    store.save_message(current)
+    prepared = await loop.prepare_request(request)
+    initial = prepare_model_messages(loop.context.build(request, run=prepared.run), [], [])
+    loop.settings.model_input_tokens = model_input_tokens(initial, [], adapter.count_tokens) - 1
+
+    result = await loop.run(request, prepared=prepared)
+    assert result.status is AgentResultStatus.SUCCESS
+    assert adapter.summary_requests
+    assert len(adapter.requests) == 1
+    memory, tail = loop.context.conversation_memory.load_context(conversation.id, user_id="test-user", recent_message_limit=24)
+    assert memory is not None and memory.summary_version >= 1
+    assert tail == [*old[-7:], current]
+    sent_history = [item["content"] for item in adapter.requests[0].messages if item["role"] in {"user", "assistant"}]
+    assert sent_history == [item.content for item in tail]
+    assert model_input_tokens(adapter.requests[0].messages, adapter.requests[0].tools, adapter.count_tokens) <= loop.settings.model_input_tokens
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert checkpoint.state["conversation_history_count"] == 7
+    assert store.list_messages(conversation.id, limit=100) == [*old, current]
 
 
 @pytest.mark.asyncio
