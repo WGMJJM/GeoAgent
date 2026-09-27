@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     model_input_tokens: int = Field(default=128000, ge=1)
     tool_result_recent_full: int = Field(default=16, ge=1)
-    tool_result_emergency_compact: int = Field(default=8, ge=1)
+    tool_result_emergency_fraction: float = Field(default=0.5, gt=0, le=1)
     tool_context_tokens: int = Field(default=6400, ge=1)
     tool_context_max_cards: int = Field(default=16, ge=1)
     max_execution_seconds: int = Field(default=300, ge=1)

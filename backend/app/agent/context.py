@@ -309,10 +309,10 @@ def compact_model_input(
     compacted_ids: set[str],
     summarized_ids: set[str],
     recent_full: int,
-    emergency_compact: int,
+    emergency_fraction: float,
     emergency: bool = False,
 ) -> list[dict[str, Any]]:
-    """平时保留最近完整结果；超限时再精简较早八项并合并旧执行记录。"""
+    """平时保留最近完整结果；超限时按比例精简较早结果并合并旧执行记录。"""
 
     view = [dict(item) for item in messages]
     batches = _completed_tool_batches(view)
@@ -322,8 +322,9 @@ def compact_model_input(
 
     if emergency:
         previously_compacted = set(compacted_ids)
-        remaining = [call_id for call_id in execution_ids if call_id not in compacted_ids and call_id not in protected_ids]
-        compacted_ids.update(remaining[:emergency_compact])
+        full_ids = [call_id for call_id in execution_ids if call_id not in compacted_ids]
+        eligible = [call_id for call_id in full_ids if call_id not in protected_ids]
+        compacted_ids.update(eligible[:int(len(full_ids) * emergency_fraction)])
         for _, calls in batches:
             summarized_ids.update(call["id"] for call in calls if call["id"] in previously_compacted and call["id"] not in protected_ids)
 

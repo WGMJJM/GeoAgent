@@ -263,7 +263,7 @@ class AgentLoop:
                         compacted_ids=compacted_ids,
                         summarized_ids=summarized_ids,
                         recent_full=self.settings.tool_result_recent_full,
-                        emergency_compact=self.settings.tool_result_emergency_compact,
+                        emergency_fraction=self.settings.tool_result_emergency_fraction,
                     )
                     if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
                         model_messages = compact_model_input(
@@ -272,7 +272,7 @@ class AgentLoop:
                             compacted_ids=compacted_ids,
                             summarized_ids=summarized_ids,
                             recent_full=self.settings.tool_result_recent_full,
-                            emergency_compact=self.settings.tool_result_emergency_compact,
+                            emergency_fraction=self.settings.tool_result_emergency_fraction,
                             emergency=True,
                         )
                         start_message_id = current.metadata.get("original_request_message_id")
@@ -293,7 +293,7 @@ class AgentLoop:
                                     compacted_ids=compacted_ids,
                                     summarized_ids=summarized_ids,
                                     recent_full=self.settings.tool_result_recent_full,
-                                    emergency_compact=self.settings.tool_result_emergency_compact,
+                                    emergency_fraction=self.settings.tool_result_emergency_fraction,
                                 )
                     if history_changed or compacted_ids != previous_compacted_ids or summarized_ids != previous_summarized_ids:
                         self._save_checkpoint(

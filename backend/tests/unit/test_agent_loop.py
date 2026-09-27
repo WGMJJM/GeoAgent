@@ -67,7 +67,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     executor = ToolExecutor(registry, store, trace)
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
                                model_input_tokens=128000, tool_result_recent_full=16,
-                               tool_result_emergency_compact=8,
+                               tool_result_emergency_fraction=0.5,
                                tool_context_tokens=6400, tool_context_max_cards=16)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
@@ -1067,7 +1067,7 @@ def test_tool_results_slide_to_sixteen_and_emergency_summarizes_older_batches():
     marked: set[str] = set()
     summarized: set[str] = set()
     options = {"run_id": "run-test", "compacted_ids": marked, "summarized_ids": summarized,
-               "recent_full": 16, "emergency_compact": 8}
+               "recent_full": 16, "emergency_fraction": 0.5}
     view = compact_model_input(original, **options)
     assert marked == {"call_0", "call_1"}
     assert summarized == set()
@@ -1087,6 +1087,52 @@ def test_tool_results_slide_to_sixteen_and_emergency_summarizes_older_batches():
     assert all(json.loads(item["content"])["output"] == {"body": "x" * 4000} for item in original if item.get("role") == "tool")
 
 
+@pytest.mark.parametrize(
+    ("result_count", "recent_full"),
+    [(1, 16), (9, 16), (10, 16), (16, 16), (20, 20), (24, 16)],
+)
+def test_emergency_compacts_half_of_current_full_results(result_count, recent_full):
+    messages = [{"role": "system", "content": "固定规则"}]
+    for index in range(result_count):
+        call_id = f"call_{index}"
+        messages.append({"role": "assistant", "content": "", "tool_calls": [{
+            "id": call_id, "type": "function", "function": {"name": "test.report", "arguments": "{}"},
+        }]})
+        messages.append({"role": "tool", "tool_call_id": call_id,
+                         "content": '{"status":"SUCCESS","output":{"value":1}}'})
+
+    marked, summarized = set(), set()
+    compact_model_input(messages, run_id="run-test", compacted_ids=marked,
+                        summarized_ids=summarized, recent_full=recent_full,
+                        emergency_fraction=0.5, emergency=True)
+
+    routine_count = max(0, result_count - recent_full)
+    emergency_count = (result_count - routine_count) // 2
+    assert marked == {f"call_{index}" for index in range(routine_count + emergency_count)}
+    assert summarized == {f"call_{index}" for index in range(routine_count)}
+
+
+def test_emergency_keeps_latest_complete_batch_even_when_half_would_reach_it():
+    calls = [{"id": f"call_{index}", "type": "function",
+              "function": {"name": "test.report", "arguments": "{}"}} for index in range(10)]
+    messages = [{"role": "system", "content": "固定规则"}]
+    for call in calls[:4]:
+        messages.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        messages.append({"role": "tool", "tool_call_id": call["id"],
+                         "content": '{"status":"SUCCESS","output":{"value":1}}'})
+    messages.append({"role": "assistant", "content": "", "tool_calls": calls[4:]})
+    messages.extend({"role": "tool", "tool_call_id": call["id"],
+                     "content": '{"status":"SUCCESS","output":{"value":1}}'} for call in calls[4:])
+
+    marked, summarized = set(), set()
+    compact_model_input(messages, run_id="run-test", compacted_ids=marked,
+                        summarized_ids=summarized, recent_full=10,
+                        emergency_fraction=0.5, emergency=True)
+
+    assert marked == {f"call_{index}" for index in range(4)}
+    assert summarized == set()
+
+
 def test_tool_history_summary_keeps_remaining_calls_in_mixed_batch():
     calls = [
         {"id": name, "type": "function", "function": {"name": "test.report", "arguments": "{}"}}
@@ -1102,7 +1148,7 @@ def test_tool_history_summary_keeps_remaining_calls_in_mixed_batch():
     ]
     marked, summarized = {"old"}, set()
     view = compact_model_input(original, run_id="run-test", compacted_ids=marked,
-                               summarized_ids=summarized, recent_full=16, emergency_compact=1, emergency=True)
+                               summarized_ids=summarized, recent_full=16, emergency_fraction=0.5, emergency=True)
     assert summarized == {"old"}
     assert marked == {"old", "still_visible"}
     assert [call["id"] for item in view for call in item.get("tool_calls", [])] == ["still_visible", "latest"]
@@ -1176,7 +1222,7 @@ async def test_tool_history_summary_survives_checkpoint_restore(tmp_path):
                          "content": json.dumps({"status": "SUCCESS", "output": {"value": index}})})
     marked, summarized = set(), set()
     options = {"run_id": run.id, "compacted_ids": marked, "summarized_ids": summarized,
-               "recent_full": 16, "emergency_compact": 8}
+               "recent_full": 16, "emergency_fraction": 0.5}
     compact_model_input(messages, **options)
     compact_model_input(messages, emergency=True, **options)
     loop._save_checkpoint(request, run, messages, None, "context_compacted", set(), [],
@@ -1190,7 +1236,7 @@ async def test_tool_history_summary_survives_checkpoint_restore(tmp_path):
     replay = compact_model_input(restored, run_id=run.id,
                                  compacted_ids=set(checkpoint.state["compacted_tool_call_ids"]),
                                  summarized_ids=set(checkpoint.state["summarized_tool_call_ids"]),
-                                 recent_full=16, emergency_compact=8)
+                                 recent_full=16, emergency_fraction=0.5)
     assert [item["tool_call_id"] for item in replay if item["role"] == "tool"] == [f"result_{index}" for index in range(2, 18)]
     assert any("执行历史摘要" in item.get("content", "") for item in replay if item["role"] == "system")
 
