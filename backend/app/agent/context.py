@@ -361,7 +361,7 @@ def narrow_model_input(
     recent_results: int,
     count_tokens: Callable[[str], int] = estimate_tokens,
 ) -> list[dict[str, Any]]:
-    """最终兜底：只裁剪模型视图中的旧消息及成对工具调用与结果。"""
+    """最终兜底：逐轮移出一条旧消息和两次成对工具调用与结果。"""
 
     execution_ids = [
         call["id"]
@@ -369,7 +369,8 @@ def narrow_model_input(
         for call in calls
         if call["function"]["name"] != "tool.search"
     ]
-    kept_calls = set(execution_ids[-recent_results:])
+    recent_calls = execution_ids[-recent_results:]
+    kept_calls = set(recent_calls)
     dialogue_indices = [
         index
         for index, item in enumerate(messages)
@@ -400,12 +401,13 @@ def narrow_model_input(
         return view
 
     view = project()
-    for index in sorted(kept_dialogue):
-        if model_input_tokens(view, definitions, count_tokens) <= input_budget_tokens:
-            break
-        if index != latest_user:
-            kept_dialogue.remove(index)
-            view = project()
+    removable_dialogue = [index for index in sorted(kept_dialogue) if index != latest_user]
+    while model_input_tokens(view, definitions, count_tokens) > input_budget_tokens and (removable_dialogue or recent_calls):
+        if removable_dialogue:
+            kept_dialogue.remove(removable_dialogue.pop(0))
+        for _ in range(min(2, len(recent_calls))):
+            kept_calls.remove(recent_calls.pop(0))
+        view = project()
     return view
 
 

@@ -1121,7 +1121,14 @@ def test_final_budget_view_removes_oldest_messages_and_keeps_tool_pairs():
 
     first = narrow_model_input(original, [], input_budget_tokens=1_000_000, recent_messages=8, recent_results=16)
     dialogue = [index for index, item in enumerate(first) if item["role"] == "user"]
-    budget = model_input_tokens([item for index, item in enumerate(first) if index not in dialogue[:2]], [])
+    removed_calls = {f"call_{index}" for index in range(1, 5)}
+    expected = [
+        item for index, item in enumerate(first)
+        if index not in dialogue[:2]
+        and item.get("tool_call_id") not in removed_calls
+        and not any(call["id"] in removed_calls for call in item.get("tool_calls", []))
+    ]
+    budget = model_input_tokens(expected, [])
     reduced = narrow_model_input(original, [], input_budget_tokens=budget, recent_messages=8, recent_results=16)
 
     assert [item["content"] for item in reduced if item["role"] == "user"] == [
@@ -1129,7 +1136,7 @@ def test_final_budget_view_removes_oldest_messages_and_keeps_tool_pairs():
     ]
     declared = {call["id"] for item in reduced for call in item.get("tool_calls", [])}
     observed = {item["tool_call_id"] for item in reduced if item["role"] == "tool"}
-    assert declared == observed == {f"call_{index}" for index in range(1, 17)}
+    assert declared == observed == {f"call_{index}" for index in range(5, 17)}
     assert not any("执行历史摘要" in item.get("content", "") for item in reduced)
     assert len(original) == 46
 
@@ -1137,6 +1144,10 @@ def test_final_budget_view_removes_oldest_messages_and_keeps_tool_pairs():
     later_replies.extend({"role": "assistant", "content": f"后续回复 {index}"} for index in range(9))
     protected = narrow_model_input(later_replies, [], input_budget_tokens=1, recent_messages=8, recent_results=16)
     assert [item["content"] for item in protected if item["role"] == "user"] == ["当前请求"]
+
+    no_history = narrow_model_input(original, [], input_budget_tokens=1, recent_messages=8, recent_results=16)
+    assert [item["content"] for item in no_history if item["role"] == "user"] == [original[10]["content"]]
+    assert not any(item["role"] == "tool" for item in no_history)
 
     mixed_batch = [original[0], original[1], {
         "role": "assistant", "content": "", "tool_calls": [item["tool_calls"][0] for item in original if item.get("tool_calls")],

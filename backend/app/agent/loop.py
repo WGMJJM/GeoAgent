@@ -317,7 +317,7 @@ class AgentLoop:
                             result=AgentResult(
                                 agent_id=current.agent_id,
                                 status=AgentResultStatus.BLOCKED,
-                                summary="本轮输入经工具结果、会话摘要和最旧消息逐条精简后仍超过模型上下文预算；当前请求未被截断。",
+                                summary="本轮输入经会话摘要、旧消息与工具结果逐轮精简后仍超过模型上下文预算；当前请求未被截断。",
                                 error="BUDGET_EXCEEDED",
                                 trace_id=current.id,
                             ),
