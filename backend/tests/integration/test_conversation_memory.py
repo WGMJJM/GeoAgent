@@ -213,21 +213,25 @@ def test_incremental_summary_advances_by_message_range_and_preserves_raw_history
     assert len(model.requests) == 1
     first_payload = json.loads(model.requests[0].messages[1]["content"])
     first_ids = {item["message_id"] for item in first_payload["messages"]}
+    assert len(first_ids) == 12
     request = AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="继续分析")
     first_context = application.agent_loop.context.build(request)
     first_tail = application.store.list_messages_after(conversation_id, first.summarized_through_message_id)
-    assert len(first_tail) == 12
+    assert len(first_tail) == 8
+    assert first_ids.isdisjoint(item.id for item in first_tail)
     assert first_context[2:-1] == [{"role": item.role, "content": item.content} for item in first_tail]
     assert first_context[-1] == {"role": "user", "content": request.user_input}
 
     asyncio.run(run_rounds(10, 1))
     between_context = application.agent_loop.context.build(request)
     between_tail = application.store.list_messages_after(conversation_id, first.summarized_through_message_id)
-    assert len(between_tail) == 14
+    assert len(between_tail) == 10
     assert between_context[2:-1] == [{"role": item.role, "content": item.content} for item in between_tail]
     assert len(model.requests) == 1
 
-    asyncio.run(run_rounds(11, 3))
+    asyncio.run(run_rounds(11, 4))
+    assert len(model.requests) == 1  # 仅 10 条较早消息，还未达到 12 条门槛。
+    asyncio.run(run_rounds(15, 1))
     second = application.conversation_memory.get(conversation_id, user_id)
     assert second is not None
     assert second.summary_version == 2
@@ -235,10 +239,11 @@ def test_incremental_summary_advances_by_message_range_and_preserves_raw_history
     second_payload = json.loads(model.requests[1].messages[1]["content"])
     assert second_payload["old_summary"] == first.summary
     assert not first_ids.intersection(item["message_id"] for item in second_payload["messages"])
-    assert len(application.store.list_messages(conversation_id, limit=100)) == 28
+    assert len(second_payload["messages"]) == 12
+    assert len(application.store.list_messages(conversation_id, limit=100)) == 32
     second_tail = application.store.list_messages_after(conversation_id, second.summarized_through_message_id)
     second_context = application.agent_loop.context.build(request)
-    assert len(second_tail) == 12
+    assert len(second_tail) == 8
     assert second_context[2:-1] == [{"role": item.role, "content": item.content} for item in second_tail]
     context_memory = json.loads(second_context[1]["content"].split("\n", 1)[1])["conversation_memory"]
     assert context_memory["summary"] == second.summary
@@ -253,6 +258,35 @@ def test_incremental_summary_advances_by_message_range_and_preserves_raw_history
     assert persisted is not None
     assert persisted.summary == second.summary
     assert persisted.summary_version == second.summary_version
+
+
+@pytest.mark.parametrize("older_tokens", [6399, 6400])
+def test_summary_token_boundary_excludes_recent_messages_and_preserves_uncovered_batch(application, monkeypatch, older_tokens):
+    conversation_id, user_id = "summary-token-boundary", "summary-token-owner"
+    application.conversations.ensure(conversation_id, "摘要 token 边界", user_id=user_id)
+    raw = _seed_messages(application, conversation_id, start=0, exchanges=5)
+    model = _SummaryModel()
+    counts = {raw[0].content: 3200, raw[1].content: older_tokens - 3200}
+    # 最近 8 条即使很长，也不应计入较早消息的触发阈值。
+    monkeypatch.setattr(model, "count_tokens", lambda value: counts.get(value, 10000))
+    summarizer = application.conversation_memory.summarizer
+    assert (summarizer.recent_messages, summarizer.trigger_messages, summarizer.trigger_tokens) == (8, 12, 6400)
+    committed = asyncio.run(summarizer.summarize_pending(conversation_id, user_id, model))
+    assert committed is (older_tokens == 6400)
+    memory = application.conversation_memory.get(conversation_id, user_id)
+    assert memory is not None
+    if not committed:
+        assert model.requests == []
+        assert memory.summarized_through_message_id is None
+    else:
+        payload = json.loads(model.requests[0].messages[1]["content"])
+        # 沿用单批约 6k 的限制，只推进实际处理部分，不丢弃剩余候选。
+        assert [item["message_id"] for item in payload["messages"]] == [raw[0].id]
+        assert memory.summarized_through_message_id == raw[0].id
+        _, history = application.conversation_memory.load_context(conversation_id, user_id=user_id, recent_message_limit=24)
+        assert history == raw[1:]
+        assert history[-8:] == raw[-8:]
+    assert application.store.list_messages(conversation_id, limit=100) == raw
 
 
 @pytest.mark.parametrize("memory_state", ["missing", "summary_only", "cursor_only"])
@@ -303,8 +337,8 @@ def test_context_keeps_uncovered_backlog_after_summary_failure(application):
     assert memory["summary"] == old.summary
     assert memory["summary_version"] == old.summary_version
     assert memory["summarized_through_message_id"] == old.summarized_through_message_id
-    uncovered = raw[8:]
-    assert len(uncovered) == 42
+    uncovered = raw[12:]
+    assert len(uncovered) == 38
     assert context[2:] == [{"role": item.role, "content": item.content} for item in uncovered]
     assert application.store.list_messages(conversation_id, limit=100) == raw
 
@@ -344,7 +378,7 @@ def test_context_uses_one_summary_snapshot_during_concurrent_coverage_advance(ap
     assert calls == [old.summarized_through_message_id]
     assert memory["summary"] == old.summary
     assert memory["summary_version"] == old.summary_version
-    assert context[2:-1] == [{"role": item.role, "content": item.content} for item in raw[8:]]
+    assert context[2:-1] == [{"role": item.role, "content": item.content} for item in raw[12:]]
     latest = application.conversation_memory.get(conversation_id, user_id)
     assert latest is not None
     assert latest.summary_version == old.summary_version + 1
