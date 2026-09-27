@@ -35,9 +35,9 @@ from app.core.models import (
     WorkingMemoryDelta,
     new_id,
 )
+from app.memory.working_memory import WorkingMemoryUpdater
 from app.observability import EventType
 from app.run.lifecycle import persist_result
-from app.state.working_memory import WorkingMemoryUpdater
 
 DELEGATE_TOOL = {
     "type": "function",

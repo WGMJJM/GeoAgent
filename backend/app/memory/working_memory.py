@@ -12,8 +12,7 @@ from app.core.models import (
     WorkingMemoryDelta,
     WorkingMemoryItem,
 )
-
-from .store import StateStore
+from app.state.store import StateStore
 
 
 class WorkingMemoryUpdater:
