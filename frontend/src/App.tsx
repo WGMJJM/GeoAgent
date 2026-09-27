@@ -6,7 +6,7 @@ import { Icon, IconName } from "./components/Icon";
 import { LineagePanel } from "./components/LineagePanel";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
-import { agentLabel, displayEventMessage, eventLabel, findingText, formatLabel, kindLabel, statusLabel } from "./labels";
+import { displayEventMessage, eventLabel, formatLabel, kindLabel, statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string };
@@ -100,8 +100,6 @@ export function App() {
   const message = currentDraft.message;
   const selectedDatasetIds = currentDraft.selectedDatasetIds;
   const uploadedFiles = currentDraft.uploadedFiles;
-  const requestDatasetIds = selectedDatasetIds;
-  const requestAttachmentIds = useMemo(() => uploadedFiles.map((item) => item.id), [uploadedFiles]);
   const conversationRuns = useMemo(() => runsForConversation(conversationId, runs), [conversationId, runs]);
   const agentCount = useMemo(() => {
     return conversationRuns.filter(isExecutionInflight).length;
