@@ -87,16 +87,6 @@ class ApprovalService:
             self.store.update_approval(updated)
         return updated
 
-    def bind_continuation(self, approval_id: str, *, user_id: str, continuation_run_id: str) -> ApprovalRequest | None:
-        approval = self.get(approval_id, user_id=user_id)
-        if approval is None:
-            return None
-        if approval.status is not ApprovalStatus.APPROVED:
-            return approval
-        updated = approval.model_copy(update={"continuation_run_id": continuation_run_id})
-        self.store.update_approval(updated)
-        return updated
-
     def consume_if_matches(
         self,
         approval_id: str,

@@ -1315,14 +1315,6 @@ class StateStore:
             )
             db.commit()
 
-    def list_artifacts(self, run_id: str | None = None) -> list[Artifact]:
-        with self._connect() as db:
-            if run_id is None:
-                rows = db.execute("SELECT payload_json FROM artifacts ORDER BY created_at DESC").fetchall()
-            else:
-                rows = db.execute("SELECT payload_json FROM artifacts WHERE run_id=? ORDER BY created_at DESC", (run_id,)).fetchall()
-        return [self._model(Artifact, row[0]) for row in rows]
-
     def list_artifacts_for_user(self, user_id: str, run_id: str | None = None) -> list[Artifact]:
         query = "SELECT payload_json FROM artifacts WHERE (owner_user_id IS NULL OR owner_user_id=?)"
         args: list[Any] = [user_id]

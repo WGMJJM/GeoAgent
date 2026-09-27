@@ -12,12 +12,11 @@ from app.core.models import (
     Conversation,
     Message,
     Run,
-    RunStatus,
     new_id,
 )
 from app.memory import ConversationMemoryService
 from app.run import RunManager
-from app.run.predicates import is_execution_inflight, is_waiting_for_human
+from app.run.predicates import is_cancellable_run
 from app.state import StateStore
 
 DEFAULT_CONVERSATION_TITLE = "新对话"
@@ -60,7 +59,7 @@ class ConversationService:
             return False
         for run in self.store.list_runs_for_conversation(conversation_id):
             current = self.store.get_run(run.id)
-            if current is not None and (is_execution_inflight(current) or is_waiting_for_human(current)):
+            if current is not None and is_cancellable_run(current):
                 await self.run_manager.cancel(current.id)
         return self.store.delete_conversation(conversation_id, user_id=user_id)
 
@@ -77,15 +76,6 @@ class ConversationService:
             on_run=on_run,
             on_model_delta=on_model_delta,
         )
-
-    def latest_waiting_user_run(self, conversation_id: str, *, user_id: str | None = None) -> Run | None:
-        conversation = self.store.get_conversation(conversation_id)
-        if conversation is None or (user_id is not None and conversation.user_id not in {None, user_id}):
-            return None
-        for run in self.store.list_runs_for_conversation(conversation_id, limit=100):
-            if not run.parent_run_id and run.status is RunStatus.WAITING_USER and self.store.latest_checkpoint(run.id) is not None:
-                return run
-        return None
 
     async def continue_waiting_run(
         self,
@@ -122,7 +112,7 @@ class ConversationService:
                         id=new_id("msg"),
                         conversation_id=run.conversation_id,
                         role="assistant",
-                        content=_assistant_text(result),
+                        content=result.summary,
                         run_id=result.trace_id,
                     ),
                     user_id=user_id,
@@ -155,23 +145,3 @@ class ConversationService:
                 datetime.now(UTC).isoformat(),
                 user_id,
             )
-
-    async def save_exchange(self, request: AgentRequest, assistant_content: str) -> None:
-        """保存不创建 Run 的 Direct Chat / Query 消息。"""
-
-        await self._save_user_message(request)
-        await self.memory.save_message(
-            Message(
-                id=new_id("msg"),
-                conversation_id=request.conversation_id,
-                role="assistant",
-                content=assistant_content,
-            ),
-            user_id=request.user_id,
-        )
-
-    async def cancel(self, run_id: str) -> bool:
-        return await self.run_manager.cancel(run_id)
-
-def _assistant_text(result: AgentResult) -> str:
-    return result.summary

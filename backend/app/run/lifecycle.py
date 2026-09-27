@@ -14,12 +14,7 @@ from app.core.models import (
     Task,
     TaskStatus,
 )
-from app.run.predicates import is_cancellable_run, is_retryable_failed_run
 from app.state import StateStore
-
-
-def start_run(run: Run) -> Run:
-    return run.model_copy(update={"status": RunStatus.RUNNING, "started_at": datetime.now(UTC)})
 
 
 def finish_run(run: Run, status: RunStatus, *, error: str | None = None) -> Run:
@@ -54,8 +49,6 @@ def task_status_for_result(status: AgentResultStatus, error: str | None = None) 
     if status is AgentResultStatus.BLOCKED:
         if error in {"WAITING_USER", "NEEDS_CLARIFICATION", "APPROVAL_REQUIRED"}:
             return TaskStatus.WAITING
-        if error == "BUDGET_EXCEEDED":
-            return TaskStatus.BLOCKED
         return TaskStatus.BLOCKED
     return TaskStatus.FAILED
 
@@ -84,13 +77,6 @@ def persist_result(
         result_text=result.summary,
         metadata={"result": result.model_dump(mode="json"), **(metadata or {})},
     )
-
-
-def persist_run(store: StateStore, run: Run) -> Run:
-    """Lifecycle 统一承接运行时进度类 Run 写入。"""
-
-    store.save_run(run)
-    return run
 
 
 def resume(
@@ -192,12 +178,10 @@ def record_approval_decision(
 __all__ = [
     "finish_run",
     "persist_result",
-    "persist_run",
     "record_approval_decision",
     "record_approval_denied",
     "resume",
     "run_status_for_result",
-    "start_run",
     "transition",
     "task_status_for_result",
 ]
