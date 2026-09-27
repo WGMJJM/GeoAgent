@@ -29,8 +29,6 @@ class Settings(BaseSettings):
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
     max_tokens: int = Field(default=3200, ge=1)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
-    protocol_history_tokens: int = Field(default=51200, ge=1)
-    tool_result_compaction_ratio: float = Field(default=0.2, gt=0, le=1)
     tool_context_tokens: int = Field(default=6400, ge=1)
     tool_context_max_cards: int = Field(default=8, ge=1)
     max_execution_seconds: int = Field(default=300, ge=1)

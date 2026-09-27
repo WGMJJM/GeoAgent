@@ -628,23 +628,19 @@ def test_history_search_is_conversation_scoped_and_enters_context(application):
     assert context[-2]["content"] == old.content
     assert any(item["function"]["name"] == "conversation.search_history" for item in application.agent_loop._tool_definitions())
 
-    # 会话视图精简不会改写固定系统规则、用户记忆或原始调用/结果。
+    # 工具状态准备不会改写固定系统规则、用户记忆或原始调用/结果。
     invocation = {"role": "assistant", "content": "", "tool_calls": [
         {"id": "history-inspect", "type": "function", "function": {"name": "dataset.inspect", "arguments": json.dumps({"dataset_id": dataset.id})}},
     ]}
     result = ToolResult(call_id="history-inspect", status=ToolStatus.SUCCESS, output={"body": "x" * 4000})
     observation = {"role": "tool", "tool_call_id": result.call_id, "content": result.model_dump_json()}
     original = [*context, invocation, observation]
-    marked = set()
-    prepared = prepare_model_messages(original, application.agent_loop._tool_definitions(), [],
-                                      history_token_budget=100, compaction_ratio=0.2,
-                                      run_id=run.id, compacted_ids=marked)
+    prepared = prepare_model_messages(original, application.agent_loop._tool_definitions(), [])
     assert prepared[0] == context[0] == {"role": "system", "content": SYSTEM_PROMPT}
     assert prepared[2] == user_memory
     assert prepared[3] == context[2]
     assert prepared[-2] == invocation
-    assert json.loads(prepared[-1]["content"])["context_compacted"] is True
-    assert marked == {result.call_id}
+    assert json.loads(prepared[-1]["content"])["output"] == result.output
     assert json.loads(original[-1]["content"])["output"] == result.output
 
 
