@@ -42,6 +42,7 @@ from .context import (
     ContextBuilder,
     compact_model_input,
     model_input_tokens,
+    narrow_model_input,
     prepare_model_messages,
     tool_visibility,
     tool_visibility_message,
@@ -300,6 +301,15 @@ class AgentLoop:
                             pending_approvals, discovered_names=discovered_names, used_names=used_names,
                             compacted_ids=compacted_ids, summarized_ids=summarized_ids,
                         )
+                    if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
+                        model_messages = narrow_model_input(
+                            model_messages,
+                            model_tools,
+                            input_budget_tokens=self.settings.model_input_tokens,
+                            recent_messages=self.context.conversation_memory.summarizer.recent_messages,
+                            recent_results=self.settings.tool_result_recent_full,
+                            count_tokens=model.count_tokens,
+                        )
                     local_input_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
                     if local_input_tokens > self.settings.model_input_tokens:
                         return await self._finish(
@@ -307,7 +317,7 @@ class AgentLoop:
                             result=AgentResult(
                                 agent_id=current.agent_id,
                                 status=AgentResultStatus.BLOCKED,
-                                summary="本轮输入经工具结果精简和可用的会话摘要后仍超过模型上下文预算；当前请求与最近八条会话消息未被截断。",
+                                summary="本轮输入经工具结果、会话摘要和最旧消息逐条精简后仍超过模型上下文预算；当前请求未被截断。",
                                 error="BUDGET_EXCEEDED",
                                 trace_id=current.id,
                             ),

@@ -352,6 +352,63 @@ def compact_model_input(
     return projected
 
 
+def narrow_model_input(
+    messages: list[dict[str, Any]],
+    definitions: list[dict[str, Any]],
+    *,
+    input_budget_tokens: int,
+    recent_messages: int,
+    recent_results: int,
+    count_tokens: Callable[[str], int] = estimate_tokens,
+) -> list[dict[str, Any]]:
+    """最终兜底：只裁剪模型视图中的旧消息及成对工具调用与结果。"""
+
+    execution_ids = [
+        call["id"]
+        for _, calls in _completed_tool_batches(messages)
+        for call in calls
+        if call["function"]["name"] != "tool.search"
+    ]
+    kept_calls = set(execution_ids[-recent_results:])
+    dialogue_indices = [
+        index
+        for index, item in enumerate(messages)
+        if item.get("role") == "user" or (item.get("role") == "assistant" and not item.get("tool_calls"))
+    ]
+    latest_user = next((index for index in reversed(dialogue_indices) if messages[index]["role"] == "user"), None)
+    recent_dialogue = dialogue_indices[-recent_messages:]
+    if latest_user is not None and latest_user not in recent_dialogue:
+        recent_dialogue = [latest_user, *recent_dialogue[1:]]
+    kept_dialogue = set(recent_dialogue)
+
+    def project() -> list[dict[str, Any]]:
+        view = []
+        for index, item in enumerate(messages):
+            role = item.get("role")
+            if role == "system":
+                if not item["content"].startswith(TOOL_HISTORY_PREFIX):
+                    view.append(item)
+            elif role == "assistant" and item.get("tool_calls"):
+                calls = [call for call in item["tool_calls"] if call["id"] in kept_calls]
+                if calls:
+                    view.append({**item, "tool_calls": calls})
+            elif role == "tool":
+                if item["tool_call_id"] in kept_calls:
+                    view.append(item)
+            elif index in kept_dialogue:
+                view.append(item)
+        return view
+
+    view = project()
+    for index in sorted(kept_dialogue):
+        if model_input_tokens(view, definitions, count_tokens) <= input_budget_tokens:
+            break
+        if index != latest_user:
+            kept_dialogue.remove(index)
+            view = project()
+    return view
+
+
 def _completed_tool_batches(messages: list[dict[str, Any]]) -> list[tuple[int, list[dict[str, Any]]]]:
     observations = {item["tool_call_id"] for item in messages if item.get("role") == "tool"}
     return [
@@ -402,6 +459,7 @@ __all__ = [
     "prepare_model_messages",
     "model_input_tokens",
     "compact_model_input",
+    "narrow_model_input",
     "tool_visibility",
     "tool_visibility_message",
 ]

@@ -6,9 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.agent.context import (
+    TOOL_HISTORY_PREFIX,
     TOOL_VISIBILITY_PREFIX,
     compact_model_input,
     model_input_tokens,
+    narrow_model_input,
     prepare_model_messages,
 )
 from app.agent.loop import AgentLoop
@@ -1108,6 +1110,44 @@ def test_tool_history_summary_keeps_remaining_calls_in_mixed_batch():
     assert json.loads(next(item["content"] for item in view if item.get("tool_call_id") == "latest"))["output"] == {"value": 3}
 
 
+def test_final_budget_view_removes_oldest_messages_and_keeps_tool_pairs():
+    original = [{"role": "system", "content": "固定规则"}]
+    original.extend({"role": "user", "content": f"消息 {index}：" + "内容" * 300} for index in range(10))
+    original.append({"role": "system", "content": TOOL_HISTORY_PREFIX + "旧状态"})
+    for index in range(17):
+        calls = [{"id": f"call_{index}", "type": "function", "function": {"name": "test.report", "arguments": "{}"}}]
+        original.append({"role": "assistant", "content": "", "tool_calls": calls})
+        original.append({"role": "tool", "tool_call_id": f"call_{index}", "content": '{"status":"SUCCESS","output":{"value":1}}'})
+
+    first = narrow_model_input(original, [], input_budget_tokens=1_000_000, recent_messages=8, recent_results=16)
+    dialogue = [index for index, item in enumerate(first) if item["role"] == "user"]
+    budget = model_input_tokens([item for index, item in enumerate(first) if index not in dialogue[:2]], [])
+    reduced = narrow_model_input(original, [], input_budget_tokens=budget, recent_messages=8, recent_results=16)
+
+    assert [item["content"] for item in reduced if item["role"] == "user"] == [
+        f"消息 {index}：" + "内容" * 300 for index in range(4, 10)
+    ]
+    declared = {call["id"] for item in reduced for call in item.get("tool_calls", [])}
+    observed = {item["tool_call_id"] for item in reduced if item["role"] == "tool"}
+    assert declared == observed == {f"call_{index}" for index in range(1, 17)}
+    assert not any("执行历史摘要" in item.get("content", "") for item in reduced)
+    assert len(original) == 46
+
+    later_replies = [{"role": "user", "content": "当前请求"}]
+    later_replies.extend({"role": "assistant", "content": f"后续回复 {index}"} for index in range(9))
+    protected = narrow_model_input(later_replies, [], input_budget_tokens=1, recent_messages=8, recent_results=16)
+    assert [item["content"] for item in protected if item["role"] == "user"] == ["当前请求"]
+
+    mixed_batch = [original[0], original[1], {
+        "role": "assistant", "content": "", "tool_calls": [item["tool_calls"][0] for item in original if item.get("tool_calls")],
+    }]
+    mixed_batch.extend(item for item in original if item["role"] == "tool")
+    mixed_view = narrow_model_input(mixed_batch, [], input_budget_tokens=1_000_000, recent_messages=8, recent_results=16)
+    assert {call["id"] for item in mixed_view for call in item.get("tool_calls", [])} == {
+        item["tool_call_id"] for item in mixed_view if item["role"] == "tool"
+    } == {f"call_{index}" for index in range(1, 17)}
+
+
 @pytest.mark.asyncio
 async def test_tool_history_summary_survives_checkpoint_restore(tmp_path):
     store, loop = _loop(tmp_path, None)
@@ -1214,6 +1254,44 @@ async def test_over_budget_run_summarizes_old_conversation_and_keeps_latest_eigh
     checkpoint = store.latest_checkpoint(result.trace_id)
     assert checkpoint.state["conversation_history_count"] == 7
     assert store.list_messages(conversation.id, limit=100) == [*old, current]
+
+
+@pytest.mark.asyncio
+async def test_final_budget_view_reduces_oldest_messages_before_model_call(tmp_path, monkeypatch):
+    adapter = SequenceAdapter(ModelResponse(content="已回答当前问题"))
+    store, loop = _loop(tmp_path, adapter)
+    conversation = store.create_conversation("最终预算兜底", user_id="test-user")
+    history = []
+    for index in range(10):
+        item = Message(conversation_id=conversation.id, role="user" if index % 2 == 0 else "assistant",
+                       content=f"历史消息 {index}：" + "研究条件" * 500)
+        store.save_message(item)
+        history.append(item)
+    request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="回答当前问题")
+    current = Message(conversation_id=conversation.id, role="user", content=request.user_input)
+    store.save_message(current)
+    prepared = await loop.prepare_request(request)
+    services = loop._execution_services(request, prepared.run)
+    discovery = loop._discovery_context(request, services, prepared.run)
+    definitions, cards, _ = loop._tool_context(discovery, [], set(), count_tokens=adapter.count_tokens)
+    initial = prepare_model_messages(loop.context.build(request, run=prepared.run), definitions, cards)
+    first = narrow_model_input(initial, definitions, input_budget_tokens=1_000_000, recent_messages=8, recent_results=16)
+    dialogue = [index for index, item in enumerate(first) if item["role"] in {"user", "assistant"}]
+    loop.settings.model_input_tokens = model_input_tokens(
+        [item for index, item in enumerate(first) if index not in dialogue[:2]], definitions, adapter.count_tokens
+    )
+
+    async def no_summary(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(loop.context.conversation_memory, "compact_history_before", no_summary)
+    result = await loop.run(request, prepared=prepared)
+
+    assert result.status is AgentResultStatus.SUCCESS
+    sent = [item["content"] for item in adapter.requests[0].messages if item["role"] in {"user", "assistant"}]
+    assert sent == [item.content for item in [*history[-5:], current]]
+    assert model_input_tokens(adapter.requests[0].messages, adapter.requests[0].tools, adapter.count_tokens) <= loop.settings.model_input_tokens
+    assert store.list_messages(conversation.id, limit=100) == [*history, current]
 
 
 @pytest.mark.asyncio
