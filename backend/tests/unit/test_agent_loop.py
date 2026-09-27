@@ -62,7 +62,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     trace = TraceRecorder(store)
     executor = ToolExecutor(registry, store, trace)
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
-                               tool_context_tokens=6400, tool_context_max_cards=8)
+                               tool_context_tokens=6400, tool_context_max_cards=16)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
         store,
@@ -92,7 +92,7 @@ def _assert_tool_visibility(loop, request):
     assert visibility["callable"] == [item["function"]["name"] for item in request.tools]
     card_names = {item["name"] for item in visibility["cached"]}
     assert not (set(visibility["callable"]) & card_names)
-    assert len(card_names) + sum(loop.registry.is_deferred(name) for name in visibility["callable"]) <= 8
+    assert len(card_names) + sum(loop.registry.is_deferred(name) for name in visibility["callable"]) <= loop.settings.tool_context_max_cards
     tokens = estimate_tokens(json.dumps(request.tools, ensure_ascii=False, separators=(",", ":")))
     tokens += estimate_tokens(messages[0]["content"])
     assert tokens == loop._tool_context_tokens(request.tools, visibility["cached"])
@@ -752,10 +752,10 @@ async def test_later_search_preserves_used_schema_and_empty_search_keeps_unused_
 
 
 @pytest.mark.asyncio
-async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(tmp_path):
-    names = [f"test.operation_{index}" for index in range(9)]
+async def test_sixteen_tool_limit_keeps_discovery_records_and_restores_from_cache(tmp_path):
+    names = [f"test.operation_{index}" for index in range(17)]
     adapter = SequenceAdapter(
-        *[ModelResponse(tool_calls=[{"id": f"search_{index}", "function": {"name": "tool.search", "arguments": json.dumps({"query": f"unique_capability_{index}"})}}]) for index in range(9)],
+        *[ModelResponse(tool_calls=[{"id": f"search_{index}", "function": {"name": "tool.search", "arguments": json.dumps({"query": f"unique_capability_{index}"})}}]) for index in range(17)],
         ModelResponse(tool_calls=[{"id": "pause", "function": {"name": "agent.ask_user", "arguments": '{"question":"接下来使用第一个工具吗？"}'}}]),
         ModelResponse(tool_calls=[
             {"id": "evicted", "function": {"name": names[0], "arguments": "{}"}},
@@ -766,8 +766,8 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
         ModelResponse(content="已从发现缓存恢复并执行。"),
     )
     store, loop = _loop(tmp_path, adapter)
-    loop.settings.max_agent_turns = 13
-    loop.settings.max_tool_calls = 16
+    loop.settings.max_agent_turns = 21
+    loop.settings.max_tool_calls = 24
     executed = []
     for index, name in enumerate(names):
         loop.registry.register(ToolMetadata(name=name, description=f"unique_capability_{index}", input_schema={"type": "object"}),
@@ -788,10 +788,10 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
                             resume_from=saved, continuation={"type": "user_input", "content": "使用第一个工具"})
     assert result.status is AgentResultStatus.SUCCESS
     assert executed == [f"{result.trace_id}:execute"]
-    assert searches == [f"unique_capability_{index}" for index in range(9)]
-    assert names[0] not in {item["function"]["name"] for item in adapter.requests[9].tools}
-    assert names[0] in {item["function"]["name"] for item in adapter.requests[11].tools}
-    observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[11].messages if item["role"] == "tool"}
+    assert searches == [f"unique_capability_{index}" for index in range(17)]
+    assert names[0] not in {item["function"]["name"] for item in adapter.requests[17].tools}
+    assert names[0] in {item["function"]["name"] for item in adapter.requests[19].tools}
+    observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[19].messages if item["role"] == "tool"}
     assert observations["restore"]["output"]["source"] == "run_cache"
     assert observations["restore"]["output"]["already_callable"] is False
     assert observations["evicted"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
@@ -804,7 +804,7 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
     assert checkpoint.state["used_tool_names"] == [names[0]]
     raw = next(item for item in saved.state["protocol_messages"] if item.get("tool_call_id") == "search_0")
     assert "description" in json.loads(raw["content"])["output"]["tools"][0]
-    assert observations["search_8"]["output"]["tools"] == [{"name": names[8]}]
+    assert observations["search_16"]["output"]["tools"] == [{"name": names[16]}]
 
 
 @pytest.mark.parametrize("budget_delta", [0, -1])
@@ -836,7 +836,7 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
 
 def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     _, loop = _loop(tmp_path, None)
-    names = [f"test.detailed_{index}" for index in range(10)]
+    names = [f"test.detailed_{index}" for index in range(18)]
     for name in names:
         loop.registry.register(ToolMetadata(name=name, description="Detailed operation", input_schema={
             "type": "object", "properties": {"mode": {"type": "string", "enum": [f"choice_{index}" for index in range(160)]}},
@@ -846,11 +846,11 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     definitions, cards, active = loop._tool_context(context, [*names, "test.forbidden"], set(names) | {"test.forbidden"})
     assert cards and active
     visible = active | {item["name"] for item in cards}
-    assert len(visible) <= 8
+    assert len(visible) <= 16
     assert not (active & {item["name"] for item in cards})
     assert "test.forbidden" not in visible
     assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
-    assert visible <= set(names[-8:])
+    assert visible <= set(names[-16:])
     messages = prepare_model_messages([{"role": "system", "content": "original"}], definitions, cards)
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
     assert "test.forbidden" not in visibility["callable"]

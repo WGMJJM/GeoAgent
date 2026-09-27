@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     max_tokens: int = Field(default=3200, ge=1)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     tool_context_tokens: int = Field(default=6400, ge=1)
-    tool_context_max_cards: int = Field(default=8, ge=1)
+    tool_context_max_cards: int = Field(default=16, ge=1)
     max_execution_seconds: int = Field(default=300, ge=1)
     tool_timeout_seconds: int = Field(default=120, ge=1)
     enable_unsafe_python: bool = False
