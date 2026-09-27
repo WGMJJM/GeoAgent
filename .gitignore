@@ -33,10 +33,6 @@ frontend/tsconfig.tsbuildinfo
 
 # Local project design notes are kept outside the source repository.
 docs/
-!/docs/
-docs/*
-!/docs/rebuild/
-!/docs/rebuild/**
 
 # The project design README stays local until the project is complete.
 README.md
