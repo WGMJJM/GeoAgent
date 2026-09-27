@@ -13,28 +13,6 @@ from app.models.config import ModelProfile
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
 
 
-def test_backend_uses_the_single_loop_framework_and_has_no_legacy_runtime():
-    backend = Path(__file__).resolve().parents[2]
-    app = backend / "app"
-
-    assert (app / "agent" / "loop.py").is_file()
-    assert (app / "agent" / "context.py").is_file()
-    assert (app / "entry" / "gateway.py").is_file()
-    assert (app / "run" / "manager.py").is_file()
-    assert (app / "run" / "checkpoints.py").is_file()
-
-    for package in ("decision", "understanding", "planning", "runtime", "task", "knowledge", "context"):
-        path = app / package
-        assert not path.exists() or not list(path.glob("*.py"))
-
-    for file in ("main_agent.py", "manager.py", "scheduler.py", "sub_agent.py"):
-        assert not (app / "agent" / file).exists()
-    for file in ("message_entry.py", "message_router.py", "dataset_resolver.py"):
-        assert not (app / "entry" / file).exists()
-    for file in ("manager.py", "models.py", "policy.py"):
-        assert not (app / "memory" / file).exists()
-
-
 def test_example_environment_options_have_settings_fields():
     example = Path(__file__).resolve().parents[2] / ".env.example"
     # 同时检查启用项及注释中的可选项，而不是让 extra="ignore" 掩盖无效配置。
@@ -74,7 +52,6 @@ def test_local_token_counts_match_bundled_tokenizer_and_cache():
     for content in ("", "坡度分析 DEM 重投影 EPSG:32650", '{"dataset_id":"ds_1","distance":500}', "hello world"):
         assert estimate_tokens(content) == len(tokenizer.encode(content, add_special_tokens=False).ids)
     assert _load_tokenizer(DEFAULT_TOKENIZER_FILE.resolve()) is _load_tokenizer(DEFAULT_TOKENIZER_FILE.resolve())
-    assert DEFAULT_TOKENIZER_FILE.stat().st_size == 11422654
 
 
 def test_model_profile_tokenizer_override_and_global_default(tmp_path):

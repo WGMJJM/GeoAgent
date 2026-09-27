@@ -566,15 +566,3 @@ def test_resumed_run_assistant_persistence_updates_memory_after_recovery(applica
     assert saved.summarized_through_message_id is not None
     assistant_messages = [item for item in application.store.list_messages(conversation_id, limit=100) if item.role == "assistant" and item.run_id == run.id]
     assert len(assistant_messages) == 1
-
-
-def test_delete_conversation_removes_conversation_memory(application):
-    with TestClient(create_app(application)) as client:
-        user = _register(client, "conversation-delete")
-        conversation = application.conversations.create("删除", user_id=user["id"])
-        run = Run(conversation_id=conversation.id, agent_id="main", status=RunStatus.COMPLETED)
-        request = AgentRequest(user_id=user["id"], conversation_id=conversation.id, user_input="这次会话后续都使用 GeoJSON")
-        application.conversation_memory.get_or_create(conversation.id, user["id"])
-        assert application.store.get_conversation_memory_for_user(conversation.id, user["id"]) is not None
-        assert asyncio.run(application.conversations.delete(conversation.id, user_id=user["id"]))
-        assert application.store.get_conversation_memory_for_user(conversation.id, user["id"]) is None

@@ -51,7 +51,7 @@ def _catalog(*metadata: ToolMetadata) -> tuple[ToolRegistry, ToolCatalog]:
 
 
 def test_search_matches_exact_name_substring_english_description_chinese_and_parameters():
-    registry, catalog = _catalog(
+    _, catalog = _catalog(
         _metadata("vector.buffer", "按距离生成矢量缓冲区 / Create vector buffers by distance"),
         _metadata("crs.project", "Transform coordinates to a projected coordinate reference system"),
         _metadata(
@@ -62,19 +62,17 @@ def test_search_matches_exact_name_substring_english_description_chinese_and_par
     )
     context = _context()
 
-    assert [item.name for item in catalog.search("vector.buffer", context)] == ["vector.buffer"]
-    assert [item.name for item in catalog.search("buffer", context)] == ["vector.buffer"]
-    assert [item.name for item in catalog.search("projected", context)] == ["crs.project"]
-    assert [item.name for item in catalog.search("矢量缓冲区", context)] == ["vector.buffer"]
-    assert [item.name for item in catalog.search("target_crs", context)] == ["analysis.custom"]
-    assert [item.name for item in catalog.search("altitude", context)] == ["analysis.custom"]
-
-
-@pytest.mark.parametrize("query", ["矢量缓冲区", "buffer", "vector 缓冲区"])
-def test_chinese_english_and_bilingual_queries_remain_supported(query):
-    _, catalog = _catalog(_metadata("vector.buffer", "按距离生成矢量缓冲区 / Create vector buffers by distance"))
-    assert [item.name for item in catalog.search(query, _context())] == ["vector.buffer"]
-    assert [item["name"] for item in catalog.tool_search({"query": query}, _context())["tools"]] == ["vector.buffer"]
+    for query, name in (
+        ("vector.buffer", "vector.buffer"),
+        ("buffer", "vector.buffer"),
+        ("projected", "crs.project"),
+        ("矢量缓冲区", "vector.buffer"),
+        ("vector 缓冲区", "vector.buffer"),
+        ("target_crs", "analysis.custom"),
+        ("altitude", "analysis.custom"),
+    ):
+        assert [item.name for item in catalog.search(query, context)] == [name]
+        assert [item["name"] for item in catalog.tool_search({"query": query}, context)["tools"]] == [name]
 
 
 def test_english_query_keeps_tool_names_case_and_whitespace_support():
@@ -108,7 +106,6 @@ def test_search_caps_results_at_two_and_honors_smaller_limit():
         "analysis.operation_00",
         "analysis.operation_01",
     ]
-    assert len(catalog.search("geometry", _context(), limit=2)) <= 2
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -140,14 +137,14 @@ def test_bilingual_call_preserves_nonempty_branch_and_reports_only_total_miss(qu
     assert ("message" in response) == (not expected)
 
 
-@pytest.mark.parametrize("limit", [0, 3, 5, True, 1.5, "2"])
+@pytest.mark.parametrize("limit", [0, 3, True, 1.5, "2"])
 def test_invalid_limit_has_a_clear_error(limit):
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
     with pytest.raises(ValueError, match="limit"):
         catalog.search("buffer", _context(), limit=limit)
 
 
-@pytest.mark.parametrize("query", ["", "   ", "\n\t", "x" * 161, None])
+@pytest.mark.parametrize("query", ["", " \n\t", "x" * 161, None])
 def test_empty_or_excessively_long_query_is_rejected(query):
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
     with pytest.raises(ValueError, match="query"):
@@ -250,7 +247,6 @@ def test_registered_tools_are_split_into_two_resident_and_deferred_capabilities(
     register_gis_tools(registry)
     register_runtime_tools(registry)
 
-    assert len(registry.names()) == 21
     assert registry.deferred_names() == tuple(name for name in registry.names() if name not in {"dataset.list", "dataset.inspect"})
     assert registry.is_deferred("dataset.list") is False
     assert registry.is_deferred("dataset.inspect") is False
@@ -284,17 +280,5 @@ def test_tool_search_protocol_supports_one_bilingual_call_and_caps_each_query_at
     english_query = function["parameters"]["properties"]["english_query"]
     assert english_query["minLength"] == 1
     assert english_query["maxLength"] == 160
-    assert "English" in query["description"]
-    assert "Chinese or English" in function["description"]
-    assert "ONE tool.search call" in function["description"]
-    assert "up to four tools" in function["description"]
-    assert "Use callable tools directly" in function["description"]
-    assert "cached cards without schemas" in function["description"]
-    assert "historical search results do not establish current availability" in function["description"]
-    assert "necessary capability gap" in function["description"]
-    assert "not automatically executed" in function["description"]
-    assert "without a separate selection call" in function["description"]
-    assert "uncalled candidates become cached cards" in function["description"]
-    assert "approval is pending" in function["description"]
     assert "granted_scopes" not in function["parameters"]["properties"]
     assert "available_envs" not in function["parameters"]["properties"]

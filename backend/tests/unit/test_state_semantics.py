@@ -129,7 +129,9 @@ def test_state_store_migrates_legacy_core_payload_columns(tmp_path):
             CREATE TABLE datasets (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE artifacts (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE TABLE tool_calls (id TEXT PRIMARY KEY, run_id TEXT, name TEXT NOT NULL, arguments_json TEXT NOT NULL, result_json TEXT, created_at TEXT NOT NULL);
+            CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, run_id TEXT, created_at TEXT NOT NULL);
             INSERT INTO conversations VALUES ('conv_legacy', '旧会话', 'user-1', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+            INSERT INTO messages VALUES ('msg_legacy', 'conv_legacy', 'user', '旧消息', NULL, '2026-01-01T00:00:00+00:00');
             """
         )
         db.execute("INSERT INTO tasks VALUES (?,?,?)", (task.id, task.model_dump_json(), task.updated_at.isoformat()))
@@ -139,11 +141,14 @@ def test_state_store_migrates_legacy_core_payload_columns(tmp_path):
 
     store = StateStore(database)
     store.initialize()
+    store.save_message(Message(id="msg_new", conversation_id="conv_legacy", role="user", content="新消息", dataset_ids=["roads"]))
 
     assert store.get_task(task.id) == task
     assert store.get_run(run.id) == run
     assert store.get_dataset_for_user(dataset.id, "user-1") == dataset
     assert store.get_artifact_for_user(artifact.id, "user-1") == artifact
+    messages = store.list_messages("conv_legacy")
+    assert [(item.content, item.dataset_ids) for item in messages] == [("旧消息", []), ("新消息", ["roads"])]
     with store._connect() as db:
         assert {row[1] for row in db.execute("PRAGMA table_info(runs)").fetchall()} >= {"conversation_id", "status", "metadata_json"}
         assert {row[1] for row in db.execute("PRAGMA table_info(tasks)").fetchall()} >= {"conversation_id", "goal", "status"}
