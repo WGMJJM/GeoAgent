@@ -58,7 +58,27 @@ class ConversationSummarizer:
         self.recent_messages = max(1, recent_messages)
         self.timeout_seconds = max(0.1, timeout_seconds)
 
-    async def summarize_pending(self, conversation_id: str, user_id: str, adapter: ModelAdapter | None) -> bool:
+    async def summarize_all_pending(
+        self, conversation_id: str, user_id: str, adapter: ModelAdapter | None, *, protected_message_id: str
+    ) -> bool:
+        """超限时绕过平时触发阈值，逐批覆盖最近八条之前的全部消息。"""
+
+        changed = False
+        while await self.summarize_pending(
+            conversation_id, user_id, adapter, force=True, protected_message_id=protected_message_id
+        ):
+            changed = True
+        return changed
+
+    async def summarize_pending(
+        self,
+        conversation_id: str,
+        user_id: str,
+        adapter: ModelAdapter | None,
+        *,
+        force: bool = False,
+        protected_message_id: str | None = None,
+    ) -> bool:
         if adapter is None:
             return False
         memory = self.store.get_conversation_memory_for_user(conversation_id, user_id)
@@ -74,13 +94,17 @@ class ConversationSummarizer:
         if len(unprocessed) <= self.recent_messages:
             return False
         eligible = unprocessed[:-self.recent_messages]
+        if protected_message_id is not None:
+            protected_index = next((index for index, item in enumerate(eligible) if item.id == protected_message_id), None)
+            if protected_index is not None:
+                eligible = eligible[:protected_index]
         if not eligible:
             return False
         pending_tokens = sum(adapter.count_tokens(item.content) for item in eligible)
-        if len(eligible) < self.trigger_messages and pending_tokens < self.trigger_tokens:
+        if not force and len(eligible) < self.trigger_messages and pending_tokens < self.trigger_tokens:
             return False
 
-        batch = _bounded_batch(eligible, adapter.count_tokens)
+        batch = _bounded_batch(eligible, adapter.count_tokens, full_content=force)
         if not batch:
             return False
         verified_runs, verified_resources = self._verified_context(batch, conversation_id, user_id)
@@ -96,7 +120,7 @@ class ConversationSummarizer:
                 {
                     "message_id": item.id,
                     "role": item.role,
-                    "content": item.content[:5000],
+                    "content": item.content if force else item.content[:5000],
                     "dataset_ids": item.dataset_ids,
                     "run_id": item.run_id,
                 }
@@ -345,11 +369,11 @@ def _entry_view(entry: ConversationMemoryEntry) -> dict[str, str | None]:
     }
 
 
-def _bounded_batch(messages: list[Message], count_tokens=estimate_tokens) -> list[Message]:
+def _bounded_batch(messages: list[Message], count_tokens=estimate_tokens, *, full_content: bool = False) -> list[Message]:
     batch: list[Message] = []
     tokens = 0
     for message in messages[:SUMMARY_MAX_BATCH_MESSAGES]:
-        estimate = count_tokens(message.content[:5000])
+        estimate = count_tokens(message.content if full_content else message.content[:5000])
         if batch and tokens + estimate > SUMMARY_MAX_BATCH_TOKENS:
             break
         batch.append(message)

@@ -187,6 +187,21 @@ class ConversationMemoryService:
                 exc_info=True,
             )
 
+    async def compact_history_before(self, request: AgentRequest, adapter: ModelAdapter, message_id: str) -> bool:
+        """仅在当前会话超限时强制推进摘要；失败不改变原始消息或已有摘要。"""
+
+        if not request.user_id or not self._can_access(request.conversation_id, request.user_id):
+            return False
+        before = self.get(request.conversation_id, request.user_id)
+        try:
+            return await self.summarizer.summarize_all_pending(
+                request.conversation_id, request.user_id, adapter, protected_message_id=message_id
+            )
+        except Exception:
+            logger.warning("conversation_emergency_summary_failed conversation_id=%s", request.conversation_id, exc_info=True)
+            after = self.get(request.conversation_id, request.user_id)
+            return after is not None and after.summary_version != (before.summary_version if before else 0)
+
     def search_history(
         self,
         conversation_id: str,

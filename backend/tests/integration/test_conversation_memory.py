@@ -260,6 +260,30 @@ def test_incremental_summary_advances_by_message_range_and_preserves_raw_history
     assert persisted.summary_version == second.summary_version
 
 
+def test_emergency_summary_bypasses_trigger_but_keeps_latest_eight_complete(application):
+    conversation_id, user_id = "summary-emergency", "summary-emergency-owner"
+    application.conversations.ensure(conversation_id, "超限摘要", user_id=user_id)
+    long_message = Message(id="msg-emergency-long", conversation_id=conversation_id, role="user", content="完整长消息" * 1500)
+    old_answer = Message(id="msg-emergency-answer", conversation_id=conversation_id, role="assistant", content="已记录。")
+    application.store.save_message(long_message)
+    application.store.save_message(old_answer)
+    raw = [long_message, old_answer, *_seed_messages(application, conversation_id, start=0, exchanges=4)]
+    model = _SummaryModel()
+
+    assert asyncio.run(application.conversation_memory.summarizer.summarize_all_pending(
+        conversation_id, user_id, model, protected_message_id=raw[-2].id
+    ))
+    memory = application.conversation_memory.get(conversation_id, user_id)
+    assert memory is not None
+    assert memory.summarized_through_message_id == raw[1].id
+    assert len(model.requests) >= 1
+    payload = json.loads(model.requests[0].messages[1]["content"])
+    assert payload["messages"][0]["content"] == long_message.content
+    _, tail = application.conversation_memory.load_context(conversation_id, user_id=user_id, recent_message_limit=24)
+    assert tail == raw[-8:]
+    assert application.store.list_messages(conversation_id, limit=100) == raw
+
+
 @pytest.mark.parametrize("older_tokens", [6399, 6400])
 def test_summary_token_boundary_excludes_recent_messages_and_preserves_uncovered_batch(application, monkeypatch, older_tokens):
     conversation_id, user_id = "summary-token-boundary", "summary-token-owner"
