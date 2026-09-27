@@ -274,7 +274,7 @@ def create_app(application: Application | None = None) -> FastAPI:
     async def conversation_messages(conversation_id: str, limit: int = 100, current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
         if geoagent.store.get_conversation_for_user(conversation_id, current_user.id) is None:
             raise HTTPException(status_code=404, detail="conversation not found")
-        return [item.model_dump(mode="json") for item in geoagent.store.list_messages(conversation_id, limit)]
+        return [item.model_dump(mode="json") for item in geoagent.conversation_memory.list_messages(conversation_id, user_id=current_user.id, limit=limit)]
 
     @api.get("/api/v1/runs")
     async def runs(limit: int = 50, current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:

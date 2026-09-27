@@ -7,8 +7,9 @@ from collections.abc import Callable
 from math import ceil
 from typing import Any
 
-from app.core.models import AgentRequest, Run
+from app.core.models import AgentRequest, ConversationMemory, Run
 from app.core.tokens import estimate_tokens
+from app.memory import ConversationMemoryService
 from app.state import StateStore
 
 SYSTEM_PROMPT = """你是 GeoAgent，一个通用 GIS 辅助 Agent。根据用户目标和已验证的上下文，自行决定直接回答、调用可用工具或提出澄清问题；不要依赖固定工作流。
@@ -36,8 +37,8 @@ class ContextBuilder:
         self,
         store: StateStore,
         *,
+        conversation_memory: ConversationMemoryService,
         profile_service=None,
-        conversation_memory=None,
         recent_message_limit: int = 24,
     ) -> None:
         self.store = store
@@ -56,7 +57,13 @@ class ContextBuilder:
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
         if run is not None and run.parent_run_id:
             return self._child_messages(request, run, protocol_messages, append_request)
-        trusted_context = self._trusted_context(request, run)
+        memory, persisted = self.conversation_memory.load_context(
+            request.conversation_id,
+            user_id=request.user_id,
+            recent_message_limit=self.recent_message_limit,
+            include_history=protocol_messages is None,
+        )
+        trusted_context = self._trusted_context(request, run, memory)
         if trusted_context:
             serialized = json.dumps(trusted_context, ensure_ascii=False, separators=(",", ":"))
             messages.append(
@@ -67,13 +74,6 @@ class ContextBuilder:
             )
 
         if protocol_messages is None:
-            # 使用已装入上下文的同一摘要快照，避免并发更新后摘要与覆盖边界错配。
-            memory = trusted_context.get("conversation_memory", {})
-            through_message_id = memory.get("summarized_through_message_id") if memory.get("summary") else None
-            if through_message_id is not None:
-                persisted = self.store.list_messages_after(request.conversation_id, through_message_id)
-            else:
-                persisted = self.store.list_messages(request.conversation_id, limit=self.recent_message_limit)
             history = [{"role": item.role, "content": item.content} for item in persisted]
         else:
             history = protocol_messages
@@ -123,7 +123,7 @@ class ContextBuilder:
             messages.append({"role": "user", "content": request.user_input})
         return messages
 
-    def _trusted_context(self, request: AgentRequest, run: Run | None) -> dict[str, Any]:
+    def _trusted_context(self, request: AgentRequest, run: Run | None, memory: ConversationMemory | None) -> dict[str, Any]:
         context: dict[str, Any] = {}
         conversation = self.store.get_conversation(request.conversation_id)
         if conversation is not None and request.user_id and conversation.user_id not in {None, request.user_id}:
@@ -135,22 +135,20 @@ class ContextBuilder:
         if profile is not None:
             context["user_profile"] = profile.model_dump(mode="json", exclude={"user_id", "updated_at"})
 
-        if self.conversation_memory is not None and request.user_id:
-            memory = self.conversation_memory.get(request.conversation_id, request.user_id)
-            if memory is not None:
-                context["conversation_memory"] = {
-                    "summary": memory.summary,
-                    "summary_version": memory.summary_version,
-                    "summarized_through_message_id": memory.summarized_through_message_id,
-                    "key_facts": [_memory_entry(item) for item in memory.key_facts[-8:]],
-                    "decisions": [_memory_entry(item) for item in memory.decisions[-8:]],
-                    "unresolved_topics": [_memory_entry(item) for item in memory.unresolved_topics[-8:]],
-                    "important_references": [
-                        reference
-                        for item in memory.important_references[-8:]
-                        if (reference := self._verified_memory_reference(item, request)) is not None
-                    ],
-                }
+        if memory is not None:
+            context["conversation_memory"] = {
+                "summary": memory.summary,
+                "summary_version": memory.summary_version,
+                "summarized_through_message_id": memory.summarized_through_message_id,
+                "key_facts": [_memory_entry(item) for item in memory.key_facts[-8:]],
+                "decisions": [_memory_entry(item) for item in memory.decisions[-8:]],
+                "unresolved_topics": [_memory_entry(item) for item in memory.unresolved_topics[-8:]],
+                "important_references": [
+                    reference
+                    for item in memory.important_references[-8:]
+                    if (reference := self._verified_memory_reference(item, request)) is not None
+                ],
+            }
 
         selected = self._verified_selected_datasets(request)
         if selected:

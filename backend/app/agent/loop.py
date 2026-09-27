@@ -104,7 +104,7 @@ class AgentLoop:
         model_provider: Callable[[str | None], ModelAdapter | None],
         services_factory: Callable[[str | None], dict[str, Any]],
         *,
-        context_services: dict[str, Any] | None = None,
+        context_services: dict[str, Any],
         metrics=None,
     ) -> None:
         self.store = store
@@ -117,11 +117,10 @@ class AgentLoop:
         self.model_provider = model_provider
         self.services_factory = services_factory
         self.metrics = metrics
-        context_services = context_services or {}
         self.context = ContextBuilder(
             store,
             profile_service=context_services.get("profile"),
-            conversation_memory=context_services.get("conversation_memory"),
+            conversation_memory=context_services["conversation_memory"],
         )
         self.model_adapter: ModelAdapter | None = None
         self.model_adapters: dict[str, ModelAdapter] = {}
@@ -144,7 +143,7 @@ class AgentLoop:
             metadata={
                 "request_id": request.request_id,
                 "original_request": request.user_input,
-                "original_request_message_id": _latest_user_message_id(self.store, request.conversation_id),
+                "original_request_message_id": self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id),
                 "protocol_version": 1,
                 **(metadata or {}),
             },
@@ -434,15 +433,12 @@ class AgentLoop:
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.FAILED, error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=problem))
                         else:
                             limit = int(arguments.get("limit", 5))
-                            if request.user_id and self.context.conversation_memory is not None:
-                                found = self.context.conversation_memory.search_history(
-                                    request.conversation_id,
-                                    request.user_id,
-                                    arguments["query"],
-                                    limit=limit,
-                                )
-                            else:
-                                found = self.store.search_messages(request.conversation_id, arguments["query"], limit=limit)
+                            found = self.context.conversation_memory.search_history(
+                                request.conversation_id,
+                                request.user_id,
+                                arguments["query"],
+                                limit=limit,
+                            )
                             result = ToolResult(
                                 call_id=persisted_id,
                                 status=ToolStatus.SUCCESS,
@@ -854,7 +850,7 @@ class AgentLoop:
         continuation: dict[str, object] | None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         if checkpoint is None:
-            return self.context.build(request, run=run), _latest_user_message_id(self.store, request.conversation_id)
+            return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
 
         state = checkpoint.state
         saved = state.get("protocol_messages")
@@ -865,7 +861,7 @@ class AgentLoop:
             if isinstance(content, str) and content.strip():
                 protocol.append({"role": "user", "content": content.strip()})
         if not protocol:
-            return self.context.build(request, run=run), _latest_user_message_id(self.store, request.conversation_id)
+            return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
         built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
         return built, cursor_id
 
@@ -1032,13 +1028,6 @@ def _tool_observation(result: ToolResult) -> str:
         "error": result.error.model_dump(mode="json") if result.error else None,
     }
     return json.dumps(payload, ensure_ascii=False, default=str)
-
-
-def _latest_user_message_id(store: StateStore, conversation_id: str) -> str | None:
-    for item in reversed(store.list_messages(conversation_id, limit=100)):
-        if item.role == "user":
-            return item.id
-    return None
 
 
 __all__ = ["AgentLoop", "LoopPreparedRequest"]

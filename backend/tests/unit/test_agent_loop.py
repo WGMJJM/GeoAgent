@@ -22,6 +22,7 @@ from app.core.models import (
 )
 from app.core.tokens import estimate_tokens
 from app.execution.tools import ToolExecutor, ToolRegistry
+from app.memory import ConversationMemoryService
 from app.models import ModelAdapter, ModelRequest, ModelResponse, ModelStreamChunk
 from app.observability import TraceRecorder
 from app.run.lifecycle import record_approval_decision
@@ -78,6 +79,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
             "workspace": object(),
             "user_id": user_id,
         },
+        context_services={"conversation_memory": ConversationMemoryService(store)},
     )
     return store, loop
 
@@ -99,7 +101,7 @@ def _assert_tool_visibility(loop, request):
 
 
 async def _run(loop: AgentLoop, store: StateStore, text: str, on_model_delta=None):
-    conversation = store.create_conversation("测试")
+    conversation = store.create_conversation("测试", user_id="test-user")
     request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input=text)
     store.save_message(Message(conversation_id=conversation.id, role="user", content=text))
     prepared = await loop.prepare_request(request)
@@ -1021,7 +1023,7 @@ async def test_model_can_search_original_messages_on_demand(tmp_path):
         ModelResponse(content="历史记录里提到 500 米。"),
     )
     store, loop = _loop(tmp_path, adapter)
-    conversation = store.create_conversation("历史检索")
+    conversation = store.create_conversation("历史检索", user_id="test-user")
     store.save_message(Message(conversation_id=conversation.id, role="user", content="道路缓冲距离采用 500 米。"))
     request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="之前的距离是多少？")
     store.save_message(Message(conversation_id=conversation.id, role="user", content=request.user_input))
