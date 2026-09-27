@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.core.models import (
-    PendingQuestion,
     ToolResult,
     ToolStatus,
     WorkingMemory,
@@ -28,17 +27,6 @@ class WorkingMemoryUpdater:
         memory = WorkingMemory(task_id=task_id, conversation_id=conversation_id)
         self.store.save_working_memory(memory)
         return memory
-
-    def update_from_tool_result(self, task_id: str | None, result: ToolResult, *, run_id: str | None) -> WorkingMemory | None:
-        if not task_id:
-            return None
-        memory = self.store.get_working_memory(task_id)
-        if memory is None:
-            return None
-        delta = self.build_delta_from_tool_result(result, run_id=run_id)
-        updated = self.apply_delta(memory, delta)
-        self.store.save_working_memory(updated)
-        return updated
 
     def build_delta_from_tool_result(self, result: ToolResult, *, run_id: str | None) -> WorkingMemoryDelta:
         intermediate: list[WorkingMemoryItem] = []
@@ -64,56 +52,6 @@ class WorkingMemoryUpdater:
             unresolved_questions=list(dict.fromkeys(item.strip() for item in questions if item and item.strip())),
             source_run_id=run_id,
         )
-
-    def add_unresolved_questions(self, task_id: str | None, questions: list[str], *, run_id: str | None) -> WorkingMemory | None:
-        if not task_id:
-            return None
-        memory = self.store.get_working_memory(task_id)
-        if memory is None:
-            return None
-        updated = self.apply_delta(memory, self.build_unresolved_question_delta(questions, run_id=run_id))
-        pending = list(updated.pending_questions)
-        intermediates = list(updated.intermediate_results)
-        for question in questions:
-            normalized = question.strip()
-            if normalized and not any(item.content.casefold() == normalized.casefold() and item.source_run_id == run_id for item in pending):
-                pending.append(PendingQuestion(content=normalized, source_run_id=run_id))
-            if normalized:
-                _append_intermediate_unique(intermediates, WorkingMemoryItem(kind="question", reference_id=run_id, summary=f"待补充：{normalized}", source_run_id=run_id))
-        updated = updated.model_copy(update={"pending_questions": pending, "intermediate_results": intermediates, "updated_at": _now()})
-        self.store.save_working_memory(updated)
-        return updated
-
-    def resolve_questions(self, task_id: str | None, *, source_run_id: str | None) -> WorkingMemory | None:
-        """只清理指定 waiting Run 产生的问题，不影响其他待确认事项。"""
-
-        if not task_id:
-            return None
-        memory = self.store.get_working_memory(task_id)
-        if memory is None:
-            return None
-        if source_run_id is None:
-            return memory
-        pending = [item for item in memory.pending_questions if item.source_run_id != source_run_id]
-        question_texts = {item.content.casefold() for item in pending}
-        # 老版本只有字符串列表时，按对应 source_run 的中间结果删除；
-        # 新版本的 PendingQuestion 会成为精确来源。
-        if memory.pending_questions:
-            remaining_text = [question for question in memory.unresolved_questions if question.casefold() in question_texts]
-        else:
-            remaining_text = list(memory.unresolved_questions)
-        intermediates = [
-            item for item in memory.intermediate_results
-            if not (item.kind == "question" and item.source_run_id == source_run_id)
-        ]
-        updated = memory.model_copy(update={
-            "pending_questions": pending,
-            "unresolved_questions": remaining_text,
-            "intermediate_results": intermediates,
-            "updated_at": _now(),
-        })
-        self.store.save_working_memory(updated)
-        return updated
 
     def merge_delta(self, current: WorkingMemoryDelta, incoming: WorkingMemoryDelta) -> WorkingMemoryDelta:
         """合并同一 SubAgent 的多个工具结果，不写入 StateStore。"""

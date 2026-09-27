@@ -91,6 +91,15 @@ def _seed_messages(
     return messages
 
 
+async def _save_messages(application, conversation_id: str, user_id: str, user_text: str, assistant_text: str) -> None:
+    await application.conversation_memory.save_message(
+        Message(conversation_id=conversation_id, role="user", content=user_text), user_id=user_id
+    )
+    await application.conversation_memory.save_message(
+        Message(conversation_id=conversation_id, role="assistant", content=assistant_text), user_id=user_id
+    )
+
+
 def test_conversation_memory_survives_task_boundary_and_isolated_by_conversation(application):
     with TestClient(create_app(application)) as client_a, TestClient(create_app(application)) as client_b:
         user_a = _register(client_a, "conversation-a")
@@ -197,9 +206,9 @@ def test_incremental_summary_advances_by_message_range_and_preserves_raw_history
 
     async def run_rounds(start: int, count: int) -> None:
         for index in range(start, start + count):
-            await application.conversations.save_exchange(
-                AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input=f"第 {index} 轮：上海区域分析偏好。"),
-                f"已记录第 {index} 轮讨论。",
+            await _save_messages(
+                application, conversation_id, user_id,
+                f"第 {index} 轮：上海区域分析偏好。", f"已记录第 {index} 轮讨论。",
             )
 
     asyncio.run(run_rounds(0, 9))
@@ -443,23 +452,17 @@ def test_summary_trigger_runs_after_assistant_messages_are_persisted(application
     application.model_adapter = model
     _seed_messages(application, conversation_id, start=0, exchanges=9)
     asyncio.run(
-        application.conversations.save_exchange(
-            AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="补充一个研究决定"),
-            "已记录。",
-        )
+        _save_messages(application, conversation_id, user_id, "补充一个研究决定", "已记录。")
     )
-    after_direct = application.conversation_memory.get(conversation_id, user_id)
-    assert after_direct is not None and after_direct.summary_version == 1
+    after_first = application.conversation_memory.get(conversation_id, user_id)
+    assert after_first is not None and after_first.summary_version == 1
 
     _seed_messages(application, conversation_id, start=9, exchanges=7)
     asyncio.run(
-        application.conversations.save_exchange(
-            AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="再补充一个分析决定"),
-            "已记录第二项。",
-        )
+        _save_messages(application, conversation_id, user_id, "再补充一个分析决定", "已记录第二项。")
     )
-    after_planning = application.conversation_memory.get(conversation_id, user_id)
-    assert after_planning is not None and after_planning.summary_version == 2
+    after_second = application.conversation_memory.get(conversation_id, user_id)
+    assert after_second is not None and after_second.summary_version == 2
 
 
 @pytest.mark.parametrize("failure", ["exception", "invalid_json", "timeout"])
@@ -483,15 +486,9 @@ def test_summary_failure_keeps_old_summary_and_does_not_break_exchange(applicati
     if failure == "timeout":
         application.conversation_memory.summarizer.timeout_seconds = 0.005
     application.model_adapter = FailingModel()
-    response = asyncio.run(
-        application.conversations.save_exchange(
-            AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="继续补充研究背景"),
-            "已记录。",
-        )
-    )
+    asyncio.run(_save_messages(application, conversation_id, user_id, "继续补充研究背景", "已记录。"))
 
     persisted = application.conversation_memory.get(conversation_id, user_id)
-    assert response is None
     assert persisted is not None
     assert persisted.summary == "既有摘要"
     assert persisted.summary_version == 3

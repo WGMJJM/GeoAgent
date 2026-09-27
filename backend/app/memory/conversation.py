@@ -223,50 +223,19 @@ class ConversationMemoryService:
             exclude_message_ids=exclude_message_ids,
         )
 
-    def resolve_unresolved_topics(
-        self,
-        conversation_id: str,
-        user_id: str,
-        *,
-        source_run_id: str | None = None,
-        source_task_id: str | None = None,
-    ) -> ConversationMemory | None:
-        """只清除已回答来源的问题，避免一次成功误删其他等待项。"""
-
-        memory = self.get(conversation_id, user_id)
-        if memory is None or (source_run_id is None and source_task_id is None):
-            return memory
-        unresolved = [
-            item
-            for item in memory.unresolved_topics
-            if not (
-                (source_run_id is not None and item.source_run_id == source_run_id)
-                or (source_run_id is None and source_task_id is not None and item.source_task_id == source_task_id)
-            )
-        ]
-        updated = self._add_entries(memory, unresolved_topics_override=unresolved)
-        self.store.save_conversation_memory(updated)
-        return updated
-
     def _add_entries(
         self,
         memory: ConversationMemory,
         *,
-        key_facts: Iterable[ConversationMemoryEntry] = (),
-        decisions: Iterable[ConversationMemoryEntry] = (),
         important_references: Iterable[ConversationMemoryEntry] = (),
         unresolved_topics: Iterable[ConversationMemoryEntry] = (),
         unresolved_topics_override: list[ConversationMemoryEntry] | None = None,
     ) -> ConversationMemory:
-        facts = _append_entries(memory.key_facts, key_facts)
-        decisions_list = _append_entries(memory.decisions, decisions)
         references = _append_entries(memory.important_references, important_references)
         unresolved_base = unresolved_topics_override if unresolved_topics_override is not None else memory.unresolved_topics
         unresolved = _append_entries(unresolved_base, unresolved_topics)
         return memory.model_copy(
             update={
-                "key_facts": facts[-self.MAX_ENTRIES :],
-                "decisions": decisions_list[-self.MAX_ENTRIES :],
                 "important_references": references[-self.MAX_ENTRIES :],
                 "unresolved_topics": unresolved[-self.MAX_ENTRIES :],
                 "updated_at": datetime.now(UTC),
