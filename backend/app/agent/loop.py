@@ -40,6 +40,8 @@ from app.state import StateStore
 
 from .context import (
     ContextBuilder,
+    compact_model_input,
+    model_input_tokens,
     prepare_model_messages,
     tool_visibility,
     tool_visibility_message,
@@ -180,6 +182,7 @@ class AgentLoop:
         activated_names = self._restore_activated_names(resume_from, request, run)
         discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names))) if resume_from else []
         used_names = set(resume_from.state.get("used_tool_names", [])) if resume_from else set()
+        compacted_ids = set(resume_from.state.get("compacted_tool_call_ids", [])) if resume_from else set()
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
@@ -235,15 +238,38 @@ class AgentLoop:
             try:
                 if not resume_pending:
                     model_messages = prepare_model_messages(messages, model_tools, model_cards)
+                    previous_compacted_ids = set(compacted_ids)
+                    model_messages = compact_model_input(
+                        model_messages, model_tools,
+                        token_budget=self.settings.model_input_tokens,
+                        ratio=self.settings.tool_result_compaction_ratio,
+                        run_id=current.id,
+                        compacted_ids=compacted_ids,
+                        count_tokens=model.count_tokens,
+                    )
+                    if compacted_ids != previous_compacted_ids:
+                        self._save_checkpoint(
+                            request, current, messages, cursor_id, "context_compacted", activated_names,
+                            pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                            compacted_ids=compacted_ids,
+                        )
+                    local_input_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
+                    if local_input_tokens > self.settings.model_input_tokens:
+                        return await self._finish(
+                            current, request=request,
+                            result=AgentResult(
+                                agent_id=current.agent_id,
+                                status=AgentResultStatus.BLOCKED,
+                                summary="本轮输入仍超过模型上下文预算；未截断当前请求或未经摘要的历史消息。",
+                                error="BUDGET_EXCEEDED",
+                                trace_id=current.id,
+                            ),
+                        )
                     model_request = ModelRequest(
                         messages=model_messages,
                         tools=model_tools,
                         max_tokens=self.settings.max_tokens,
                     )
-                    local_input_tokens = model.count_tokens(json.dumps(
-                        {"messages": model_request.messages, "tools": model_request.tools},
-                        ensure_ascii=False, separators=(",", ":"),
-                    ))
                     await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在生成本轮回复",
                                           agent_id=current.agent_id, payload={"turn": current.turn_count})
                     content_parts = []
@@ -837,6 +863,7 @@ class AgentLoop:
         batch_next_activations=None,
         discovered_names=None,
         used_names=None,
+        compacted_ids=None,
     ) -> None:
         protocol_messages = [
             item
@@ -857,6 +884,7 @@ class AgentLoop:
                     "activated_tool_names": sorted(activated_names),
                     "discovered_tool_names": discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else []),
                     "used_tool_names": sorted(used_names) if used_names is not None else (previous.state.get("used_tool_names", []) if previous else []),
+                    "compacted_tool_call_ids": sorted(compacted_ids) if compacted_ids is not None else (previous.state.get("compacted_tool_call_ids", []) if previous else []),
                     "pending_approvals": pending_approvals,
                     "pending_tool_calls": pending_tool_calls,
                     "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),

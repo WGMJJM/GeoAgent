@@ -7,6 +7,8 @@ import pytest
 
 from app.agent.context import (
     TOOL_VISIBILITY_PREFIX,
+    compact_model_input,
+    model_input_tokens,
     prepare_model_messages,
 )
 from app.agent.loop import AgentLoop
@@ -62,6 +64,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     trace = TraceRecorder(store)
     executor = ToolExecutor(registry, store, trace)
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
+                               model_input_tokens=128000, tool_result_compaction_ratio=0.2,
                                tool_context_tokens=6400, tool_context_max_cards=16)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
@@ -1046,6 +1049,112 @@ def test_prepared_messages_keep_full_tool_observations():
     assert original[-1] == observation
 
 
+def test_total_input_budget_compacts_only_old_observations():
+    calls = [
+        {"id": call_id, "type": "function", "function": {"name": "test.report", "arguments": "{}"}}
+        for call_id in ("old", "latest")
+    ]
+    original = [
+        {"role": "system", "content": "固定规则"},
+        {"role": "user", "content": "保留当前目标"},
+        {"role": "assistant", "content": "", "tool_calls": [calls[0]]},
+        {"role": "tool", "tool_call_id": "old", "content": json.dumps({"status": "SUCCESS", "output": {"body": "x" * 4000}})},
+        {"role": "assistant", "content": "", "tool_calls": [calls[1]]},
+        {"role": "tool", "tool_call_id": "latest", "content": json.dumps({"status": "SUCCESS", "output": {"body": "y" * 4000}})},
+    ]
+    definitions = [{"type": "function", "function": {"name": "test.report", "parameters": {"type": "object"}}}]
+    full_tokens = model_input_tokens(original, definitions)
+    marked: set[str] = set()
+    view = compact_model_input(original, definitions, token_budget=full_tokens - 1,
+                               ratio=0.2, run_id="run-test", compacted_ids=marked)
+    assert marked == {"old"}
+    assert model_input_tokens(view, definitions) <= full_tokens - 1
+    assert view[:3] == original[:3]
+    assert view[4:] == original[4:]
+    assert json.loads(view[3]["content"])["result_reference"] == {
+        "run_id": "run-test", "tool_call_id": "old", "source": "checkpoint.protocol_messages",
+    }
+    assert json.loads(original[3]["content"])["output"] == {"body": "x" * 4000}
+    assert compact_model_input(original, definitions, token_budget=full_tokens - 1,
+                               ratio=0.2, run_id="run-test", compacted_ids=marked) == view
+    assert compact_model_input(original, definitions, token_budget=full_tokens,
+                               ratio=0.2, run_id="run-test", compacted_ids=set()) == original
+
+
+def test_trusted_state_is_not_cut_mid_json(tmp_path, monkeypatch):
+    _, loop = _loop(tmp_path, None)
+    payload = {"selected_datasets": [{"id": "ds_large", "schema": {"field": "值" * 20000}}]}
+    monkeypatch.setattr(loop.context, "_trusted_context", lambda *_: payload.copy())
+    messages = loop.context.build(AgentRequest(conversation_id="test", user_id="test-user", user_input="检查结构"))
+    assert json.loads(messages[1]["content"].split("\n", 1)[1]) == payload
+
+
+@pytest.mark.asyncio
+async def test_total_input_limit_blocks_oversized_request_without_model_call(tmp_path):
+    adapter = SequenceAdapter(ModelResponse(content="不应调用模型"))
+    store, loop = _loop(tmp_path, adapter)
+    loop.settings.model_input_tokens = 1
+    _, result = await _run(loop, store, "当前请求必须保持完整")
+    assert result.error == "BUDGET_EXCEEDED"
+    assert store.get_run(result.trace_id).status is RunStatus.BUDGET_EXCEEDED
+    assert adapter.requests == []
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert checkpoint.state["request"]["user_input"] == "当前请求必须保持完整"
+
+
+@pytest.mark.asyncio
+async def test_runtime_passes_configured_output_limit(tmp_path):
+    adapter = SequenceAdapter(ModelResponse(content="已完成"))
+    store, loop = _loop(tmp_path, adapter)
+    loop.settings.max_tokens = 12800
+    _, result = await _run(loop, store, "简单请求")
+    assert result.status is AgentResultStatus.SUCCESS
+    assert adapter.requests[0].max_tokens == 12800
+
+
+@pytest.mark.asyncio
+async def test_total_input_compaction_survives_checkpoint_resume(tmp_path, monkeypatch):
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"large_report"}'}}]),
+        ModelResponse(tool_calls=[{"id": "old", "function": {"name": "test.large_report", "arguments": "{}"}}]),
+        ModelResponse(tool_calls=[{"id": "latest", "function": {"name": "test.large_report", "arguments": "{}"}}]),
+        ModelResponse(tool_calls=[{"id": "pause", "function": {"name": "agent.ask_user", "arguments": '{"question":"继续吗？"}'}}]),
+        ModelResponse(content="继续完成。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    original_complete = adapter.complete
+
+    async def complete(model_request):
+        response = await original_complete(model_request)
+        if len(adapter.requests) == 3:
+            loop.settings.model_input_tokens = model_input_tokens(model_request.messages, model_request.tools, adapter.count_tokens) + 500
+        return response
+
+    monkeypatch.setattr(adapter, "complete", complete)
+    executed = []
+    loop.registry.register(
+        ToolMetadata(name="test.large_report", description="large_report", input_schema={"type": "object"}),
+        lambda _args, context: executed.append(context.call_id) or {"output": {"body": "x" * 30000}},
+        deferred=True,
+    )
+    request, waiting = await _run(loop, store, "读取两次结果")
+    assert waiting.error == "WAITING_USER"
+    fourth = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[3].messages if item["role"] == "tool"}
+    assert fourth["old"]["context_compacted"] is True
+    assert fourth["latest"]["output"] == {"body": "x" * 30000}
+    assert model_input_tokens(adapter.requests[3].messages, adapter.requests[3].tools, adapter.count_tokens) <= loop.settings.model_input_tokens
+    checkpoint = store.latest_checkpoint(waiting.trace_id)
+    assert "old" in checkpoint.state["compacted_tool_call_ids"]
+    raw = {item["tool_call_id"]: json.loads(item["content"]) for item in checkpoint.state["protocol_messages"] if item["role"] == "tool"}
+    assert raw["old"]["output"] == {"body": "x" * 30000}
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(waiting.trace_id)),
+                            resume_from=checkpoint, continuation={"type": "user_input", "content": "继续"})
+    assert result.status is AgentResultStatus.SUCCESS
+    assert executed == [f"{waiting.trace_id}:old", f"{waiting.trace_id}:latest"]
+    resumed = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[4].messages if item["role"] == "tool"}
+    assert resumed["old"]["context_compacted"] is True
+
+
 def test_large_observation_and_checkpoint_restore_keep_complete_json(tmp_path):
     _, loop = _loop(tmp_path, None)
     original = [{"role": "system", "content": "固定规则"}, {"role": "user", "content": "读取结果"}]
@@ -1090,7 +1199,7 @@ async def test_checkpoint_restore_keeps_observations_and_never_reexecutes_tools(
     request, waiting = await _run(loop, store, "读取四项完整结果")
     assert waiting.error == ("MODEL_UNAVAILABLE" if model_failure else "WAITING_USER")
     checkpoint = store.latest_checkpoint(waiting.trace_id)
-    assert "compacted_tool_call_ids" not in checkpoint.state
+    assert checkpoint.state["compacted_tool_call_ids"] == []
     raw = {item["tool_call_id"]: json.loads(item["content"]) for item in checkpoint.state["protocol_messages"] if item["role"] == "tool"}
     assert all(raw[f"execute_{index}"]["output"] == {"body": "x" * 4000} for index in range(4))
     assert all("context_compacted" not in payload for payload in raw.values())
@@ -1111,5 +1220,5 @@ async def test_checkpoint_restore_keeps_observations_and_never_reexecutes_tools(
         declared = {call["id"] for item in model_request.messages for call in item.get("tool_calls", [])}
         assert observations.keys() == declared
     final = store.latest_checkpoint(result.trace_id)
-    assert "compacted_tool_call_ids" not in final.state
+    assert final.state["compacted_tool_call_ids"] == []
     assert store.get_tool_call(f"{result.trace_id}:execute_0")[1].output == {"body": "x" * 4000}
