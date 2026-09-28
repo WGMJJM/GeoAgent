@@ -139,6 +139,24 @@ describe("统一聊天输入区", () => {
     expect(screen.getByText("等待智能体事件…")).toBeTruthy();
   });
 
+  it("新消息和流式增量自动跟随到底部，用户上翻后暂停跟随", () => {
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1_000);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(300);
+    const { container, rerender } = render(<ProductChat {...productChatProps} busy streamingReply="第一段" />);
+    const history = container.querySelector(".chat-history") as HTMLDivElement;
+    expect(history.scrollTop).toBe(1_000);
+
+    history.scrollTop = 100;
+    fireEvent.scroll(history);
+    rerender(<ProductChat {...productChatProps} busy streamingReply="第一段和第二段" />);
+    expect(history.scrollTop).toBe(100);
+
+    history.scrollTop = 700;
+    fireEvent.scroll(history);
+    rerender(<ProductChat {...productChatProps} busy streamingReply="第一段、第二段和第三段" />);
+    expect(history.scrollTop).toBe(1_000);
+  });
+
   it("真实运行消息只提供运行详情入口", () => {
     render(<ProductChat {...productChatProps} messages={[{ id: "run-message", role: "assistant", content: "运行完成", kind: "execution", runId: "run-1" }]} />);
     expect(screen.getByRole("button", { name: "查看运行详情" })).toBeTruthy();
