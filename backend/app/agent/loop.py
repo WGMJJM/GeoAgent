@@ -330,7 +330,7 @@ class AgentLoop:
                         tools=model_tools,
                         max_tokens=self.settings.max_tokens,
                     )
-                    await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在生成本轮回复",
+                    await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在思考",
                                           agent_id=current.agent_id, payload={"turn": current.turn_count})
                     content_parts = []
                     async with aclosing(model.stream(model_request)) as stream:

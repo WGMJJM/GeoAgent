@@ -122,8 +122,7 @@ describe("统一聊天输入区", () => {
     render(<ProductChat {...productChatProps} busy activeRunId={null} elapsedMs={2_400} />);
     expect(screen.getByText("用时 2秒")).toBeTruthy();
     expect(screen.getByText("正在处理")).toBeTruthy();
-    expect(screen.getByText("正在接入 Agent Loop…")).toBeTruthy();
-    expect(screen.queryByText("等待智能体事件…")).toBeNull();
+    expect(screen.getByText("正在思考")).toBeTruthy();
   });
 
   it("真实运行显示最新请求理解事件", () => {
@@ -134,9 +133,9 @@ describe("统一聊天输入区", () => {
     expect(screen.getByText("已确定下一步动作：准备调用 列出数据集")).toBeTruthy();
   });
 
-  it("真实运行已建立但暂无事件时显示等待提示", () => {
+  it("真实运行等待模型事件时显示正在思考", () => {
     render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={5_100} />);
-    expect(screen.getByText("等待智能体事件…")).toBeTruthy();
+    expect(screen.getByText("正在思考")).toBeTruthy();
   });
 
   it("新消息和流式增量自动跟随到底部，用户上翻后暂停跟随", () => {
@@ -196,9 +195,9 @@ describe("统一聊天输入区", () => {
   it("实时进度会直接切换为完成摘要", () => {
     const completed: Run = { ...runRecord("COMPLETED"), id: "run-transition", started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:03.000Z" };
     const { rerender } = render(<ProductChat {...productChatProps} busy activeRunId={completed.id} elapsedMs={3_000} />);
-    expect(screen.getByText("等待智能体事件…")).toBeTruthy();
+    expect(screen.getByText("正在思考")).toBeTruthy();
     rerender(<ProductChat {...productChatProps} runs={[completed]} messages={[{ id: "transition-message", role: "assistant", content: "处理完成", kind: "execution", runId: completed.id }]} />);
-    expect(screen.queryByText("等待智能体事件…")).toBeNull();
+    expect(screen.queryByText("正在思考")).toBeNull();
     expect(screen.getByText("运行完成 · 0 次工具调用")).toBeTruthy();
   });
 
@@ -315,7 +314,7 @@ describe("对话删除", () => {
 });
 
 describe("流式回答", () => {
-  it("片段立即显示，每轮重置过程文本，完成时只留下最终回答", async () => {
+  it("工具阶段只显示思考状态，最终回答片段立即显示", async () => {
     const user = { id: "user-stream", username: "streamer", display_name: "测试", is_active: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
     const conversation = { id: "conversation-stream", title: "流式测试", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
     vi.spyOn(api, "me").mockResolvedValue(user);
@@ -338,11 +337,10 @@ describe("流式回答", () => {
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     const run = { ...runRecord("RUNNING"), conversation_id: conversation.id };
-    const started: Event = { id: "start-1", run_id: run.id, event_type: "ModelResponseStarted", message: "正在生成本轮回复", sequence: 1, timestamp: user.created_at, payload: { turn: 1 } };
-    act(() => { callbacks[3](run); callbacks[4](started); callbacks[5]("先检查"); });
-    expect(container.querySelector(".streaming-message")?.textContent).toBe("先检查");
-    act(() => callbacks[5]("数据。"));
-    expect(container.querySelector(".streaming-message")?.textContent).toBe("先检查数据。");
+    const started: Event = { id: "start-1", run_id: run.id, event_type: "ModelResponseStarted", message: "正在思考", sequence: 1, timestamp: user.created_at, payload: { turn: 1 } };
+    act(() => { callbacks[3](run); callbacks[4](started); });
+    expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(container.querySelector(".streaming-message")).toBeNull();
     act(() => callbacks[4]({ ...started, id: "start-2", sequence: 2, payload: { turn: 2 } }));
     expect(container.querySelector(".streaming-message")).toBeNull();
     act(() => { callbacks[5]("最终"); callbacks[5]("答案。"); });
@@ -351,7 +349,6 @@ describe("流式回答", () => {
       result: { agent_id: "main", status: "SUCCESS", summary: "最终答案。", findings: [], datasets: [], artifacts: [], evidence: [], warnings: [], trace_id: run.id } }));
     expect(container.querySelector(".streaming-message")).toBeNull();
     expect(screen.getAllByText("最终答案。")).toHaveLength(1);
-    expect(screen.queryByText("先检查数据。")).toBeNull();
     expect(api.streamMessage).toHaveBeenCalledOnce();
   });
 });
