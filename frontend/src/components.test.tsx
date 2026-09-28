@@ -122,7 +122,8 @@ describe("统一聊天输入区", () => {
     render(<ProductChat {...productChatProps} busy activeRunId={null} elapsedMs={2_400} />);
     expect(screen.getByText("用时 2秒")).toBeTruthy();
     expect(screen.getByText("正在处理")).toBeTruthy();
-    expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(screen.getByText("正在接入 Agent Loop…")).toBeTruthy();
+    expect(screen.queryByText("正在思考")).toBeNull();
   });
 
   it("真实运行显示最新请求理解事件", () => {
@@ -133,9 +134,17 @@ describe("统一聊天输入区", () => {
     expect(screen.getByText("已确定下一步动作：准备调用 列出数据集")).toBeTruthy();
   });
 
-  it("真实运行等待模型事件时显示正在思考", () => {
+  it("真实运行尚未收到事件时显示等待提示", () => {
     render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={5_100} />);
+    expect(screen.getByText("等待智能体事件…")).toBeTruthy();
+    expect(screen.queryByText("正在思考")).toBeNull();
+  });
+
+  it("仅在模型响应阶段显示正在思考", () => {
+    const started: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 }, agent_id: "agent-loop" };
+    render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={6_100} events={[started]} />);
     expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(screen.queryByText("模型正在生成回复：正在思考")).toBeNull();
   });
 
   it("新消息和流式增量自动跟随到底部，用户上翻后暂停跟随", () => {
@@ -195,9 +204,9 @@ describe("统一聊天输入区", () => {
   it("实时进度会直接切换为完成摘要", () => {
     const completed: Run = { ...runRecord("COMPLETED"), id: "run-transition", started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:03.000Z" };
     const { rerender } = render(<ProductChat {...productChatProps} busy activeRunId={completed.id} elapsedMs={3_000} />);
-    expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(screen.getByText("等待智能体事件…")).toBeTruthy();
     rerender(<ProductChat {...productChatProps} runs={[completed]} messages={[{ id: "transition-message", role: "assistant", content: "处理完成", kind: "execution", runId: completed.id }]} />);
-    expect(screen.queryByText("正在思考")).toBeNull();
+    expect(screen.queryByText("等待智能体事件…")).toBeNull();
     expect(screen.getByText("运行完成 · 0 次工具调用")).toBeTruthy();
   });
 
