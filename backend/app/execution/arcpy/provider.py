@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from app.core.models import ErrorCategory, ToolMetadata, new_id
 from app.execution.tools.model import RegisteredTool, ToolContext
+from app.execution.tools.provider import ToolProviderError
 from app.gis.errors import GISFailure
 
 from .schema import (
@@ -28,7 +29,7 @@ from .schema import (
 )
 
 
-class ArcPyWorkerError(RuntimeError):
+class ArcPyWorkerError(ToolProviderError):
     pass
 
 
@@ -100,8 +101,6 @@ class ArcPyWorker:
             raise ArcPyWorkerError(f"找不到 ArcGIS Pro Python 启动器：{self.executable}")
         self._responses = queue.Queue()
         self._stderr = []
-        environment = os.environ.copy()
-        environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
         command = self._command()
         self._process = subprocess.Popen(
             command,
@@ -112,7 +111,7 @@ class ArcPyWorker:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=environment,
+            env=os.environ.copy(),
             shell=False,
         )
         assert self._process.stdout is not None and self._process.stderr is not None
@@ -317,15 +316,21 @@ class ArcPyProvider:
             registered_outputs.append(
                 {"parameter": parameter_name, "dataset_id": registered.id, "path": registered.path}
             )
+        messages = str(result.get("messages") or "")
+        warnings = []
+        if "\ufffd" in messages:
+            messages = ""
+            warnings.append("ArcPy 已完成执行，但本机 ArcGIS Pro 的本地化消息无法正确解码。")
         return {
             "output": {
                 "tool": spec.public_name,
                 "arcgis_tool": spec.actual_name,
                 "outputs": registered_outputs,
                 "raw_outputs": result.get("outputs", []),
-                "messages": result.get("messages", ""),
+                "messages": messages,
             },
             "datasets": dataset_ids,
+            "warnings": warnings,
         }
 
     @staticmethod

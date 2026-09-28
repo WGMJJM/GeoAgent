@@ -66,10 +66,11 @@ def _dispatch(request, arcpy):
 
 
 def main():
+    import arcpy
+
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    import arcpy
 
     for line in sys.stdin:
         if not line.strip():

@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from threading import RLock
 from typing import Any
 
 from app.auth.policy import PermissionPolicy, ToolDiscoveryContext
 from app.core.models import ToolMetadata
 
+from .provider import DynamicToolProvider, UnsupportedToolDefinition
 from .registry import ToolRegistry
 
 MAX_QUERY_LENGTH = 160
@@ -73,10 +75,13 @@ class ToolCatalog:
         self,
         registry: ToolRegistry,
         is_discoverable: DiscoverabilityCheck | None = None,
+        providers: tuple[DynamicToolProvider, ...] = (),
     ) -> None:
         self.registry = registry
         policy = PermissionPolicy()
         self.is_discoverable = is_discoverable or policy.is_discoverable
+        self.providers = providers
+        self._provider_lock = RLock()
 
     def card(self, name: str, *, score: int = 0) -> ToolCard:
         metadata = self.registry.get(name).metadata
@@ -85,12 +90,38 @@ class ToolCatalog:
             description = description[: MAX_DESCRIPTION_LENGTH - 3].rstrip() + "..."
         return ToolCard(name, description, tuple(metadata.input_schema.get("properties", {})), score)
 
+    def ensure_registered(self, name: str, context: ToolDiscoveryContext) -> bool:
+        """按 Checkpoint 中的精确名称恢复动态工具，不重新做关键词检索。"""
+
+        try:
+            registered = self.registry.get(name)
+        except KeyError:
+            registered = None
+        if registered is not None:
+            return self.registry.is_deferred(name) and self.is_discoverable(registered.metadata, context)
+
+        for provider in self.providers:
+            summary = next((item for item in provider.summaries() if item.name == name), None)
+            if summary is None or not self.is_discoverable(summary, context):
+                continue
+            try:
+                with self._provider_lock:
+                    try:
+                        registered = self.registry.get(name)
+                    except KeyError:
+                        registered = provider.materialize(name)
+                        self.registry.register(registered.metadata, registered.handler, deferred=True)
+            except UnsupportedToolDefinition:
+                return False
+            return self.is_discoverable(registered.metadata, context)
+        return False
+
     def search(self, query: str, context: ToolDiscoveryContext, limit: int = MAX_RESULTS) -> list[ToolCard]:
         normalized = _normalize_query(query)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESULTS:
             raise ValueError(f"limit 必须是 1 到 {MAX_RESULTS} 之间的整数。")
 
-        matches: list[ToolCard] = []
+        matches: list[tuple[int, str, DynamicToolProvider | None]] = []
         # 每次从 Registry 读取最新延迟工具集合，不缓存索引，注册/注销立即生效。
         for name in self.registry.deferred_names():
             try:
@@ -100,13 +131,58 @@ class ToolCatalog:
             metadata = registered.metadata
             if not self.is_discoverable(metadata, context):
                 continue
+            if name.casefold() == normalized.casefold():
+                return [self.card(name, score=100)]
             score = relevance(normalized, metadata)
             if score <= 0:
                 continue
-            matches.append(self.card(name, score=score))
+            matches.append((score, name, None))
 
-        matches.sort(key=lambda item: (-item.score, item.name))
-        return matches[: min(limit, MAX_RESULTS)]
+        matches.sort(key=lambda item: (-item[0], item[1]))
+        if len(matches) < limit:
+            known = {name for _, name, _ in matches}
+            for provider in self.providers:
+                for metadata in provider.summaries():
+                    if metadata.name in known or not self.is_discoverable(metadata, context):
+                        continue
+                    if metadata.name.casefold() == normalized.casefold():
+                        try:
+                            with self._provider_lock:
+                                try:
+                                    registered = self.registry.get(metadata.name)
+                                except KeyError:
+                                    registered = provider.materialize(metadata.name)
+                                    self.registry.register(registered.metadata, registered.handler, deferred=True)
+                        except UnsupportedToolDefinition:
+                            return []
+                        if not self.is_discoverable(registered.metadata, context):
+                            return []
+                        return [self.card(metadata.name, score=100)]
+                    score = relevance(normalized, metadata)
+                    if score <= 0:
+                        continue
+                    matches.append((score, metadata.name, provider))
+                    known.add(metadata.name)
+            matches.sort(key=lambda item: (-item[0], item[2] is not None, item[1]))
+
+        cards: list[ToolCard] = []
+        for score, name, provider in matches:
+            if len(cards) >= min(limit, MAX_RESULTS):
+                break
+            if provider is not None:
+                try:
+                    with self._provider_lock:
+                        try:
+                            registered = self.registry.get(name)
+                        except KeyError:
+                            registered = provider.materialize(name)
+                            self.registry.register(registered.metadata, registered.handler, deferred=True)
+                except UnsupportedToolDefinition:
+                    continue
+                if not self.is_discoverable(registered.metadata, context):
+                    continue
+            cards.append(self.card(name, score=score))
+        return cards
 
     def tool_search(self, arguments: dict[str, Any], context: ToolDiscoveryContext) -> dict[str, Any]:
         """tool.search 的轻量响应包装，供 AgentLoop 作为标准工具观察返回。"""
@@ -137,6 +213,8 @@ def tokenize(query: str) -> tuple[str, ...]:
 def relevance(query: str, metadata: ToolMetadata) -> int:
     name = metadata.name.casefold()
     description = " ".join(metadata.description.casefold().split())
+    name_terms = set(_identifier_terms(metadata.name))
+    tag_terms = {term for tag in metadata.tags for term in _identifier_terms(tag)}
     properties = metadata.input_schema.get("properties", {})
     argument_parts: list[str] = []
     if isinstance(properties, dict):
@@ -147,14 +225,32 @@ def relevance(query: str, metadata: ToolMetadata) -> int:
     all_text = f"{name} {description} {arguments}"
     normalized_query = " ".join(query.casefold().split())
     score = 30 if normalized_query in all_text else 0
+    matched = 0
     for term in tokenize(normalized_query):
-        if term in name:
+        if term in name_terms:
+            score += 16
+            matched += 1
+        elif term in name:
             score += 12
+            matched += 1
+        elif term in tag_terms:
+            score += 8
+            matched += 1
         elif term in description:
             score += 6
+            matched += 1
         elif term in arguments:
             score += 3
+            matched += 1
+    query_terms = tokenize(normalized_query)
+    if query_terms and matched == len(query_terms):
+        score += 20
     return score
+
+
+def _identifier_terms(value: str) -> tuple[str, ...]:
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    return tuple(item.casefold() for item in re.findall(r"[A-Za-z0-9]+", separated))
 
 
 def _normalize_query(query: str) -> str:

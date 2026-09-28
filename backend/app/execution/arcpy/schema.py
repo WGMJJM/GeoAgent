@@ -7,9 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.models import DatasetOutputPolicy, RiskLevel, ToolMetadata
+from app.execution.tools.provider import UnsupportedToolDefinition
 
 
-class UnsupportedArcPyTool(ValueError):
+class UnsupportedArcPyTool(UnsupportedToolDefinition):
     """工具含有当前转换层无法安全表达的必填参数。"""
 
 

@@ -64,6 +64,7 @@ class FakeWorker:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.closed = False
+        self.messages = "Succeeded"
 
     def request(self, action, payload=None, **_kwargs):
         payload = payload or {}
@@ -77,7 +78,7 @@ class FakeWorker:
         if action == "execute":
             output = Path(payload["values"][1])
             output.write_bytes(b"fake raster")
-            return {"outputs": [str(output)], "messages": "Succeeded"}
+            return {"outputs": [str(output)], "messages": self.messages}
         raise AssertionError(action)
 
     def close(self):
@@ -191,8 +192,14 @@ def test_provider_caches_light_catalog_materializes_one_schema_and_executes_with
     assert execute_payload["values"][2] is None
     assert execute_payload["values"][3] == 2.0
     assert result["datasets"] == ["ds_result"]
+    assert result["warnings"] == []
     assert registry.registered[0]["source_dataset_ids"] == [source.id]
     assert registry.registered[0]["operation"] == "arcpy.slope_sa"
+
+    worker.messages = "\ufffd\ufffd\ufffd"
+    unreadable = registered.handler({"in_raster": source.id}, context)
+    assert unreadable["output"]["messages"] == ""
+    assert unreadable["warnings"] == ["ArcPy 已完成执行，但本机 ArcGIS Pro 的本地化消息无法正确解码。"]
 
     provider.close()
     assert worker.closed is True

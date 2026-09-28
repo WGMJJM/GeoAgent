@@ -4,7 +4,7 @@ import pytest
 
 from app.auth.policy import PermissionPolicy, ToolDiscoveryContext
 from app.core.models import RiskLevel, ToolMetadata
-from app.execution.tools import TOOL_SEARCH_DEFINITION, ToolCatalog, ToolRegistry
+from app.execution.tools import TOOL_SEARCH_DEFINITION, RegisteredTool, ToolCatalog, ToolRegistry
 from app.tools.gis import register_gis_tools
 from app.tools.runtime import register_runtime_tools
 
@@ -92,6 +92,20 @@ def test_name_matches_rank_above_description_and_ties_use_name_order():
     tied = catalog.search("capability", _context())
     assert [item.name for item in tied] == ["a.shared", "z.shared"]
     assert tied[0].score == tied[1].score
+
+
+def test_exact_identifier_term_ranks_above_substring_and_complete_query_coverage():
+    _, catalog = _catalog(
+        _metadata("raster.slope", "Calculate terrain slope", properties={}),
+        _metadata("arcpy.generate_hachures_for_defined_slopes", "Terrain cartography"),
+        _metadata("analysis.terrain", "Terrain operation"),
+    )
+
+    assert [item.name for item in catalog.search("slope", _context())] == [
+        "raster.slope",
+        "arcpy.generate_hachures_for_defined_slopes",
+    ]
+    assert catalog.search("terrain slope", _context())[0].name == "raster.slope"
 
 
 def test_search_caps_results_at_two_and_honors_smaller_limit():
@@ -198,6 +212,64 @@ def test_registry_add_and_remove_immediately_changes_search_results():
     assert [item.name for item in catalog.search("reproject", context)] == ["raster.reproject"]
     assert registry.unregister("crs.reproject") is False
     assert registry.is_deferred("crs.reproject") is False
+
+
+def test_dynamic_provider_is_loaded_only_when_registered_results_do_not_fill_limit():
+    class Provider:
+        def __init__(self):
+            self.summary_calls = 0
+            self.materialized = []
+
+        def summaries(self):
+            self.summary_calls += 1
+            return (
+                _metadata(
+                    "arcpy.slope_sa",
+                    "ArcPy slope geoprocessing tool from a raster elevation surface",
+                    envs=["gis.arcpy", "workspace"],
+                ),
+            )
+
+        def materialize(self, name):
+            self.materialized.append(name)
+            metadata = _metadata(
+                name,
+                "Calculate slope with installed ArcPy",
+                properties={"in_raster": {"type": "string", "description": "GeoAgent Dataset ID"}},
+                envs=["gis.arcpy", "workspace"],
+            )
+            return RegisteredTool(metadata, lambda _arguments, _context: {})
+
+        def close(self):
+            pass
+
+    registry = ToolRegistry()
+    _register(registry, _metadata("raster.inspect", "Raster elevation inspection"))
+    _register(registry, _metadata("raster.statistics", "Raster elevation statistics"))
+    provider = Provider()
+    catalog = ToolCatalog(registry, providers=(provider,))
+    context = _context(envs={"gis.raster", "gis.arcpy", "workspace"})
+
+    assert len(catalog.search("raster elevation", context, limit=2)) == 2
+    assert provider.summary_calls == 0
+
+    cards = catalog.search("slope", context, limit=2)
+    assert [item.name for item in cards] == ["arcpy.slope_sa"]
+    assert cards[0].parameter_names == ("in_raster",)
+    assert provider.summary_calls == 1
+    assert provider.materialized == ["arcpy.slope_sa"]
+    assert registry.is_deferred("arcpy.slope_sa") is True
+
+    exact = catalog.search("ARCPY.SLOPE_SA", context, limit=2)
+    assert [item.name for item in exact] == ["arcpy.slope_sa"]
+
+    catalog.search("slope", context, limit=2)
+    assert provider.materialized == ["arcpy.slope_sa"]
+
+    registry.unregister("arcpy.slope_sa")
+    assert catalog.ensure_registered("arcpy.slope_sa", context) is True
+    assert registry.is_deferred("arcpy.slope_sa") is True
+    assert provider.materialized == ["arcpy.slope_sa", "arcpy.slope_sa"]
 
 
 def test_public_tool_card_contains_no_score_or_schema_details():

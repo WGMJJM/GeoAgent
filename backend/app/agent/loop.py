@@ -28,8 +28,10 @@ from app.core.models import (
 from app.core.tokens import estimate_tokens
 from app.execution.tools import (
     TOOL_SEARCH_DEFINITION,
+    DynamicToolProvider,
     ToolCatalog,
     ToolExecutor,
+    ToolProviderError,
     ToolRegistry,
     validate_arguments,
 )
@@ -100,12 +102,13 @@ class AgentLoop:
         services_factory: Callable[[str | None], dict[str, Any]],
         *,
         context_services: dict[str, Any],
+        tool_providers: tuple[DynamicToolProvider, ...] = (),
         metrics=None,
     ) -> None:
         self.store = store
         self.registry = registry
         self.executor = executor
-        self.catalog = ToolCatalog(registry, executor.policy.is_discoverable)
+        self.catalog = ToolCatalog(registry, executor.policy.is_discoverable, providers=tool_providers)
         self.policy = executor.policy
         self.trace = trace
         self.settings = settings
@@ -480,6 +483,8 @@ class AgentLoop:
                                 else:
                                     search_output = self.catalog.tool_search(arguments, search_context)
                                     searches.append({"call_id": persisted_id, "source": "catalog", "tools": [item["name"] for item in search_output["tools"]]})
+                            except ToolProviderError as exc:
+                                result = _failed_result(persisted_id, "TOOL_DISCOVERY_FAILED", str(exc))
                             except ValueError as exc:
                                 result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", str(exc))
                             else:
@@ -740,13 +745,7 @@ class AgentLoop:
     ) -> set[str]:
         available = set()
         for name in activated_names:
-            if not self.registry.is_deferred(name):
-                continue
-            try:
-                metadata = self.registry.get(name).metadata
-            except KeyError:
-                continue
-            if self.policy.is_discoverable(metadata, context):
+            if self.catalog.ensure_registered(name, context):
                 available.add(name)
         return available
 

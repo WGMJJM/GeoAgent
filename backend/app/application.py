@@ -15,6 +15,7 @@ from app.auth import ApprovalService, AuthService, PermissionPolicy
 from app.config import Settings
 from app.core.models import AgentRequest, AgentResult, AgentResultStatus, new_id
 from app.entry import AttachmentService, ConversationService, MessageGateway
+from app.execution.arcpy import ArcPyProvider, discover_arcpy_executable
 from app.execution.python import PythonExecutor
 from app.execution.sandbox import WorkspaceManager
 from app.execution.shell import ShellExecutor
@@ -72,6 +73,15 @@ class Application:
         self.tool_registry = ToolRegistry()
         register_gis_tools(self.tool_registry)
         register_runtime_tools(self.tool_registry)
+        self.arcpy = None
+        if self.settings.enable_arcpy:
+            executable = discover_arcpy_executable(self.settings.arcpy_executable)
+            if executable is not None:
+                self.arcpy = ArcPyProvider(
+                    executable,
+                    self.settings.arcpy_cache_path,
+                    timeout_seconds=self.settings.tool_timeout_seconds,
+                )
         self.tool_executor = ToolExecutor(self.tool_registry, self.store, self.trace, PermissionPolicy(), timeout_seconds=self.settings.tool_timeout_seconds, metrics=self.metrics, approval_service=self.approvals)
         self.tool_executor.services = {
             "settings": self.settings,
@@ -85,6 +95,7 @@ class Application:
             "renderer": self.renderer,
             "python": self.python_executor,
             "shell": self.shell_executor,
+            "arcpy": self.arcpy,
             "allow_unsafe_python": self.settings.enable_unsafe_python,
             "system_owned": True,
         }
@@ -100,6 +111,7 @@ class Application:
                 "profile": self.profile,
                 "conversation_memory": self.conversation_memory,
             },
+            tool_providers=(self.arcpy,) if self.arcpy is not None else (),
             metrics=self.metrics,
         )
         self.run_manager = RunManager(
@@ -164,6 +176,8 @@ class Application:
 
     async def close(self) -> None:
         await self.run_manager.close()
+        if self.arcpy is not None:
+            self.arcpy.close()
         adapters = list(self.model_adapters.values())
         if self.model_adapter is not None and all(id(self.model_adapter) != id(item) for item in adapters):
             adapters.append(self.model_adapter)

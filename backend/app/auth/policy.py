@@ -96,5 +96,8 @@ class PermissionPolicy:
             environments.add("isolated_python")
         if services.get("isolated_shell") is True:
             environments.add("isolated_shell")
+        arcpy = services.get("arcpy")
+        if arcpy is not None and getattr(arcpy, "available", False):
+            environments.add("gis.arcpy")
         return ToolDiscoveryContext(scopes, frozenset(environments))
 

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     max_execution_seconds: int = Field(default=300, ge=1)
     tool_timeout_seconds: int = Field(default=120, ge=1)
     enable_unsafe_python: bool = False
+    enable_arcpy: bool = True
+    arcpy_executable: Path | None = None
+    arcpy_cache: Path = Field(default=Path("state/arcpy"))
     model_profiles: str | None = None
     auth_cookie_name: str = "geoagent_session"
     auth_cookie_secure: bool = False
@@ -53,6 +56,10 @@ class Settings(BaseSettings):
     @property
     def workspace_path(self) -> Path:
         return self._absolute(self.workspace)
+
+    @property
+    def arcpy_cache_path(self) -> Path:
+        return self._absolute(self.arcpy_cache)
 
     def _absolute(self, value: Path) -> Path:
         return value if value.is_absolute() else (self.root / value).resolve()
