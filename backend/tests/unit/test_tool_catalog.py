@@ -88,10 +88,9 @@ def test_name_matches_rank_above_description_and_ties_use_name_order():
         _metadata("a.shared", "Shared capability"),
     )
 
-    assert [item.name for item in catalog.search("buffer", _context())] == ["vector.buffer", "analysis.nearby"]
+    assert [item.name for item in catalog.search("buffer", _context())] == ["vector.buffer"]
     tied = catalog.search("capability", _context())
-    assert [item.name for item in tied] == ["a.shared", "z.shared"]
-    assert tied[0].score == tied[1].score
+    assert [item.name for item in tied] == ["a.shared"]
 
 
 def test_exact_identifier_term_ranks_above_substring_and_complete_query_coverage():
@@ -101,25 +100,18 @@ def test_exact_identifier_term_ranks_above_substring_and_complete_query_coverage
         _metadata("analysis.terrain", "Terrain operation"),
     )
 
-    assert [item.name for item in catalog.search("slope", _context())] == [
-        "raster.slope",
-        "arcpy.generate_hachures_for_defined_slopes",
-    ]
+    assert [item.name for item in catalog.search("slope", _context())] == ["raster.slope"]
     assert catalog.search("terrain slope", _context())[0].name == "raster.slope"
 
 
-def test_search_caps_results_at_two_and_honors_smaller_limit():
+def test_search_returns_only_the_best_result():
     registry = ToolRegistry()
     for index in range(12):
         _register(registry, _metadata(f"analysis.operation_{index:02d}", "Geometry analysis utility"))
     catalog = ToolCatalog(registry, PermissionPolicy().is_discoverable)
 
-    assert len(catalog.search("geometry", _context(), limit=2)) == 2
     assert len(catalog.search("geometry", _context(), limit=1)) == 1
-    assert [item.name for item in catalog.search("geometry", _context())] == [
-        "analysis.operation_00",
-        "analysis.operation_01",
-    ]
+    assert [item.name for item in catalog.search("geometry", _context())] == ["analysis.operation_00"]
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -132,14 +124,13 @@ def test_one_bilingual_call_returns_deduplicated_union_with_per_query_limit(over
     if overlap:
         metadata.append(_metadata("test.a_shared", "唯一中文能力 quantum_marker"))
     _, catalog = _catalog(*metadata)
-    for limit in (1, 2):
-        chinese = catalog.search("唯一中文能力", _context(), limit)
-        english = catalog.search("quantum_marker", _context(), limit)
-        expected = list(dict.fromkeys(item.name for item in [*chinese, *english]))
-        response = catalog.tool_search({"query": "唯一中文能力", "english_query": "quantum_marker", "limit": limit}, _context())
-        assert [item["name"] for item in response["tools"]] == expected
-        assert len(response["tools"]) == 2 * limit - int(overlap)
-        assert "test.forbidden" not in expected
+    chinese = catalog.search("唯一中文能力", _context())
+    english = catalog.search("quantum_marker", _context())
+    expected = list(dict.fromkeys(item.name for item in [*chinese, *english]))
+    response = catalog.tool_search({"query": "唯一中文能力", "english_query": "quantum_marker"}, _context())
+    assert [item["name"] for item in response["tools"]] == expected
+    assert len(response["tools"]) == 2 - int(overlap)
+    assert "test.forbidden" not in expected
 
 
 @pytest.mark.parametrize("query,english_query", [("无关中文", "buffer"), ("缓冲区", "unknown_marker"), ("无关中文", "unknown_marker")])
@@ -151,7 +142,7 @@ def test_bilingual_call_preserves_nonempty_branch_and_reports_only_total_miss(qu
     assert ("message" in response) == (not expected)
 
 
-@pytest.mark.parametrize("limit", [0, 3, True, 1.5, "2"])
+@pytest.mark.parametrize("limit", [0, 2, 3, True, 1.5, "2"])
 def test_invalid_limit_has_a_clear_error(limit):
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
     with pytest.raises(ValueError, match="limit"):
@@ -207,7 +198,7 @@ def test_registry_add_and_remove_immediately_changes_search_results():
     _register(registry, first)
     assert [item.name for item in catalog.search("reproject", context)] == ["crs.reproject"]
     _register(registry, _metadata("raster.reproject", "Reproject a raster"))
-    assert [item.name for item in catalog.search("reproject", context)] == ["crs.reproject", "raster.reproject"]
+    assert [item.name for item in catalog.search("reproject", context)] == ["crs.reproject"]
     assert registry.unregister("crs.reproject") is True
     assert [item.name for item in catalog.search("reproject", context)] == ["raster.reproject"]
     assert registry.unregister("crs.reproject") is False
@@ -250,20 +241,20 @@ def test_dynamic_provider_is_loaded_only_when_registered_results_do_not_fill_lim
     catalog = ToolCatalog(registry, providers=(provider,))
     context = _context(envs={"gis.raster", "gis.arcpy", "workspace"})
 
-    assert len(catalog.search("raster elevation", context, limit=2)) == 2
+    assert len(catalog.search("raster elevation", context)) == 1
     assert provider.summary_calls == 0
 
-    cards = catalog.search("slope", context, limit=2)
+    cards = catalog.search("slope", context)
     assert [item.name for item in cards] == ["arcpy.slope_sa"]
     assert cards[0].parameter_names == ("in_raster",)
     assert provider.summary_calls == 1
     assert provider.materialized == ["arcpy.slope_sa"]
     assert registry.is_deferred("arcpy.slope_sa") is True
 
-    exact = catalog.search("ARCPY.SLOPE_SA", context, limit=2)
+    exact = catalog.search("ARCPY.SLOPE_SA", context)
     assert [item.name for item in exact] == ["arcpy.slope_sa"]
 
-    catalog.search("slope", context, limit=2)
+    catalog.search("slope", context)
     assert provider.materialized == ["arcpy.slope_sa"]
 
     registry.unregister("arcpy.slope_sa")
@@ -341,12 +332,12 @@ def test_raster_sample_statistics_are_discoverable_with_honest_limits(query):
     assert registry.is_deferred("raster.inspect")
 
 
-def test_tool_search_protocol_supports_one_bilingual_call_and_caps_each_query_at_two():
+def test_tool_search_protocol_supports_one_bilingual_call_and_caps_each_query_at_one():
     function = TOOL_SEARCH_DEFINITION["function"]
     assert function["name"] == "tool.search"
     assert function["parameters"]["required"] == ["query"]
-    assert function["parameters"]["properties"]["limit"]["maximum"] == 2
-    assert function["parameters"]["properties"]["limit"]["default"] == 2
+    assert function["parameters"]["properties"]["limit"]["maximum"] == 1
+    assert function["parameters"]["properties"]["limit"]["default"] == 1
     query = function["parameters"]["properties"]["query"]
     assert query["maxLength"] == 160
     english_query = function["parameters"]["properties"]["english_query"]

@@ -46,7 +46,7 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     assert settings.tool_result_recent_full == 16
     assert settings.tool_result_emergency_fraction == 0.5
     assert settings.tool_context_tokens == Settings.model_fields["tool_context_tokens"].default == 6400
-    assert settings.tool_context_max_cards == 16
+    assert settings.tool_context_max_cards == 8
     assert settings.enable_arcpy is True
     assert settings.arcpy_cache == Path("state/arcpy")
 
