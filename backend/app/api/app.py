@@ -25,6 +25,7 @@ from app.application import Application
 from app.core.models import (
     AgentRequest,
     ApprovalStatus,
+    ReasoningEffort,
     RunStatus,
     TokenUsage,
     User,
@@ -41,6 +42,7 @@ class AskBody(BaseModel):
     message: str
     conversation_id: str | None = None
     model_profile: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
     dataset_ids: list[str] = Field(default_factory=list)
     attachment_ids: list[str] = Field(default_factory=list)
     referenced_run_ids: list[str] = Field(default_factory=list)
@@ -469,6 +471,7 @@ def create_app(application: Application | None = None) -> FastAPI:
                     conversation_id=payload.get("conversation_id") or new_id("conv"),
                     user_id=current_user.id,
                     model_profile=payload.get("model_profile"),
+                    reasoning_effort=payload.get("reasoning_effort"),
                     dataset_ids=payload.get("dataset_ids", []),
                     attachment_ids=payload.get("attachment_ids", []),
                     referenced_run_ids=payload.get("referenced_run_ids", []),
@@ -568,6 +571,7 @@ def _request_from_body(body: AskBody, *, conversation_id: str | None = None, use
         conversation_id=conversation_id or body.conversation_id or new_id("conv"),
         user_id=user_id,
         model_profile=body.model_profile,
+        reasoning_effort=body.reasoning_effort,
         dataset_ids=body.dataset_ids,
         attachment_ids=body.attachment_ids,
         referenced_run_ids=body.referenced_run_ids,

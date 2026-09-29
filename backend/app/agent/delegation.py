@@ -433,6 +433,7 @@ class DelegationCoordinator:
             user_input=item.goal,
             dataset_ids=list(dict.fromkeys(inputs)),
             model_profile=request.model_profile,
+            reasoning_effort=request.reasoning_effort,
         )
         async with self._semaphore:
             # 代码/命令执行或覆盖源资源需要共享资源互斥，现有默认权限仍会拒绝其发现。

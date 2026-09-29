@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApprovalCard } from "./components/ApprovalCard";
-import { api, ApprovalRequest, Event, MessageResponse, Run, TokenUsage } from "./api";
+import { api, ApprovalRequest, Event, MessageResponse, ReasoningEffort, Run, TokenUsage } from "./api";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
 import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
@@ -109,9 +109,11 @@ describe("统一聊天输入区", () => {
     uploading: false,
     onUpload: vi.fn(async () => undefined),
     onRemoveFile: vi.fn(),
-    modelStatus: { configured: true, source: "test", default_profile: "qwen", profiles: [{ id: "qwen", label: "通义千问", provider: "openai-compatible", model: "qwen", timeout_seconds: 60, temperature: 0.2, has_api_key: true, default: true }] },
+    modelStatus: { configured: true, source: "test", default_profile: "qwen", profiles: [{ id: "qwen", label: "通义千问", provider: "openai-compatible", model: "qwen", timeout_seconds: 60, temperature: 0.2, reasoning_efforts: [], has_api_key: true, default: true }] },
     selectedModelProfile: "qwen",
     onModelChange: vi.fn(),
+    selectedReasoningEffort: "" as const,
+    onReasoningChange: vi.fn(),
     approvals: [],
     approvalBusyId: null,
     onApprove: vi.fn(async () => undefined),
@@ -127,6 +129,18 @@ describe("统一聊天输入区", () => {
     expect(screen.queryByRole("button", { name: "规划" })).toBeNull();
     expect(screen.getByText("历史消息")).toBeTruthy();
     expect(screen.getAllByRole("textbox")).toHaveLength(1);
+  });
+
+  it("只为声明支持的模型显示中文思考程度", () => {
+    const onReasoningChange = vi.fn();
+    const profile = { ...productChatProps.modelStatus.profiles[0], id: "deepseek-flash", label: "DeepSeek Flash", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[], default_reasoning_effort: "medium" as const };
+    render(<ProductChat {...productChatProps} modelStatus={{ ...productChatProps.modelStatus, default_profile: profile.id, profiles: [profile] }} selectedModelProfile={profile.id} selectedReasoningEffort="xhigh" onReasoningChange={onReasoningChange} />);
+    const select = screen.getByRole("combobox", { name: "选择思考程度" });
+    expect((select as HTMLSelectElement).value).toBe("xhigh");
+    expect(screen.getByRole("option", { name: "极高" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "最高" })).toBeTruthy();
+    fireEvent.change(select, { target: { value: "max" } });
+    expect(onReasoningChange).toHaveBeenCalledWith("max");
   });
 
   it("Enter 发送，Shift+Enter 保留换行", () => {

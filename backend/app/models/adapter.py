@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.core.tokens import estimate_tokens
+from app.core.models import ReasoningEffort
 
 
 class ModelRequest(BaseModel):
@@ -19,6 +20,7 @@ class ModelRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int = 12800
     response_format: dict[str, Any] | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
 
 class ModelResponse(BaseModel):

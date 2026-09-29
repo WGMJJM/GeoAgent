@@ -13,7 +13,7 @@ from app.agent.delegation import DelegationCoordinator
 from app.agent.loop import AgentLoop
 from app.auth import ApprovalService, AuthService, PermissionPolicy
 from app.config import Settings
-from app.core.models import AgentRequest, AgentResult, AgentResultStatus, new_id
+from app.core.models import AgentRequest, AgentResult, AgentResultStatus, ReasoningEffort, new_id
 from app.entry import AttachmentService, ConversationService, MessageGateway
 from app.execution.arcpy import ArcPyProvider, discover_arcpy_executable
 from app.execution.python import PythonExecutor
@@ -168,7 +168,21 @@ class Application:
             if not isinstance(raw_profiles, list):
                 raise ValueError(f"{setting_name} 必须是 JSON 数组。")
             profiles.extend(ModelProfile.model_validate(item) for item in raw_profiles)
+        reasoning_config: dict[str, object] = {}
+        if self.settings.model_reasoning_config:
+            try:
+                raw_reasoning_config = json.loads(self.settings.model_reasoning_config)
+            except json.JSONDecodeError as exc:
+                raise ValueError("GEOAGENT_MODEL_REASONING_CONFIG 必须是有效的 JSON 对象。") from exc
+            if not isinstance(raw_reasoning_config, dict):
+                raise ValueError("GEOAGENT_MODEL_REASONING_CONFIG 必须是 JSON 对象。")
+            reasoning_config = raw_reasoning_config
         for profile in profiles:
+            if profile.id in reasoning_config:
+                override = reasoning_config[profile.id]
+                if not isinstance(override, dict):
+                    raise ValueError(f"模型 {profile.id} 的思考能力配置必须是 JSON 对象。")
+                profile = ModelProfile.model_validate({**profile.model_dump(), **override})
             if profile.id in self.model_profiles:
                 raise ValueError(f"模型配置的编号重复：{profile.id}")
             self.model_profiles[profile.id] = profile
@@ -209,6 +223,8 @@ class Application:
                 "supports_tools": profile.supports_tools,
                 "supports_json_object": profile.supports_json_object,
                 "supports_json_schema": profile.supports_json_schema,
+                "reasoning_efforts": profile.reasoning_efforts,
+                "default_reasoning_effort": profile.default_reasoning_effort,
                 "has_api_key": bool(profile.api_key),
                 "default": profile.id == self.default_model_profile,
             }
@@ -232,12 +248,13 @@ class Application:
         # Application 的 profile adapter。
         return self.agent_loop.model_adapter if hasattr(self, "agent_loop") else None
 
-    async def ask(self, user_input: str | AgentRequest, *, conversation_id: str | None = None, dataset_ids: list[str] | None = None, model_profile: str | None = None):
+    async def ask(self, user_input: str | AgentRequest, *, conversation_id: str | None = None, dataset_ids: list[str] | None = None, model_profile: str | None = None, reasoning_effort: ReasoningEffort | None = None):
         request = user_input if isinstance(user_input, AgentRequest) else AgentRequest(
             user_input=user_input,
             conversation_id=conversation_id or new_id("conv"),
             dataset_ids=[item for item in dataset_ids or () if item],
             model_profile=model_profile,
+            reasoning_effort=reasoning_effort,
         )
         response = await self.message_entry.submit(request)
         if response.result is not None:

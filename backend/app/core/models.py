@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 def new_id(prefix: str) -> str:
@@ -255,6 +257,7 @@ class AgentRequest(StrictModel):
     attachment_ids: list[str] = Field(default_factory=list)
     referenced_run_ids: list[str] = Field(default_factory=list)
     model_profile: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
     reply_to_run_id: str | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 

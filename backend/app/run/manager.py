@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Checkpoint, Run, RunStatus, TokenUsage
+from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Checkpoint, ReasoningEffort, Run, RunStatus, TokenUsage
 from app.observability import EventType
 from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import persist_result, transition
@@ -56,6 +56,7 @@ class RunManager:
         dataset_ids: list[str] | None = None,
         attachment_ids: list[str] | None = None,
         model_profile: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         approval_id: str | None = None,
         approved: bool | None = None,
         technical: bool = False,
@@ -102,6 +103,7 @@ class RunManager:
             update={
                 "user_id": user_id or saved_request.user_id,
                 "model_profile": model_profile or saved_request.model_profile,
+                "reasoning_effort": reasoning_effort or saved_request.reasoning_effort,
                 "dataset_ids": list(dict.fromkeys([*saved_request.dataset_ids, *(dataset_ids or [])])),
                 "attachment_ids": list(dict.fromkeys([*saved_request.attachment_ids, *(attachment_ids or [])])),
             }

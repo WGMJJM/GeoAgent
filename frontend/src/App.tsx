@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event, fetchRunView, MeasurementSystem, ModelStatus, ResponseStyle, Result, Run, TokenUsage, User, UserProfile } from "./api";
+import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event, fetchRunView, MeasurementSystem, ModelStatus, ReasoningEffort, ResponseStyle, Result, Run, TokenUsage, User, UserProfile } from "./api";
 import { childRunsOf, isExecutionInflight, isMainRun, runDurationMs, runTitle, runsForConversation } from "./domain";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { Icon, IconName } from "./components/Icon";
@@ -30,6 +30,7 @@ type ConversationDraft = {
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48;
 const SHAPEFILE_EXTENSIONS = new Set([".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj"]);
 const SHAPEFILE_REQUIRED_EXTENSIONS = [".shp", ".shx", ".dbf"];
+const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = { low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" };
 const emptyDraft = (): ConversationDraft => ({ message: "", selectedDatasetIds: [], uploadedFiles: [] });
 
 function fileExtension(filename: string): string {
@@ -94,6 +95,7 @@ export function App() {
   const [globalError, setGlobalError] = useState("");
   const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
   const [selectedModelProfile, setSelectedModelProfile] = useState("");
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<ReasoningEffort | "">("");
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
   const [now, setNow] = useState(() => performance.now());
@@ -128,6 +130,12 @@ export function App() {
     const timer = window.setInterval(() => setNow(performance.now()), 1000);
     return () => window.clearInterval(timer);
   }, [executionsByConversation]);
+
+  useEffect(() => {
+    const profile = modelStatus?.profiles.find((item) => item.id === selectedModelProfile);
+    const efforts = profile?.reasoning_efforts ?? [];
+    setSelectedReasoningEffort((current) => efforts.includes(current as ReasoningEffort) ? current : profile?.default_reasoning_effort ?? efforts[0] ?? "");
+  }, [modelStatus, selectedModelProfile]);
 
   const updateDraft = (id: string, changes: Partial<ConversationDraft>) => {
     setDraftsByConversation((current) => ({ ...current, [id]: { ...(current[id] ?? emptyDraft()), ...changes } }));
@@ -303,6 +311,7 @@ export function App() {
     setApprovals([]);
     setModelStatus(null);
     setSelectedModelProfile("");
+    setSelectedReasoningEffort("");
     window.sessionStorage.removeItem("geoagent.conversation_id");
   };
 
@@ -473,6 +482,7 @@ export function App() {
       selectedModelProfile,
       () => setExecution(targetConversationId, (current) => current ? { ...current, progressAt: performance.now() } : current),
       targetReplyToRunId ?? undefined,
+      selectedReasoningEffort || undefined,
     );
     streamCancels.current[targetConversationId] = stream.cancel;
     try {
@@ -690,7 +700,7 @@ export function App() {
     <main className="main">
        {view !== "chat" && <header className="topbar"><div><h1>{view === "datasets" ? "数据集登记" : view === "agents" ? "智能体活动" : view === "runs" ? "运行与追踪" : "设置"}</h1></div><div className="topbar-actions"><button className="ghost" onClick={() => setView("chat")}>返回对话</button><button className="close-view" type="button" aria-label="关闭当前页面" title="关闭" onClick={() => setView("chat")}><Icon name="close" size={18} /></button><button className="ghost" onClick={() => void refreshAll()}><Icon name="refresh" size={13} /> 刷新</button></div></header>}
       {error && <div className="error">{error}</div>}
-       {view === "chat" && <ProductChat key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
+       {view === "chat" && <ProductChat key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} onReasoningChange={setSelectedReasoningEffort} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
       {view === "datasets" && <DatasetPanel datasets={datasets} selectedDatasetIds={selectedDatasetIds} onToggleRequestDataset={(id) => setSelectedDatasetIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])} onRegister={registerDataset} busy={false} />}
       {view === "agents" && <AgentPanel runs={conversationRuns} />}
        {view === "runs" && <RunPanel runs={conversationRuns} selectedRunId={selectedRunId} events={events} result={result} datasets={datasets} artifacts={artifacts} onSelect={loadRun} onCancel={cancelRun} onResume={resumeRun} onDelete={deleteRun} onDeleteMany={deleteRunRecords} busy={resumingRunId !== null} />}
@@ -728,6 +738,8 @@ type ProductChatProps = {
   modelStatus: ModelStatus | null;
   selectedModelProfile: string;
   onModelChange: (value: string) => void;
+  selectedReasoningEffort: ReasoningEffort | "";
+  onReasoningChange: (value: ReasoningEffort) => void;
   approvals: ApprovalRequest[];
   approvalBusyId: string | null;
   onApprove: (approval: ApprovalRequest) => Promise<void>;
@@ -735,11 +747,12 @@ type ProductChatProps = {
 };
 
 export function ProductChat({
-  message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, approvals, approvalBusyId, onApprove, onDeny,
+  message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
   const historyRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
+  const selectedProfile = modelStatus?.profiles.find((profile) => profile.id === selectedModelProfile);
   const wasBusyRef = useRef(busy);
 
   const updateScrollPreference = () => {
@@ -775,7 +788,7 @@ export function ProductChat({
     <div className="composer">
       {replyToRunId && <div className="reply-target-banner" role="status">正在补充运行 {replyToRunId}<button type="button" onClick={() => onReplyToRun(null)}>取消</button></div>}
       <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} rows={2} aria-label="输入消息" placeholder="输入消息" title="Enter 发送，Shift+Enter 换行" disabled={!conversationReady || sending} />
-      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
+      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} title={selectedProfile?.label} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{selectedProfile && selectedProfile.reasoning_efforts.length > 0 && <div className="reasoning-picker"><span>思考</span><select value={selectedReasoningEffort} onChange={(event) => onReasoningChange(event.target.value as ReasoningEffort)} disabled={sending} aria-label="选择思考程度">{selectedProfile.reasoning_efforts.map((effort) => <option value={effort} key={effort}>{REASONING_EFFORT_LABELS[effort]}</option>)}</select></div>}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
   </section>;
 }

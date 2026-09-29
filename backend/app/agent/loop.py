@@ -141,6 +141,8 @@ class AgentLoop:
             metadata={
                 "request_id": request.request_id,
                 "original_request": request.user_input,
+                "model_profile": request.model_profile,
+                "reasoning_effort": request.reasoning_effort,
                 "original_request_message_id": self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id),
                 "protocol_version": 1,
                 **(metadata or {}),
@@ -329,6 +331,7 @@ class AgentLoop:
                         messages=model_messages,
                         tools=model_tools,
                         max_tokens=self.settings.max_tokens,
+                        reasoning_effort=request.reasoning_effort,
                     )
                     await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在思考",
                                           agent_id=current.agent_id, payload={"turn": current.turn_count})

@@ -41,8 +41,8 @@ describe("前端 API 契约", () => {
     }
     const socket = new FakeWebSocket();
     vi.stubGlobal("WebSocket", vi.fn(() => socket));
-    await api.streamMessage("规划道路缓冲区", ["dataset-1"], ["dataset-2"], vi.fn(), vi.fn(), vi.fn(), "conversation-1", "qwen", undefined, "run-waiting");
-    expect(JSON.parse(socket.sent[0])).toMatchObject({ message: "规划道路缓冲区", conversation_id: "conversation-1", dataset_ids: ["dataset-1"], attachment_ids: ["dataset-2"], model_profile: "qwen", reply_to_run_id: "run-waiting" });
+    await api.streamMessage("规划道路缓冲区", ["dataset-1"], ["dataset-2"], vi.fn(), vi.fn(), vi.fn(), "conversation-1", "qwen", undefined, "run-waiting", "xhigh");
+    expect(JSON.parse(socket.sent[0])).toMatchObject({ message: "规划道路缓冲区", conversation_id: "conversation-1", dataset_ids: ["dataset-1"], attachment_ids: ["dataset-2"], model_profile: "qwen", reasoning_effort: "xhigh", reply_to_run_id: "run-waiting" });
     expect(JSON.parse(socket.sent[0])).not.toHaveProperty("execution_mode");
     expect(JSON.parse(socket.sent[0])).not.toHaveProperty("planning_session_id");
   });

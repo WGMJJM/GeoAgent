@@ -33,6 +33,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         return estimate_tokens(value, self.config.tokenizer_file)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        reasoning_effort = _reasoning_effort(self.config, request)
         async with asyncio.timeout(self.config.timeout_seconds):
             response = await self.client.chat.completions.create(
                 model=self.config.model,
@@ -41,6 +42,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 response_format=request.response_format if _capability(self, "supports_json_object", True) or _capability(self, "supports_json_schema", False) else None,
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             )
         message = response.choices[0].message
         return ModelResponse(content=message.content or "", tool_calls=[call.model_dump() for call in (message.tool_calls or [])], input_tokens=response.usage.prompt_tokens if response.usage else None, output_tokens=response.usage.completion_tokens if response.usage else None, model=response.model, finish_reason=response.choices[0].finish_reason)
@@ -59,6 +61,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
             return
         tool_calls: dict[int, dict] = {}
+        reasoning_effort = _reasoning_effort(self.config, request)
         model = None
         input_tokens = None
         output_tokens = None
@@ -73,6 +76,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 max_tokens=request.max_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             )
             try:
                 async for chunk in stream:
@@ -126,3 +130,10 @@ def _capability(adapter: OpenAICompatibleAdapter, name: str, default: bool) -> b
         return bool(adapter.__dict__[name])
     config = getattr(adapter, "config", None)
     return bool(getattr(config, name, default))
+
+
+def _reasoning_effort(config: ModelConfig, request: ModelRequest):
+    effort = request.reasoning_effort or config.default_reasoning_effort
+    if effort and effort not in config.reasoning_efforts:
+        raise ValueError(f"模型 {config.model} 不支持思考程度 {effort}")
+    return effort

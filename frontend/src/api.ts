@@ -16,9 +16,10 @@ export type Conversation = { id: string; title: string; created_at: string; upda
 export type User = { id: string; username: string; email?: string | null; display_name: string; is_active: boolean; created_at: string; updated_at: string };
 export type ResponseStyle = "concise" | "balanced" | "detailed";
 export type MeasurementSystem = "metric" | "imperial";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type UserProfile = { user_id: string; language: string; response_style: ResponseStyle; measurement_system: MeasurementSystem; preferred_output_format?: string | null; updated_at: string };
 export type ConversationMessage = { id: string; conversation_id: string; role: string; content: string; run_id?: string | null; dataset_ids: string[]; created_at?: string };
-export type ModelProfile = { id: string; label: string; provider: string; base_url?: string | null; model: string; timeout_seconds: number; temperature: number; supports_stream?: boolean; supports_tools?: boolean; supports_json_object?: boolean; supports_json_schema?: boolean; has_api_key: boolean; default: boolean };
+export type ModelProfile = { id: string; label: string; provider: string; base_url?: string | null; model: string; timeout_seconds: number; temperature: number; supports_stream?: boolean; supports_tools?: boolean; supports_json_object?: boolean; supports_json_schema?: boolean; reasoning_efforts: ReasoningEffort[]; default_reasoning_effort?: ReasoningEffort | null; has_api_key: boolean; default: boolean };
 export type ModelStatus = { configured: boolean; source: string; default_profile?: string | null; profiles: ModelProfile[] };
 export type RunDetails = { run: Run; result: Result | null; events: Event[]; artifacts: Artifact[] };
 export type MessageResponse = { request_id: string; route: MessageRoute; message: string; run?: Run | null; result?: Result | null };
@@ -111,7 +112,7 @@ async function uploadShapefile(files: File[]): Promise<Dataset> {
   }
 }
 
-function streamMessage(message: string, datasetIds: string[], attachmentIds: string[], onRun: (run: Run) => void, onEvent: (event: Event) => void, onDelta: (content: string, tokenUsage?: TokenUsage) => void, conversationId?: string, modelProfile?: string, onProgress?: () => void, replyToRunId?: string) {
+function streamMessage(message: string, datasetIds: string[], attachmentIds: string[], onRun: (run: Run) => void, onEvent: (event: Event) => void, onDelta: (content: string, tokenUsage?: TokenUsage) => void, conversationId?: string, modelProfile?: string, onProgress?: () => void, replyToRunId?: string, reasoningEffort?: ReasoningEffort) {
   let cancelRequest = () => undefined;
   const promise = new Promise<MessageResponse>((resolve, reject) => {
     let socket: WebSocket | null = null;
@@ -148,7 +149,7 @@ function streamMessage(message: string, datasetIds: string[], attachmentIds: str
     socket.onopen = () => {
       touchConnection();
       try {
-        socket.send(JSON.stringify({ type: "ask", message, conversation_id: conversationId, model_profile: modelProfile || undefined, dataset_ids: datasetIds, attachment_ids: attachmentIds, reply_to_run_id: replyToRunId || undefined }));
+        socket.send(JSON.stringify({ type: "ask", message, conversation_id: conversationId, model_profile: modelProfile || undefined, reasoning_effort: reasoningEffort || undefined, dataset_ids: datasetIds, attachment_ids: attachmentIds, reply_to_run_id: replyToRunId || undefined }));
       } catch (error) {
         fail(error instanceof Error ? error : new Error("无法发送 GeoAgent 请求"));
       }

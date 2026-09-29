@@ -60,6 +60,7 @@ async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
         enable_arcpy=False,
         model_profiles='[{"id":"primary","label":"主模型","model":"primary","default":true}]',
         additional_model_profiles='[{"id":"deepseek-flash","label":"DeepSeek Flash","model":"deepseek-flash"}]',
+        model_reasoning_config='{"deepseek-flash":{"reasoning_efforts":["low","medium","high","xhigh","max"],"default_reasoning_effort":"medium"}}',
     )
     application = Application(settings)
     try:
@@ -68,6 +69,8 @@ async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
         status = application.model_status()
         assert [item["id"] for item in status["profiles"]] == ["primary", "deepseek-flash"]
         assert status["profiles"][1]["has_api_key"] is False
+        assert status["profiles"][1]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+        assert status["profiles"][1]["default_reasoning_effort"] == "medium"
     finally:
         await application.close()
 

@@ -28,6 +28,27 @@ async def test_complete_reads_existing_response_usage_without_an_extra_request(u
     assert response.output_tokens == (usage.completion_tokens if usage else None)
 
 
+@pytest.mark.asyncio
+async def test_reasoning_effort_is_forwarded_only_for_declared_levels():
+    requests = []
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(model="fake", usage=None, choices=[SimpleNamespace(
+            message=SimpleNamespace(content="完成", tool_calls=[]), finish_reason="stop",
+        )])
+
+    adapter = object.__new__(OpenAICompatibleAdapter)
+    adapter.config = ModelConfig(model="fake", reasoning_efforts=["low", "medium", "high", "xhigh", "max"])
+    adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    await adapter.complete(ModelRequest(messages=[], reasoning_effort="xhigh"))
+    assert requests[0]["reasoning_effort"] == "xhigh"
+
+    with pytest.raises(ValueError, match="不支持思考程度"):
+        adapter.config = ModelConfig(model="fake")
+        await adapter.complete(ModelRequest(messages=[], reasoning_effort="high"))
+
+
 def _choice(*, finish_reason=None, content="", tool_calls=None):
     return SimpleNamespace(
         finish_reason=finish_reason,

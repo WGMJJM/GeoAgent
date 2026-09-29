@@ -94,6 +94,7 @@ class ConversationService:
             dataset_ids=request.dataset_ids,
             attachment_ids=request.attachment_ids,
             model_profile=request.model_profile,
+            reasoning_effort=request.reasoning_effort,
             on_run=on_run,
             on_model_delta=on_model_delta,
         )
