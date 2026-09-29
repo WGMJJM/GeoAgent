@@ -74,5 +74,6 @@
 .run-state.created{background:var(--muted)}
 .primary:hover:not(:disabled){background:var(--accent-strong)}
 .chat-message.user .chat-bubble{color:var(--accent-strong)}
+.message-resources{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;max-width:100%}.message-resource{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:240px;padding:6px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text-secondary);font-size:11px}.message-resource span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 input::placeholder,textarea::placeholder{color:var(--muted)}
 .document-preview{margin:12px 0 0;max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--border);border-radius:7px;background:var(--surface-muted);padding:12px;color:var(--text-secondary);font:12px/1.6 inherit}

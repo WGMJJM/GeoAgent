@@ -109,6 +109,24 @@ describe("统一聊天输入区", () => {
     expect(screen.getAllByRole("textbox")).toHaveLength(1);
   });
 
+  it("Enter 发送，Shift+Enter 保留换行", () => {
+    const send = vi.fn(async () => undefined);
+    render(<ProductChat {...productChatProps} message="检查数据" send={send} />);
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(send).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(send).toHaveBeenCalledOnce();
+  });
+
+  it("用户消息在正文上方显示本轮文件名", () => {
+    const dataset = { id: "file-dem", name: "dem", kind: "RASTER", path: "D:\\workspace\\input\\dem.tif", format: "GeoTIFF" };
+    const { container } = render(<ProductChat {...productChatProps} datasets={[dataset]} messages={[{ id: "message-file", role: "user", content: "检查这个数据", datasetIds: [dataset.id] }]} />);
+    expect(screen.getByText("dem.tif")).toBeTruthy();
+    const message = container.querySelector(".chat-message.user")!;
+    expect(message.querySelector(".message-resources")?.nextElementSibling?.textContent).toBe("检查这个数据");
+  });
+
   it("统一线性图标保留发送、添加和移除的可访问名称与回调", () => {
     const onRemoveDataset = vi.fn();
     const onRemoveFile = vi.fn();

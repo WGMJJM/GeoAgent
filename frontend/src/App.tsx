@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event, fetchRunView, MeasurementSystem, ModelStatus, ResponseStyle, Result, Run, TokenUsage, User, UserProfile } from "./api";
 import { childRunsOf, isExecutionInflight, isMainRun, runDurationMs, runTitle, runsForConversation } from "./domain";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -9,7 +9,7 @@ import { RunPanel } from "./components/RunPanel";
 import { displayEventMessage, eventLabel, formatLabel, kindLabel, statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
-type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string };
+type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[] };
 type ExecutionPhase = "connecting" | "running";
 type ConversationExecutionState = {
   requestId: string;
@@ -222,6 +222,7 @@ export function App() {
         content: item.content,
         kind: item.role === "user" ? "text" : item.run_id ? "execution" : "text",
         runId: item.run_id ?? undefined,
+        datasetIds: item.dataset_ids,
       }));
       if (!isCurrentTarget()) return;
       setMessagesForConversation(id, restored);
@@ -445,7 +446,13 @@ export function App() {
     const requestId = `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const startedAt = performance.now();
     setError("");
-    setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-user-${requestId}`, role: "user", content: prompt, kind: "text" }]);
+    setMessagesForConversation(targetConversationId, (current) => [...current, {
+      id: `local-user-${requestId}`,
+      role: "user",
+      content: prompt,
+      kind: "text",
+      datasetIds: [...new Set([...targetDatasetIds, ...targetAttachmentIds])],
+    }]);
     updateDraft(targetConversationId, { message: "", selectedDatasetIds: [], uploadedFiles: [] });
     setExecution(targetConversationId, { requestId, runId: null, phase: "connecting", startedAt, progressAt: startedAt, streamingReply: "", tokenUsage: null, events: [] });
     let receivedEvents: Event[] = [];
@@ -742,6 +749,12 @@ export function ProductChat({
     followsLatestRef.current = distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
   };
 
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (message.trim() && conversationReady && !sending && !uploading) void send();
+  };
+
   useLayoutEffect(() => {
     const history = historyRef.current;
     if (!history) return;
@@ -753,7 +766,7 @@ export function ProductChat({
   return <section className="chat-layout product-chat">
     {approvals.length > 0 && <div className="approval-stack">{approvals.map((approval) => <ApprovalCard key={approval.id} approval={approval} busy={approvalBusyId === approval.id} onApprove={onApprove} onDeny={onDeny} />)}</div>}
     {(messages.length > 0 || busy) && <div className="chat-history" aria-live="polite" ref={historyRef} onScroll={updateScrollPreference}>
-      {messages.map((item) => <ChatBubble item={item} runs={runs} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
+      {messages.map((item) => <ChatBubble item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
         <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={liveTokenUsage ?? runs.find((run) => run.id === activeRunId)?.token_usage} streaming={Boolean(streamingReply)} /></div>
         {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(streamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
@@ -761,16 +774,17 @@ export function ProductChat({
     </div>}
     <div className="composer">
       {replyToRunId && <div className="reply-target-banner" role="status">正在补充运行 {replyToRunId}<button type="button" onClick={() => onReplyToRun(null)}>取消</button></div>}
-      <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} rows={2} aria-label="输入消息" placeholder="输入消息" disabled={!conversationReady || sending} />
+      <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} rows={2} aria-label="输入消息" placeholder="输入消息" title="Enter 发送，Shift+Enter 换行" disabled={!conversationReady || sending} />
       <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
   </section>;
 }
 
-export function ChatBubble({ item, runs = [], onShowRun, onReplyToRun }: { item: ChatMessage; runs?: Run[]; onShowRun: (runId: string) => void; onReplyToRun: (runId: string | null) => void }) {
+export function ChatBubble({ item, runs = [], datasets = [], onShowRun, onReplyToRun }: { item: ChatMessage; runs?: Run[]; datasets?: Dataset[]; onShowRun: (runId: string) => void; onReplyToRun: (runId: string | null) => void }) {
   const run = item.kind === "execution" && item.runId ? runs.find((candidate) => candidate.id === item.runId) : undefined;
   const executionMessage = item.role === "assistant" && item.kind === "execution";
-  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
+  const resources = (item.datasetIds ?? []).map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset));
+  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <span className="message-resource" key={dataset.id} title={dataset.path}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></span>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
 }
 
 export function CompletedRunSummary({ run }: { run: Run }) {
