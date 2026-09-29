@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -12,6 +13,8 @@ from app.config import Settings
 from app.core.tokens import DEFAULT_TOKENIZER_FILE, _load_tokenizer, estimate_tokens
 from app.models.config import ModelProfile
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
+
+DEEPSEEK_TOKENIZER_FILE = Path(__file__).resolve().parents[2] / "resources/tokenizers/deepseek-v4.1.json"
 
 
 def test_example_environment_options_have_settings_fields():
@@ -59,7 +62,12 @@ async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
         workspace=tmp_path / "workspace",
         enable_arcpy=False,
         model_profiles='[{"id":"primary","label":"主模型","model":"primary","default":true}]',
-        additional_model_profiles='[{"id":"deepseek-flash","label":"DeepSeek Flash","model":"deepseek-flash"}]',
+        additional_model_profiles=json.dumps([{
+            "id": "deepseek-flash",
+            "label": "DeepSeek Flash",
+            "model": "deepseek-flash",
+            "tokenizer_file": str(DEEPSEEK_TOKENIZER_FILE),
+        }]),
         model_reasoning_config='{"deepseek-flash":{"reasoning_efforts":["low","medium","high","xhigh","max"],"default_reasoning_effort":"medium"}}',
     )
     application = Application(settings)
@@ -71,6 +79,8 @@ async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
         assert status["profiles"][1]["has_api_key"] is False
         assert status["profiles"][1]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
         assert status["profiles"][1]["default_reasoning_effort"] == "medium"
+        sample = "坡度分析 DEM 重投影 EPSG:32650"
+        assert application.get_model_adapter("primary").count_tokens(sample) != application.get_model_adapter("deepseek-flash").count_tokens(sample)
     finally:
         await application.close()
 
@@ -80,6 +90,12 @@ def test_local_token_counts_match_bundled_tokenizer_and_cache():
     for content in ("", "坡度分析 DEM 重投影 EPSG:32650", '{"dataset_id":"ds_1","distance":500}', "hello world"):
         assert estimate_tokens(content) == len(tokenizer.encode(content, add_special_tokens=False).ids)
     assert _load_tokenizer(DEFAULT_TOKENIZER_FILE.resolve()) is _load_tokenizer(DEFAULT_TOKENIZER_FILE.resolve())
+
+
+def test_bundled_deepseek_tokenizer_matches_local_counter():
+    tokenizer = Tokenizer.from_file(str(DEEPSEEK_TOKENIZER_FILE))
+    for content in ("", "坡度分析 DEM 重投影 EPSG:32650", '{"dataset_id":"ds_1"}', "hello world"):
+        assert estimate_tokens(content, DEEPSEEK_TOKENIZER_FILE) == len(tokenizer.encode(content, add_special_tokens=False).ids)
 
 
 def test_model_profile_tokenizer_override_and_global_default(tmp_path):

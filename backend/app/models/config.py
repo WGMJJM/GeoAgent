@@ -1,6 +1,7 @@
 """模型配置。"""
 
 from pathlib import Path
+
 from pydantic import BaseModel, Field, model_validator
 
 from app.core.models import ReasoningEffort
