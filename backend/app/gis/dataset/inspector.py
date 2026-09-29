@@ -9,6 +9,9 @@ from typing import Any
 import geopandas as gpd
 import pandas as pd
 import rasterio
+from docx import Document
+from PIL import Image
+from pypdf import PdfReader
 from pyproj import CRS
 
 from app.core.models import BoundingBox, CRSInfo, Dataset, DatasetKind, DatasetSchema, new_id
@@ -17,6 +20,9 @@ from app.gis.errors import GISFailure
 VECTOR_EXTENSIONS = {".shp", ".gpkg", ".geojson", ".json", ".kml", ".gml", ".zip"}
 RASTER_EXTENSIONS = {".tif", ".tiff", ".img", ".vrt", ".asc"}
 TABLE_EXTENSIONS = {".csv", ".tsv", ".parquet", ".jsonl"}
+DOCUMENT_EXTENSIONS = {".txt", ".md", ".pdf", ".doc", ".docx"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
+TEXT_PREVIEW_CHARACTERS = 12_000
 
 
 class DatasetInspector:
@@ -34,6 +40,10 @@ class DatasetInspector:
             dataset = self._inspect_vector(file_path, name=name)
         elif kind is DatasetKind.RASTER:
             dataset = self._inspect_raster(file_path, name=name)
+        elif kind is DatasetKind.DOCUMENT:
+            dataset = self._inspect_document(file_path, name=name)
+        elif kind is DatasetKind.IMAGE:
+            dataset = self._inspect_image(file_path, name=name)
         else:
             dataset = self._inspect_table(file_path, name=name)
         if dataset_id:
@@ -49,6 +59,10 @@ class DatasetInspector:
             return DatasetKind.VECTOR
         if suffix in TABLE_EXTENSIONS:
             return DatasetKind.TABLE
+        if suffix in DOCUMENT_EXTENSIONS:
+            return DatasetKind.DOCUMENT
+        if suffix in IMAGE_EXTENSIONS:
+            return DatasetKind.IMAGE
         raise GISFailure("UNSUPPORTED_FORMAT", f"暂不支持的数据格式：{suffix or path.name}", category="DATA")
 
     def _inspect_vector(self, path: Path, *, name: str | None) -> Dataset:
@@ -129,6 +143,77 @@ class DatasetInspector:
             metadata={"columns": list(frame.columns), "sample_rows": frame.head(3).to_dict(orient="records")},
         )
 
+    def _inspect_document(self, path: Path, *, name: str | None) -> Dataset:
+        suffix = path.suffix.casefold()
+        try:
+            if suffix in {".txt", ".md"}:
+                text = path.read_text(encoding="utf-8-sig", errors="replace")
+                page_count = None
+                extractable = True
+            elif suffix == ".pdf":
+                reader = PdfReader(path)
+                chunks: list[str] = []
+                length = 0
+                for page in reader.pages:
+                    chunk = page.extract_text() or ""
+                    chunks.append(chunk)
+                    length += len(chunk)
+                    if length >= TEXT_PREVIEW_CHARACTERS:
+                        break
+                text = "\n".join(chunks)
+                page_count = len(reader.pages)
+                extractable = True
+            elif suffix == ".docx":
+                document = Document(path)
+                text = "\n".join(paragraph.text for paragraph in document.paragraphs if paragraph.text.strip())
+                page_count = None
+                extractable = True
+            else:
+                text = ""
+                page_count = None
+                extractable = False
+        except Exception as exc:
+            raise GISFailure("DOCUMENT_READ_FAILED", f"无法读取文档：{exc}", category="DATA") from exc
+        preview = text[:TEXT_PREVIEW_CHARACTERS]
+        return Dataset(
+            name=name or path.stem,
+            kind=DatasetKind.DOCUMENT,
+            path=str(path),
+            format=suffix.lstrip("."),
+            metadata={
+                "media_type": _document_media_type(suffix),
+                "size_bytes": path.stat().st_size,
+                "page_count": page_count,
+                "character_count": len(text) if extractable else None,
+                "text_preview": preview,
+                "text_truncated": len(text) > len(preview),
+                "text_extractable": extractable,
+            },
+        )
+
+    def _inspect_image(self, path: Path, *, name: str | None) -> Dataset:
+        try:
+            with Image.open(path) as image:
+                width, height = image.size
+                bands = len(image.getbands())
+                metadata = {
+                    "media_type": Image.MIME.get(image.format, "application/octet-stream"),
+                    "mode": image.mode,
+                    "image_format": image.format,
+                    "frames": int(getattr(image, "n_frames", 1)),
+                    "size_bytes": path.stat().st_size,
+                }
+        except Exception as exc:
+            raise GISFailure("IMAGE_READ_FAILED", f"无法读取图像：{exc}", category="DATA") from exc
+        return Dataset(
+            name=name or path.stem,
+            kind=DatasetKind.IMAGE,
+            path=str(path),
+            format=path.suffix.casefold().lstrip("."),
+            schema=DatasetSchema(width=width, height=height, bands=bands),
+            metadata=metadata,
+        )
+
 
 def _crs_info(value: Any) -> CRSInfo | None:
     if value is None:
@@ -164,3 +249,13 @@ def _json_number(value: Any) -> float | int | None:
         return int(value) if value.is_integer() else value
     except (TypeError, ValueError):
         return None
+
+
+def _document_media_type(suffix: str) -> str:
+    return {
+        ".txt": "text/plain",
+        ".md": "text/markdown",
+        ".pdf": "application/pdf",
+        ".doc": "application/msword",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }[suffix]

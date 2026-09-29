@@ -75,3 +75,4 @@
 .primary:hover:not(:disabled){background:var(--accent-strong)}
 .chat-message.user .chat-bubble{color:var(--accent-strong)}
 input::placeholder,textarea::placeholder{color:var(--muted)}
+.document-preview{margin:12px 0 0;max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--border);border-radius:7px;background:var(--surface-muted);padding:12px;color:var(--text-secondary);font:12px/1.6 inherit}

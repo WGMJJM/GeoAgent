@@ -25,6 +25,8 @@ export const KIND_LABELS: Record<string, string> = {
   VECTOR: "矢量",
   RASTER: "栅格",
   TABLE: "表格",
+  DOCUMENT: "文档",
+  IMAGE: "图像",
   POINT_CLOUD: "点云",
   TRAJECTORY: "轨迹",
   NETWORK: "网络",
@@ -40,6 +42,16 @@ export const FORMAT_LABELS: Record<string, string> = {
   csv: "表格文件",
   tsv: "表格文件",
   parquet: "表格文件",
+  txt: "文本文件",
+  md: "Markdown 文档",
+  pdf: "PDF 文档",
+  doc: "Word 文档",
+  docx: "Word 文档",
+  png: "图像文件",
+  jpg: "图像文件",
+  jpeg: "图像文件",
+  bmp: "图像文件",
+  webp: "图像文件",
 };
 
 export const EVENT_LABELS: Record<string, string> = {
@@ -150,7 +162,7 @@ export function kindLabel(value: string): string {
 }
 
 export function formatLabel(value: string): string {
-  return FORMAT_LABELS[value.toLowerCase()] ?? "空间数据文件";
+  return FORMAT_LABELS[value.toLowerCase()] ?? "数据文件";
 }
 
 export function eventLabel(value: string): string {

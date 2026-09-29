@@ -24,7 +24,7 @@ export type RunDetails = { run: Run; result: Result | null; events: Event[]; art
 export type MessageResponse = { request_id: string; route: MessageRoute; message: string; run?: Run | null; result?: Result | null };
 export type ApprovalRequest = { id: string; user_id: string; conversation_id?: string | null; task_id?: string | null; source_run_id: string; tool_call_id: string; tool_name: string; argument_fingerprint: string; risk_level: RiskLevel; argument_preview: Record<string, unknown>; reason: string; status: ApprovalStatus; created_at: string; decided_at?: string | null; consumed_at?: string | null; continuation_run_id?: string | null; decision_note?: string | null };
 export type ApprovalActionResponse = { approval: ApprovalRequest; run?: Run | null; result?: Result | null };
-export type DatasetPreview = { dataset_id: string; kind: string; crs?: string | null; source_crs?: string | null; bbox?: number[] | null; feature_count?: number | null; truncated: boolean; geojson?: { type: string; features?: unknown[] } | null; width?: number | null; height?: number | null; bands?: number | null; resolution?: number[] | null; columns: string[]; rows: Record<string, unknown>[] };
+export type DatasetPreview = { dataset_id: string; kind: string; crs?: string | null; source_crs?: string | null; bbox?: number[] | null; feature_count?: number | null; truncated: boolean; geojson?: { type: string; features?: unknown[] } | null; width?: number | null; height?: number | null; bands?: number | null; resolution?: number[] | null; columns: string[]; rows: Record<string, unknown>[]; media_type?: string | null; page_count?: number | null; text?: string | null };
 export type DatasetLineage = { id: string; run_id?: string | null; operation: string; input_dataset_ids: string[]; output_dataset_id: string; tool_call_id?: string | null; parameters: Record<string, unknown>; created_at: string };
 
 export class ApiError extends Error {
@@ -80,6 +80,29 @@ async function uploadAttachment(file: File): Promise<Dataset> {
         message = payload.detail ?? body;
       } catch { /* 非 JSON 错误直接使用响应文本。 */ }
       throw new ApiError(message || `文件上传失败（${response.status}）`, response.status);
+    }
+    const payload = JSON.parse(body) as { dataset: Dataset };
+    return payload.dataset;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function uploadShapefile(files: File[]): Promise<Dataset> {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+  try {
+    const response = await fetch("/api/v1/attachments/shapefile", { method: "POST", credentials: "include", body: form, signal: controller.signal });
+    const body = await response.text();
+    if (!response.ok) {
+      let message = body;
+      try {
+        const payload = JSON.parse(body) as { detail?: string };
+        message = payload.detail ?? body;
+      } catch { /* 非 JSON 错误直接使用响应文本。 */ }
+      throw new ApiError(message || `Shapefile 上传失败（${response.status}）`, response.status);
     }
     const payload = JSON.parse(body) as { dataset: Dataset };
     return payload.dataset;
@@ -166,6 +189,7 @@ export const api = {
   updateProfile: (changes: Partial<Omit<UserProfile, "user_id" | "updated_at">>) => request<UserProfile>("/api/v1/users/me/profile", { method: "PATCH", body: JSON.stringify(changes) }),
   datasets: () => request<Dataset[]>("/api/v1/datasets"),
   uploadAttachment,
+  uploadShapefile,
   conversations: (limit = 50) => request<Conversation[]>(`/api/v1/conversations?limit=${limit}`),
   createConversation: (title = "新对话") => request<Conversation>("/api/v1/conversations", { method: "POST", body: JSON.stringify({ title }) }),
   deleteConversation: (conversationId: string) => request<{ deleted: boolean }>(`/api/v1/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" }),

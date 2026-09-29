@@ -217,6 +217,21 @@ def create_app(application: Application | None = None) -> FastAPI:
             "dataset": dataset.model_dump(mode="json"),
         }
 
+    @api.post("/api/v1/attachments/shapefile")
+    async def upload_shapefile(files: list[UploadFile] = File(...), current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+        """接收同名 .shp/.shx/.dbf 文件组，并只登记主 Shapefile。"""
+
+        try:
+            bundle = [(file.filename or "", await file.read()) for file in files]
+            path = geoagent.attachments.accept_shapefile(bundle, user_id=current_user.id)
+            dataset = geoagent.registry.for_user(current_user.id).register_path(path, name=Path(path).stem)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "attachment_id": dataset.id,
+            "dataset": dataset.model_dump(mode="json"),
+        }
+
     @api.get("/api/v1/datasets/{dataset_id}/lineage")
     async def dataset_lineage(dataset_id: str, current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
         if geoagent.registry.get(dataset_id, user_id=current_user.id) is None:

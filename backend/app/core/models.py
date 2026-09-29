@@ -33,6 +33,8 @@ class DatasetKind(StrEnum):
     VECTOR = "VECTOR"
     RASTER = "RASTER"
     TABLE = "TABLE"
+    DOCUMENT = "DOCUMENT"
+    IMAGE = "IMAGE"
     POINT_CLOUD = "POINT_CLOUD"
     TRAJECTORY = "TRAJECTORY"
     NETWORK = "NETWORK"

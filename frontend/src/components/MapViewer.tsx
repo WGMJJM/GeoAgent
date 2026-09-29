@@ -19,12 +19,17 @@ export function MapViewer({ datasetId, title }: { datasetId: string; title?: str
   if (loading) return <div className="map-viewer map-message">正在加载地图预览…</div>;
   if (error) return <div className="map-viewer map-message map-error">预览失败：{error}</div>;
   if (!preview) return <div className="map-viewer map-message">暂无预览数据。</div>;
+  if (preview.kind === "DOCUMENT") return <DocumentSummary preview={preview} title={title} />;
   if (preview.kind !== "VECTOR" || !preview.geojson) return <RasterSummary preview={preview} title={title} />;
   return <VectorMap preview={preview} title={title} />;
 }
 
 function RasterSummary({ preview, title }: { preview: DatasetPreview; title?: string }) {
-  return <div className="map-viewer map-summary"><div className="map-viewer-head"><b>{title ?? "栅格数据概览"}</b><span>只读预览</span></div><div className="map-summary-grid"><span>尺寸<b>{preview.width ?? "-"} × {preview.height ?? "-"}</b></span><span>波段<b>{preview.bands ?? "-"}</b></span><span>分辨率<b>{preview.resolution?.join(" × ") ?? "-"}</b></span><span>坐标系<b>{preview.crs ?? "未提供"}</b></span></div></div>;
+  return <div className="map-viewer map-summary"><div className="map-viewer-head"><b>{title ?? (preview.kind === "IMAGE" ? "图像概览" : "栅格数据概览")}</b><span>只读预览</span></div><div className="map-summary-grid"><span>尺寸<b>{preview.width ?? "-"} × {preview.height ?? "-"}</b></span><span>波段／通道<b>{preview.bands ?? "-"}</b></span><span>分辨率<b>{preview.resolution?.join(" × ") ?? "-"}</b></span><span>坐标系<b>{preview.crs ?? "未提供"}</b></span></div></div>;
+}
+
+function DocumentSummary({ preview, title }: { preview: DatasetPreview; title?: string }) {
+  return <div className="map-viewer map-summary"><div className="map-viewer-head"><b>{title ?? "文档概览"}</b><span>{preview.page_count ? `${preview.page_count} 页` : "文本预览"}</span></div><pre className="document-preview">{preview.text || "该格式已识别，但暂时无法提取正文。"}</pre>{preview.truncated && <small className="map-hint">正文较长，仅显示有限文本。</small>}</div>;
 }
 
 function VectorMap({ preview, title }: { preview: DatasetPreview; title?: string }) {

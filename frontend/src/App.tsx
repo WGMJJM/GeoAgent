@@ -27,7 +27,18 @@ type ConversationDraft = {
 };
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48;
+const SHAPEFILE_EXTENSIONS = new Set([".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj"]);
 const emptyDraft = (): ConversationDraft => ({ message: "", selectedDatasetIds: [], uploadedFiles: [] });
+
+function fileExtension(filename: string): string {
+  const separator = filename.lastIndexOf(".");
+  return separator >= 0 ? filename.slice(separator).toLowerCase() : "";
+}
+
+function shapefileStem(filename: string): string {
+  const separator = filename.lastIndexOf(".");
+  return (separator >= 0 ? filename.slice(0, separator) : filename).toLowerCase();
+}
 
 function assistantText(value: string): string {
   return value
@@ -623,10 +634,25 @@ export function App() {
     setUploadingByConversation((current) => ({ ...current, [targetConversationId]: true }));
     setError("");
     try {
+      const standalone: File[] = [];
+      const shapefiles = new Map<string, File[]>();
       for (const file of Array.from(files)) {
-        const dataset = await api.uploadAttachment(file);
-        setDraftsByConversation((current) => ({ ...current, [targetConversationId]: { ...(current[targetConversationId] ?? emptyDraft()), uploadedFiles: [...(current[targetConversationId]?.uploadedFiles ?? []), dataset] } }));
+        if (!SHAPEFILE_EXTENSIONS.has(fileExtension(file.name))) {
+          standalone.push(file);
+          continue;
+        }
+        const key = shapefileStem(file.name);
+        shapefiles.set(key, [...(shapefiles.get(key) ?? []), file]);
       }
+      const uploaded: Dataset[] = [];
+      for (const file of standalone) {
+        const dataset = await api.uploadAttachment(file);
+        uploaded.push(dataset);
+      }
+      for (const group of shapefiles.values()) {
+        uploaded.push(await api.uploadShapefile(group));
+      }
+      setDraftsByConversation((current) => ({ ...current, [targetConversationId]: { ...(current[targetConversationId] ?? emptyDraft()), uploadedFiles: [...(current[targetConversationId]?.uploadedFiles ?? []), ...uploaded] } }));
       await refreshDatasets();
     } catch (err) {
       if (activeConversationRef.current === targetConversationId) setError(errorMessage(err));
@@ -726,7 +752,7 @@ export function ProductChat({
     <div className="composer">
       {replyToRunId && <div className="reply-target-banner" role="status">正在补充运行 {replyToRunId}<button type="button" onClick={() => onReplyToRun(null)}>取消</button></div>}
       <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} rows={2} aria-label="输入消息" placeholder="输入消息" disabled={!conversationReady || sending} />
-      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
+      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
   </section>;
 }

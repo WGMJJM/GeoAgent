@@ -34,6 +34,9 @@ class DatasetPreview(BaseModel):
     resolution: list[float] | None = None
     columns: list[str] = Field(default_factory=list)
     rows: list[dict[str, Any]] = Field(default_factory=list)
+    media_type: str | None = None
+    page_count: int | None = None
+    text: str | None = None
 
 
 class DatasetPreviewService:
@@ -52,7 +55,13 @@ class DatasetPreviewService:
             return self._vector(dataset, path, source_crs, max_features, max_fields, max_property_length)
         if dataset.kind is DatasetKind.RASTER:
             return self._raster(dataset, path, source_crs)
-        return self._table(dataset, path, source_crs, max_features, max_fields, max_property_length)
+        if dataset.kind is DatasetKind.TABLE:
+            return self._table(dataset, path, source_crs, max_features, max_fields, max_property_length)
+        if dataset.kind is DatasetKind.DOCUMENT:
+            return self._document(dataset)
+        if dataset.kind is DatasetKind.IMAGE:
+            return self._image(dataset)
+        raise ValueError(f"暂不支持预览的数据类型：{dataset.kind}")
 
     def _vector(self, dataset: Dataset, path: Path, source_crs: str | None, limit: int, max_fields: int, max_property_length: int) -> DatasetPreview:
         frame = gpd.read_file(path, rows=limit)
@@ -112,6 +121,27 @@ class DatasetPreviewService:
             truncated=feature_count is not None and feature_count > len(frame),
             columns=[str(item) for item in frame.columns],
             rows=rows,
+        )
+
+    def _document(self, dataset: Dataset) -> DatasetPreview:
+        return DatasetPreview(
+            dataset_id=dataset.id,
+            kind=dataset.kind,
+            media_type=str(dataset.metadata.get("media_type") or "application/octet-stream"),
+            page_count=dataset.metadata.get("page_count"),
+            truncated=bool(dataset.metadata.get("text_truncated")),
+            text=str(dataset.metadata.get("text_preview") or ""),
+        )
+
+    def _image(self, dataset: Dataset) -> DatasetPreview:
+        schema = dataset.schema
+        return DatasetPreview(
+            dataset_id=dataset.id,
+            kind=dataset.kind,
+            media_type=str(dataset.metadata.get("media_type") or "application/octet-stream"),
+            width=schema.width if schema else None,
+            height=schema.height if schema else None,
+            bands=schema.bands if schema else None,
         )
 
 

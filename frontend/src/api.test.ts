@@ -7,6 +7,20 @@ afterEach(() => {
 });
 
 describe("前端 API 契约", () => {
+  it("Shapefile 文件组通过一次请求上传", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ dataset: { id: "ds-shp", name: "roads", kind: "VECTOR", path: "roads.shp", format: "shp" } }), { status: 200 }));
+    const files = [
+      new File(["shp"], "roads.shp"),
+      new File(["shx"], "roads.shx"),
+      new File(["dbf"], "roads.dbf"),
+    ];
+
+    await expect(api.uploadShapefile(files)).resolves.toMatchObject({ id: "ds-shp", format: "shp" });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/attachments/shapefile");
+    const body = fetchMock.mock.calls[0][1]?.body as FormData;
+    expect(body.getAll("files")).toHaveLength(3);
+  });
+
   it("实时消息直接进入统一对话循环并提交本轮资源", async () => {
     class FakeWebSocket {
       static OPEN = 1;
