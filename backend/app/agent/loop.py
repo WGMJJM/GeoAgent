@@ -353,18 +353,23 @@ class AgentLoop:
                     content_parts = []
                     async with aclosing(model.stream(model_request)) as stream:
                         async for chunk in stream:
-                            if chunk.content:
-                                content_parts.append(chunk.content)
-                                live_output_tokens += model.count_tokens(chunk.content)
-                                if on_model_delta is not None:
-                                    await on_model_delta(chunk.content, live_usage())
                             if chunk.done:
+                                if chunk.content:
+                                    content_parts.append(chunk.content)
+                                    live_output_tokens += model.count_tokens(chunk.content)
+                                    if on_model_delta is not None and not chunk.tool_calls:
+                                        await on_model_delta(chunk.content, live_usage())
                                 response = ModelResponse(
                                     content="".join(content_parts), tool_calls=chunk.tool_calls,
                                     input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
                                     model=chunk.model, finish_reason=chunk.finish_reason,
                                 )
                                 break
+                            if chunk.content:
+                                content_parts.append(chunk.content)
+                                live_output_tokens += model.count_tokens(chunk.content)
+                                if on_model_delta is not None:
+                                    await on_model_delta(chunk.content, live_usage())
                     if response is None:
                         raise ValueError("模型流未返回结束片段。")
             except Exception:

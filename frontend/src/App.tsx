@@ -475,7 +475,11 @@ export function App() {
       },
       (event) => {
         receivedEvents = [...receivedEvents, event];
-        setExecution(targetConversationId, (current) => current ? { ...current, events: [...current.events, event], streamingReply: event.event_type === "ModelResponseStarted" ? "" : current.streamingReply } : current);
+        setExecution(targetConversationId, (current) => current ? {
+          ...current,
+          events: [...current.events, event],
+          streamingReply: ["ModelResponseStarted", "ToolPreparing"].includes(event.event_type) ? "" : current.streamingReply,
+        } : current);
       },
       (content, tokenUsage) => setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: current.streamingReply + content, tokenUsage: tokenUsage ?? current.tokenUsage } : current),
       targetConversationId,
@@ -801,6 +805,10 @@ export function ProductChat({
   message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
+  const eventTypes = events.map((event) => event.event_type);
+  const latestModelStart = eventTypes.lastIndexOf("ModelResponseStarted");
+  const latestToolPreparation = eventTypes.lastIndexOf("ToolPreparing");
+  const visibleStreamingReply = latestToolPreparation > latestModelStart ? "" : streamingReply;
   const historyRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
   const wasBusyRef = useRef(busy);
@@ -832,7 +840,7 @@ export function ProductChat({
       {messages.map((item) => <ChatBubble item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
         <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={liveTokenUsage ?? runs.find((run) => run.id === activeRunId)?.token_usage} streaming={Boolean(streamingReply)} smoothTokenUsage /></div>
-        {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(streamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
+        {visibleStreamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(visibleStreamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
       </>}
     </div>}
     <div className="composer">

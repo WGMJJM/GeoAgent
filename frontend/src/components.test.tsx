@@ -219,6 +219,14 @@ describe("统一聊天输入区", () => {
     expect(container.querySelector(".run-progress-spinner")).toBeTruthy();
   });
 
+  it("工具调用轮的临时正文不进入回复气泡", () => {
+    const thinking: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 } };
+    const preparing: Event = { id: "event-tool", run_id: "run-1", event_type: "ToolPreparing", message: "正在准备 1 个工具调用", sequence: 4, timestamp: "2026-01-01T10:00:07.000Z", payload: { tools: ["dataset.inspect"], tool_count: 1 } };
+    render(<ProductChat {...productChatProps} busy activeRunId="run-1" events={[thinking, preparing]} streamingReply="我来查看当前数据。" />);
+    expect(screen.queryByText("我来查看当前数据。")).toBeNull();
+    expect(screen.getByText("正在准备：检查数据集")).toBeTruthy();
+  });
+
   it("新消息和流式增量自动跟随到底部，用户上翻后暂停跟随", () => {
     vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1_000);
     vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(300);
