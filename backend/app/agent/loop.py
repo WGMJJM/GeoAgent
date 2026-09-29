@@ -108,7 +108,14 @@ class AgentLoop:
         self.store = store
         self.registry = registry
         self.executor = executor
-        self.catalog = ToolCatalog(registry, executor.policy.is_discoverable, providers=tool_providers)
+        self.catalog = ToolCatalog(
+            registry,
+            executor.policy.is_discoverable,
+            providers=tool_providers,
+            regex_results=settings.tool_search_regex_results,
+            chinese_bm25_results=settings.tool_search_chinese_results,
+            english_bm25_results=settings.tool_search_english_results,
+        )
         self.policy = executor.policy
         self.trace = trace
         self.settings = settings

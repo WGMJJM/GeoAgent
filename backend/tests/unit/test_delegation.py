@@ -145,7 +145,7 @@ async def test_executor_rechecks_persisted_child_white_list_and_parent_scope(app
     )
     tightened = app.agent_loop._discovery_context(request, services, child)
     assert app.agent_loop._available_tool_names(tightened, set()) == frozenset()
-    assert app.agent_loop.catalog.search("buffer", tightened) == []
+    assert app.agent_loop.catalog.tool_search({"query": "buffer"}, tightened)["tools"] == []
 
 
 def test_child_workspace_rejects_shared_absolute_output(application):

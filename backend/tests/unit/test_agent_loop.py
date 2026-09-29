@@ -69,6 +69,8 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
                                model_input_tokens=128000, tool_result_recent_full=16,
                                tool_result_emergency_fraction=0.5,
                                tool_context_tokens=12800, tool_context_max_cards=8,
+                               tool_search_regex_results=2, tool_search_chinese_results=1,
+                               tool_search_english_results=3,
                                emergency_recent_messages=8)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
@@ -699,16 +701,17 @@ async def test_interrupted_search_restores_union_without_double_counting(tmp_pat
             raise RuntimeError("模拟两次检索之间进程中断")
 
     loop._save_checkpoint = interrupt_between_searches
-    original_search = loop.catalog.search
+    original_tool_search = loop.catalog.tool_search
 
-    def interrupt_internal_search(query, context, limit):
+    def interrupt_combined_search(arguments, context):
         nonlocal interrupted
-        if combined and not interrupted and query == "buffer":
+        if combined and not interrupted:
             interrupted = True
-            raise RuntimeError("模拟内部两路检索之间进程中断")
-        return original_search(query, context, limit)
+            raise RuntimeError("模拟单次双语检索期间进程中断")
+        return original_tool_search(arguments, context)
 
-    loop.catalog.search = interrupt_internal_search
+    if combined:
+        loop.catalog.tool_search = interrupt_combined_search
     with pytest.raises(RuntimeError, match="进程中断"):
         await loop.run(request, prepared=prepared)
     checkpoint = store.latest_checkpoint(prepared.run.id)
@@ -767,8 +770,9 @@ async def test_later_search_preserves_used_schema_and_empty_search_keeps_unused_
 @pytest.mark.asyncio
 async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(tmp_path):
     names = [f"test.operation_{index}" for index in range(9)]
+    queries = [f"marker{index}capabilityx" for index in range(9)]
     adapter = SequenceAdapter(
-        *[ModelResponse(tool_calls=[{"id": f"search_{index}", "function": {"name": "tool.search", "arguments": json.dumps({"query": f"unique_capability_{index}"})}}]) for index in range(9)],
+        *[ModelResponse(tool_calls=[{"id": f"search_{index}", "function": {"name": "tool.search", "arguments": json.dumps({"query": queries[index]})}}]) for index in range(9)],
         ModelResponse(tool_calls=[{"id": "pause", "function": {"name": "agent.ask_user", "arguments": '{"question":"接下来使用第一个工具吗？"}'}}]),
         ModelResponse(tool_calls=[
             {"id": "evicted", "function": {"name": names[0], "arguments": "{}"}},
@@ -783,7 +787,7 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
     loop.settings.max_tool_calls = 16
     executed = []
     for index, name in enumerate(names):
-        loop.registry.register(ToolMetadata(name=name, description=f"unique_capability_{index}", input_schema={"type": "object"}),
+        loop.registry.register(ToolMetadata(name=name, description=queries[index], input_schema={"type": "object"}),
                                lambda _args, context: executed.append(context.call_id) or {"output": {"checked": True}}, deferred=True)
     searches = []
     original_search = loop.catalog.tool_search
@@ -801,7 +805,7 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
                             resume_from=saved, continuation={"type": "user_input", "content": "使用第一个工具"})
     assert result.status is AgentResultStatus.SUCCESS
     assert executed == [f"{result.trace_id}:execute"]
-    assert searches == [f"unique_capability_{index}" for index in range(9)]
+    assert searches == queries
     assert names[0] not in {item["function"]["name"] for item in adapter.requests[9].tools}
     assert names[0] in {item["function"]["name"] for item in adapter.requests[11].tools}
     observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[11].messages if item["role"] == "tool"}
@@ -817,7 +821,7 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
     assert checkpoint.state["used_tool_names"] == [names[0]]
     raw = next(item for item in saved.state["protocol_messages"] if item.get("tool_call_id") == "search_0")
     assert "description" in json.loads(raw["content"])["output"]["tools"][0]
-    assert observations["search_8"]["output"]["tools"] == [{"name": names[8]}]
+    assert [item["name"] for item in observations["search_8"]["output"]["tools"]] == [names[8]]
 
 
 @pytest.mark.parametrize("budget_delta", [0, -1])

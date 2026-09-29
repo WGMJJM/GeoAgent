@@ -32,6 +32,17 @@ def _register(registry: ToolRegistry, metadata: ToolMetadata, *, deferred: bool 
     registry.register(metadata, lambda _arguments, _context: {}, deferred=deferred)
 
 
+def _tool_catalog(registry: ToolRegistry, is_discoverable=None, *, providers=()) -> ToolCatalog:
+    return ToolCatalog(
+        registry,
+        is_discoverable,
+        providers=providers,
+        regex_results=2,
+        chinese_bm25_results=1,
+        english_bm25_results=3,
+    )
+
+
 def _context(
     *,
     scopes: set[str] | None = None,
@@ -47,7 +58,7 @@ def _catalog(*metadata: ToolMetadata) -> tuple[ToolRegistry, ToolCatalog]:
     registry = ToolRegistry()
     for item in metadata:
         _register(registry, item)
-    return registry, ToolCatalog(registry, PermissionPolicy().is_discoverable)
+    return registry, _tool_catalog(registry, PermissionPolicy().is_discoverable)
 
 
 def test_search_matches_exact_name_substring_english_description_chinese_and_parameters():
@@ -71,16 +82,16 @@ def test_search_matches_exact_name_substring_english_description_chinese_and_par
         ("target_crs", "analysis.custom"),
         ("altitude", "analysis.custom"),
     ):
-        assert [item.name for item in catalog.search(query, context)] == [name]
-        assert [item["name"] for item in catalog.tool_search({"query": query}, context)["tools"]] == [name]
+        assert catalog.tool_search({"query": query}, context)["tools"][0]["name"] == name
 
 
 def test_english_query_keeps_tool_names_case_and_whitespace_support():
     _, catalog = _catalog(_metadata("raster.inspect", "Inspect raster metadata CRS"))
-    assert [item.name for item in catalog.search("  RASTER.INSPECT\tmetadata CRS  ", _context())] == ["raster.inspect"]
+    tools = catalog.tool_search({"query": "  RASTER.INSPECT\tmetadata CRS  "}, _context())["tools"]
+    assert tools[0]["name"] == "raster.inspect"
 
 
-def test_name_matches_rank_above_description_and_ties_use_name_order():
+def test_regex_identifier_matches_precede_bm25_description_matches():
     _, catalog = _catalog(
         _metadata("vector.buffer", "Other operation"),
         _metadata("analysis.nearby", "Buffer operation"),
@@ -88,9 +99,9 @@ def test_name_matches_rank_above_description_and_ties_use_name_order():
         _metadata("a.shared", "Shared capability"),
     )
 
-    assert [item.name for item in catalog.search("buffer", _context())] == ["vector.buffer"]
-    tied = catalog.search("capability", _context())
-    assert [item.name for item in tied] == ["a.shared"]
+    assert catalog.tool_search({"query": "buffer"}, _context())["tools"][0]["name"] == "vector.buffer"
+    tied = catalog.tool_search({"query": "capability"}, _context())["tools"]
+    assert tied[0]["name"] == "a.shared"
 
 
 def test_exact_identifier_term_ranks_above_substring_and_complete_query_coverage():
@@ -100,37 +111,73 @@ def test_exact_identifier_term_ranks_above_substring_and_complete_query_coverage
         _metadata("analysis.terrain", "Terrain operation"),
     )
 
-    assert [item.name for item in catalog.search("slope", _context())] == ["raster.slope"]
-    assert catalog.search("terrain slope", _context())[0].name == "raster.slope"
+    assert catalog.tool_search({"query": "slope"}, _context())["tools"][0]["name"] == "raster.slope"
+    combined = catalog.tool_search({"query": "terrain slope"}, _context())["tools"]
+    slope = next(item for item in combined if item["name"] == "raster.slope")
+    assert "bm25_en" in slope["matched_by"]
 
 
-def test_search_returns_only_the_best_result():
+def test_single_english_query_returns_three_bm25_candidates():
     registry = ToolRegistry()
     for index in range(12):
         _register(registry, _metadata(f"analysis.operation_{index:02d}", "Geometry analysis utility"))
-    catalog = ToolCatalog(registry, PermissionPolicy().is_discoverable)
+    catalog = _tool_catalog(registry, PermissionPolicy().is_discoverable)
 
-    assert len(catalog.search("geometry", _context(), limit=1)) == 1
-    assert [item.name for item in catalog.search("geometry", _context())] == ["analysis.operation_00"]
+    tools = catalog.tool_search({"query": "geometry"}, _context())["tools"]
+    assert len(tools) == 3
+    assert [item["name"] for item in tools] == [
+        "analysis.operation_00",
+        "analysis.operation_01",
+        "analysis.operation_02",
+    ]
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_one_bilingual_call_returns_deduplicated_union_with_per_query_limit(overlap):
-    metadata = [
-        *[_metadata(f"test.zh_{index}", "唯一中文能力") for index in range(3)],
-        *[_metadata(f"test.en_{index}", "quantum_marker") for index in range(3)],
-        _metadata("test.forbidden", "唯一中文能力 quantum_marker", scopes=["system.admin"]),
-    ]
-    if overlap:
-        metadata.append(_metadata("test.a_shared", "唯一中文能力 quantum_marker"))
+def test_one_bilingual_call_returns_one_chinese_three_english_and_deduplicates(overlap):
+    metadata = (
+        [
+            _metadata("test.shared", "唯一中文能力 quantum_marker"),
+            _metadata("test.en_1", "quantum_marker"),
+            _metadata("test.en_2", "quantum_marker"),
+        ]
+        if overlap
+        else [
+            _metadata("test.zh_0", "唯一中文能力"),
+            *[_metadata(f"test.en_{index}", "quantum_marker") for index in range(3)],
+        ]
+    )
+    metadata.append(_metadata("test.forbidden", "唯一中文能力 quantum_marker", scopes=["system.admin"]))
     _, catalog = _catalog(*metadata)
-    chinese = catalog.search("唯一中文能力", _context())
-    english = catalog.search("quantum_marker", _context())
-    expected = list(dict.fromkeys(item.name for item in [*chinese, *english]))
     response = catalog.tool_search({"query": "唯一中文能力", "english_query": "quantum_marker"}, _context())
+    expected = ["test.shared", "test.en_1", "test.en_2"] if overlap else ["test.zh_0", "test.en_0", "test.en_1", "test.en_2"]
     assert [item["name"] for item in response["tools"]] == expected
-    assert len(response["tools"]) == 2 - int(overlap)
+    assert len(response["tools"]) == 4 - int(overlap)
     assert "test.forbidden" not in expected
+    assert sum("bm25_zh" in item["matched_by"] for item in response["tools"]) == 1
+    assert sum("bm25_en" in item["matched_by"] for item in response["tools"]) == 3
+
+
+def test_regex_branch_returns_at_most_two_candidates_while_english_bm25_returns_three():
+    _, catalog = _catalog(
+        *[_metadata(f"vector.buffer_{index}", "Buffer geometry operation") for index in range(4)]
+    )
+
+    tools = catalog.tool_search({"query": "buffer"}, _context())["tools"]
+
+    assert sum("regex" in item["matched_by"] for item in tools) == 2
+    assert sum("bm25_en" in item["matched_by"] for item in tools) == 3
+
+
+def test_exact_tool_name_returns_only_that_tool_without_approximate_candidates():
+    _, catalog = _catalog(
+        _metadata("vector.buffer", "Create a vector buffer"),
+        _metadata("analysis.buffer_summary", "Summarize buffer distances"),
+    )
+
+    tools = catalog.tool_search({"query": "vector.buffer"}, _context())["tools"]
+
+    assert [item["name"] for item in tools] == ["vector.buffer"]
+    assert tools[0]["matched_by"] == ["regex"]
 
 
 @pytest.mark.parametrize("query,english_query", [("无关中文", "buffer"), ("缓冲区", "unknown_marker"), ("无关中文", "unknown_marker")])
@@ -142,24 +189,25 @@ def test_bilingual_call_preserves_nonempty_branch_and_reports_only_total_miss(qu
     assert ("message" in response) == (not expected)
 
 
-@pytest.mark.parametrize("limit", [0, 2, 3, True, 1.5, "2"])
-def test_invalid_limit_has_a_clear_error(limit):
-    _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
-    with pytest.raises(ValueError, match="limit"):
-        catalog.search("buffer", _context(), limit=limit)
+@pytest.mark.parametrize("field", ["regex_results", "chinese_bm25_results", "english_bm25_results"])
+def test_invalid_branch_limit_has_a_clear_error(field):
+    registry = ToolRegistry()
+    limits = {"regex_results": 2, "chinese_bm25_results": 1, "english_bm25_results": 3}
+    limits[field] = 0
+    with pytest.raises(ValueError, match=field):
+        ToolCatalog(registry, **limits)
 
 
 @pytest.mark.parametrize("query", ["", " \n\t", "x" * 161, None])
 def test_empty_or_excessively_long_query_is_rejected(query):
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
     with pytest.raises(ValueError, match="query"):
-        catalog.search(query, _context())
+        catalog.tool_search({"query": query}, _context())
 
 
 def test_no_match_returns_empty_list_without_falling_back_to_registry_contents():
     _, catalog = _catalog(_metadata("vector.buffer", "Create vector buffers"))
 
-    assert catalog.search("unrelated capability", _context()) == []
     response = catalog.tool_search({"query": "unrelated capability"}, _context())
     assert response["tools"] == []
     assert "重新搜索" in response["message"]
@@ -171,8 +219,8 @@ def test_exact_name_does_not_bypass_scope_or_environment_filtering():
         _metadata("raster.slope", "Calculate slope from DEM", envs=["gis.raster"]),
     )
 
-    assert catalog.search("system.delete_database", _context()) == []
-    assert catalog.search("raster.slope", _context(envs={"gis.vector", "workspace"})) == []
+    assert catalog.tool_search({"query": "system.delete_database"}, _context())["tools"] == []
+    assert catalog.tool_search({"query": "raster.slope"}, _context(envs={"gis.vector", "workspace"}))["tools"] == []
 
 
 def test_write_tools_are_discoverable_when_declared_user_scopes_and_environment_exist():
@@ -186,26 +234,26 @@ def test_write_tools_are_discoverable_when_declared_user_scopes_and_environment_
         )
     )
 
-    assert [item.name for item in catalog.search("buffer", _context())] == ["vector.buffer"]
+    assert catalog.tool_search({"query": "buffer"}, _context())["tools"][0]["name"] == "vector.buffer"
 
 
 def test_registry_add_and_remove_immediately_changes_search_results():
     registry = ToolRegistry()
-    catalog = ToolCatalog(registry, PermissionPolicy().is_discoverable)
+    catalog = _tool_catalog(registry, PermissionPolicy().is_discoverable)
     context = _context()
     first = _metadata("crs.reproject", "Reproject a dataset")
 
     _register(registry, first)
-    assert [item.name for item in catalog.search("reproject", context)] == ["crs.reproject"]
+    assert catalog.tool_search({"query": "reproject"}, context)["tools"][0]["name"] == "crs.reproject"
     _register(registry, _metadata("raster.reproject", "Reproject a raster"))
-    assert [item.name for item in catalog.search("reproject", context)] == ["crs.reproject"]
+    assert catalog.tool_search({"query": "reproject"}, context)["tools"][0]["name"] == "crs.reproject"
     assert registry.unregister("crs.reproject") is True
-    assert [item.name for item in catalog.search("reproject", context)] == ["raster.reproject"]
+    assert catalog.tool_search({"query": "reproject"}, context)["tools"][0]["name"] == "raster.reproject"
     assert registry.unregister("crs.reproject") is False
     assert registry.is_deferred("crs.reproject") is False
 
 
-def test_dynamic_provider_is_loaded_only_when_registered_results_do_not_fill_limit():
+def test_dynamic_provider_participates_in_bm25_without_eagerly_materializing_every_tool():
     class Provider:
         def __init__(self):
             self.summary_calls = 0
@@ -238,23 +286,24 @@ def test_dynamic_provider_is_loaded_only_when_registered_results_do_not_fill_lim
     _register(registry, _metadata("raster.inspect", "Raster elevation inspection"))
     _register(registry, _metadata("raster.statistics", "Raster elevation statistics"))
     provider = Provider()
-    catalog = ToolCatalog(registry, providers=(provider,))
+    catalog = _tool_catalog(registry, providers=(provider,))
     context = _context(envs={"gis.raster", "gis.arcpy", "workspace"})
 
-    assert len(catalog.search("raster elevation", context)) == 1
-    assert provider.summary_calls == 0
-
-    cards = catalog.search("slope", context)
-    assert [item.name for item in cards] == ["arcpy.slope_sa"]
-    assert cards[0].parameter_names == ("in_raster",)
+    assert catalog.tool_search({"query": "inspection"}, context)["tools"][0]["name"] == "raster.inspect"
     assert provider.summary_calls == 1
+    assert provider.materialized == []
+
+    cards = catalog.tool_search({"query": "slope"}, context)["tools"]
+    assert cards[0]["name"] == "arcpy.slope_sa"
+    assert cards[0]["parameter_names"] == ["in_raster"]
+    assert provider.summary_calls == 2
     assert provider.materialized == ["arcpy.slope_sa"]
     assert registry.is_deferred("arcpy.slope_sa") is True
 
-    exact = catalog.search("ARCPY.SLOPE_SA", context)
-    assert [item.name for item in exact] == ["arcpy.slope_sa"]
+    exact = catalog.tool_search({"query": "ARCPY.SLOPE_SA"}, context)["tools"]
+    assert [item["name"] for item in exact] == ["arcpy.slope_sa"]
 
-    catalog.search("slope", context)
+    catalog.tool_search({"query": "slope"}, context)
     assert provider.materialized == ["arcpy.slope_sa"]
 
     registry.unregister("arcpy.slope_sa")
@@ -273,7 +322,7 @@ def test_public_tool_card_contains_no_score_or_schema_details():
         )
     )
 
-    card = catalog.search("buffer", _context())[0]
+    card = catalog.card("vector.buffer")
     public = card.public()
     assert set(public) == {"name", "description", "parameter_names"}
     assert public["parameter_names"] == ["dataset_id", "distance"]
@@ -324,20 +373,20 @@ def test_registered_tools_are_split_into_two_resident_and_deferred_capabilities(
 def test_raster_sample_statistics_are_discoverable_with_honest_limits(query):
     registry = ToolRegistry()
     register_gis_tools(registry)
-    cards = ToolCatalog(registry).search(query, _context())
-    assert cards[0].name == "raster.inspect"
-    assert "first-band sampled statistics" in cards[0].description
-    assert "512x512" in cards[0].description
-    assert "no histogram" in cards[0].description
+    cards = _tool_catalog(registry).tool_search({"query": query}, _context())["tools"]
+    inspected = next(item for item in cards if item["name"] == "raster.inspect")
+    assert "first-band sampled statistics" in inspected["description"]
+    assert "512x512" in inspected["description"]
+    assert "no histogram" in inspected["description"]
     assert registry.is_deferred("raster.inspect")
 
 
-def test_tool_search_protocol_supports_one_bilingual_call_and_caps_each_query_at_one():
+def test_tool_search_protocol_supports_one_bilingual_call_with_server_side_branch_limits():
     function = TOOL_SEARCH_DEFINITION["function"]
     assert function["name"] == "tool.search"
     assert function["parameters"]["required"] == ["query"]
-    assert function["parameters"]["properties"]["limit"]["maximum"] == 1
-    assert function["parameters"]["properties"]["limit"]["default"] == 1
+    assert set(function["parameters"]["properties"]) == {"query", "english_query"}
+    assert "BM25" in function["description"]
     query = function["parameters"]["properties"]["query"]
     assert query["maxLength"] == 160
     english_query = function["parameters"]["properties"]["english_query"]
