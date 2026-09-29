@@ -19,12 +19,13 @@ describe("运行累计 Token 用量", () => {
     expect(screen.getByText("运行完成 · 9 次工具调用")).toBeTruthy();
     expect(screen.getByText("输入 1.20k · 输出 0.25k")).toBeTruthy();
     expect(screen.queryByText(/Token 1,450/)).toBeNull();
-    expect(container.querySelector(".run-summary-current .run-token-usage")?.getAttribute("title")).toContain("模型返回的实际用量");
+    expect(container.querySelector(".run-summary-current .run-token-usage")?.getAttribute("title")).toContain("输入 1,200 tokens");
   });
 
-  it("任一轮缺少 usage 时不混合实际量和估算量", () => {
+  it("内部计数来源不作为产品文案展示", () => {
     render(<TokenUsageSummary usage={{ ...usage, reported_calls: 1 }} />);
-    expect(screen.getByText("输入 0.90k · 输出 0.10k（本地估算）")).toBeTruthy();
+    expect(screen.getByText("输入 0.90k · 输出 0.10k")).toBeTruthy();
+    expect(screen.queryByText(/本地估算/)).toBeNull();
   });
 
   it("没有用量的旧 Run 不显示虚假的零消耗，真实零用量可以显示", () => {
@@ -44,7 +45,7 @@ describe("运行累计 Token 用量", () => {
     const progress: Event = { id: "progress", run_id: "run-1", event_type: "ToolStarted", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "检查栅格", payload: {} };
     const measured: Event = { ...progress, id: "usage", event_type: "TokenUsageUpdated", sequence: 2, payload: { token_usage: usage } };
     const { rerender } = render(<LiveExecutionStatus phase="running" events={[progress]} durationMs={1000} tokenUsage={{ ...usage, reported_calls: 1 }} />);
-    expect(screen.getByText("输入 0.90k · 输出 0.10k（本地估算）")).toBeTruthy();
+    expect(screen.getByText("输入 0.90k · 输出 0.10k")).toBeTruthy();
     rerender(<LiveExecutionStatus phase="running" events={[progress, measured, measured]} durationMs={2000} />);
     expect(screen.getByText("输入 1.20k · 输出 0.25k")).toBeTruthy();
     expect(screen.getByText("工具开始执行：检查栅格")).toBeTruthy();
