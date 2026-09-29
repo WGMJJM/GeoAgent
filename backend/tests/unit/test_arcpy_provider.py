@@ -145,6 +145,55 @@ def test_unknown_required_parameter_rejects_tool_instead_of_guessing_schema():
         build_tool_definition(spec)
 
 
+def test_derived_scalar_statistics_do_not_mark_analysis_as_destructive():
+    spec = ArcPyToolSpec(
+        actual_name="IncrementalSpatialAutocorrelation_stats",
+        public_name="arcpy.incrementalspatialautocorrelation_stats",
+        version="3.4.3",
+        usage="IncrementalSpatialAutocorrelation_stats(Input_Features, Input_Field, Number_of_Distance_Bands)",
+        parameters=(
+            ArcPyParameter("Input_Features", "输入要素", "Input", "要素图层", "Required"),
+            ArcPyParameter("Input_Field", "输入字段", "Input", "字段", "Required"),
+            ArcPyParameter("Number_of_Distance_Bands", "距离段数量", "Input", "长整型", "Required"),
+            ArcPyParameter("First_Peak", "第一个峰值", "Output", "双精度型", "Derived"),
+            ArcPyParameter("Max_Peak", "最大峰值", "Output", "双精度型", "Derived"),
+        ),
+    )
+
+    definition = build_tool_definition(spec)
+
+    assert definition.metadata.risk_level is RiskLevel.READ
+    assert definition.mutates_inputs is False
+    assert definition.metadata.required_scopes == ["dataset.read"]
+
+
+def test_derived_dataset_depending_on_input_remains_destructive():
+    spec = ArcPyToolSpec(
+        actual_name="CalculateField_management",
+        public_name="arcpy.calculatefield_management",
+        version="3.4.3",
+        usage="CalculateField_management(in_table, field, expression)",
+        parameters=(
+            ArcPyParameter("in_table", "输入表", "Input", "表视图", "Required"),
+            ArcPyParameter("field", "字段", "Input", "字段", "Required"),
+            ArcPyParameter(
+                "out_table",
+                "更新后的表",
+                "Output",
+                "表视图",
+                "Derived",
+                dependencies=("in_table",),
+            ),
+        ),
+    )
+
+    definition = build_tool_definition(spec)
+
+    assert definition.metadata.risk_level is RiskLevel.DESTRUCTIVE
+    assert definition.mutates_inputs is True
+    assert definition.metadata.required_scopes == ["dataset.read", "dataset.write", "workspace.write"]
+
+
 def test_provider_caches_light_catalog_materializes_one_schema_and_executes_with_dataset_ids(tmp_path):
     executable = tmp_path / "propy.bat"
     executable.write_text("test", encoding="utf-8")

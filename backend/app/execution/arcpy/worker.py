@@ -19,6 +19,7 @@ def _parameter(parameter):
         "parameter_type": parameter.parameterType,
         "multi_value": parameter.multiValue,
         "enabled": parameter.enabled,
+        "dependencies": list(getattr(parameter, "parameterDependencies", []) or []),
         "filter_type": getattr(parameter.filter, "type", None),
         "filter_list": list(getattr(parameter.filter, "list", []) or []),
     }

@@ -23,6 +23,7 @@ class ArcPyParameter:
     parameter_type: str
     multi_value: bool = False
     enabled: bool = True
+    dependencies: tuple[str, ...] | None = None
     filter_type: str | None = None
     filter_list: tuple[Any, ...] = ()
 
@@ -41,6 +42,11 @@ class ArcPyParameter:
             parameter_type=str(value.get("parameter_type") or "Optional"),
             multi_value=bool(value.get("multi_value")),
             enabled=bool(value.get("enabled", True)),
+            dependencies=(
+                tuple(str(item) for item in value.get("dependencies") or ())
+                if "dependencies" in value
+                else None
+            ),
             filter_type=str(value["filter_type"]) if value.get("filter_type") else None,
             filter_list=tuple(value.get("filter_list") or ()),
         )
@@ -158,13 +164,14 @@ def build_tool_definition(spec: ArcPyToolSpec) -> ArcPyToolDefinition:
     required: list[str] = []
     input_kinds: dict[str, str] = {}
     generated_outputs: dict[str, str] = {}
-    has_derived_output = False
+    derived_dataset_outputs: list[ArcPyParameter] = []
 
     for parameter in spec.parameters:
         kind = parameter_kind(parameter)
         if parameter.output:
             if parameter.derived:
-                has_derived_output = True
+                if _is_dataset_parameter(parameter):
+                    derived_dataset_outputs.append(parameter)
                 continue
             suffix = _OUTPUT_SUFFIXES.get(kind)
             if suffix is None:
@@ -189,10 +196,20 @@ def build_tool_definition(spec: ArcPyToolSpec) -> ArcPyToolDefinition:
         if parameter.required:
             required.append(parameter.name)
 
-    mutates_inputs = has_derived_output and not generated_outputs
-    risk = RiskLevel.DESTRUCTIVE if mutates_inputs else RiskLevel.WRITE if generated_outputs else RiskLevel.READ
+    input_dataset_names = {
+        parameter.name.casefold()
+        for parameter in spec.parameters
+        if not parameter.output and _is_dataset_parameter(parameter)
+    }
+    mutates_inputs = any(
+        parameter.dependencies is None
+        or bool({item.casefold() for item in parameter.dependencies} & input_dataset_names)
+        for parameter in derived_dataset_outputs
+    )
+    writes_datasets = bool(generated_outputs or derived_dataset_outputs)
+    risk = RiskLevel.DESTRUCTIVE if mutates_inputs else RiskLevel.WRITE if writes_datasets else RiskLevel.READ
     scopes = ["dataset.read"] if any(kind == "dataset" for kind in input_kinds.values()) else []
-    if generated_outputs:
+    if writes_datasets:
         scopes.extend(["dataset.write", "workspace.write"])
     description = (
         f"ArcPy installed geoprocessing tool {spec.actual_name}. "
@@ -236,6 +253,10 @@ def parameter_kind(parameter: ArcPyParameter) -> str | None:
     if values & _STRING_TYPES:
         return "string"
     return None
+
+
+def _is_dataset_parameter(parameter: ArcPyParameter) -> bool:
+    return bool({item.strip().casefold() for item in parameter.datatypes if item.strip()} & _DATASET_TYPES)
 
 
 def _property_schema(parameter: ArcPyParameter, kind: str) -> dict[str, Any]:
