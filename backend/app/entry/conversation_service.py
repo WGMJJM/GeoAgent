@@ -118,6 +118,7 @@ class ConversationService:
                         run_id=result.trace_id,
                     ),
                     user_id=user_id,
+                    wait_for_summary=False,
                 )
         return result
 

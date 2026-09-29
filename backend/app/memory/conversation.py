@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 
@@ -29,12 +30,57 @@ class ConversationMemoryService:
         self.store = store
         self.summarizer = summarizer or ConversationSummarizer(store)
         self.model_provider = model_provider
+        self._summary_tasks: dict[str, asyncio.Task[None]] = {}
+        self._summary_requests: dict[str, Message] = {}
 
-    async def save_message(self, message: Message, *, user_id: str | None) -> None:
+    async def save_message(
+        self,
+        message: Message,
+        *,
+        user_id: str | None,
+        wait_for_summary: bool = True,
+    ) -> None:
         if not self._can_access(message.conversation_id, user_id):
             raise PermissionError("当前用户无权访问该会话")
         self.store.save_message(message)
-        await self._summarize_after_assistant_persisted(message)
+        if wait_for_summary:
+            await self._summarize_after_assistant_persisted(message)
+        else:
+            self._schedule_summary(message)
+
+    def _schedule_summary(self, message: Message) -> None:
+        if message.role != "assistant" or self.model_provider is None:
+            return
+        conversation_id = message.conversation_id
+        self._summary_requests[conversation_id] = message
+        current = self._summary_tasks.get(conversation_id)
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(self._run_scheduled_summaries(conversation_id))
+        self._summary_tasks[conversation_id] = task
+        task.add_done_callback(
+            lambda completed, key=conversation_id: self._forget_summary_task(key, completed)
+        )
+
+    async def _run_scheduled_summaries(self, conversation_id: str) -> None:
+        while message := self._summary_requests.pop(conversation_id, None):
+            await self._summarize_after_assistant_persisted(message)
+
+    def _forget_summary_task(self, conversation_id: str, task: asyncio.Task[None]) -> None:
+        if self._summary_tasks.get(conversation_id) is task:
+            self._summary_tasks.pop(conversation_id, None)
+
+    async def wait_for_pending_summaries(self) -> None:
+        while tasks := tuple(self._summary_tasks.values()):
+            await asyncio.gather(*tasks)
+
+    async def close(self) -> None:
+        tasks = tuple(self._summary_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._summary_requests.clear()
 
     def list_messages(self, conversation_id: str, *, user_id: str | None, limit: int = 100) -> list[Message]:
         if not self._can_access(conversation_id, user_id):

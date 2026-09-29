@@ -126,6 +126,37 @@ def test_message_persistence_precedes_summary_and_failure_does_not_trigger_it(ap
     assert model.requests == []
 
 
+@pytest.mark.asyncio
+async def test_background_summary_does_not_delay_persisted_assistant_message(application, monkeypatch):
+    conversation_id, user_id = "summary-background", "summary-background-owner"
+    application.conversations.ensure(conversation_id, "后台摘要", user_id=user_id)
+    application.model_adapter = _SummaryModel()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def summarize(_identifier, _owner, _adapter):
+        started.set()
+        await release.wait()
+        return False
+
+    monkeypatch.setattr(application.conversation_memory.summarizer, "summarize_pending", summarize)
+    assistant = Message(conversation_id=conversation_id, role="assistant", content="可见回复已经完成。")
+
+    await asyncio.wait_for(
+        application.conversation_memory.save_message(
+            assistant,
+            user_id=user_id,
+            wait_for_summary=False,
+        ),
+        timeout=0.1,
+    )
+    assert application.conversation_memory.list_messages(conversation_id, user_id=user_id) == [assistant]
+    await asyncio.wait_for(started.wait(), timeout=0.1)
+
+    release.set()
+    await application.conversation_memory.wait_for_pending_summaries()
+
+
 def test_incremental_summary_advances_by_message_range_and_preserves_raw_history(application):
     conversation_id, user_id = "summary-incremental", "summary-user"
     application.conversations.ensure(conversation_id, "增量摘要", user_id=user_id)

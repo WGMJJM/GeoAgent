@@ -196,6 +196,7 @@ class Application:
 
     async def close(self) -> None:
         await self.run_manager.close()
+        await self.conversation_memory.close()
         if self.arcpy is not None:
             self.arcpy.close()
         adapters = list(self.model_adapters.values())
