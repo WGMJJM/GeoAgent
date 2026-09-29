@@ -111,7 +111,7 @@ async function uploadShapefile(files: File[]): Promise<Dataset> {
   }
 }
 
-function streamMessage(message: string, datasetIds: string[], attachmentIds: string[], onRun: (run: Run) => void, onEvent: (event: Event) => void, onDelta: (content: string) => void, conversationId?: string, modelProfile?: string, onProgress?: () => void, replyToRunId?: string) {
+function streamMessage(message: string, datasetIds: string[], attachmentIds: string[], onRun: (run: Run) => void, onEvent: (event: Event) => void, onDelta: (content: string, tokenUsage?: TokenUsage) => void, conversationId?: string, modelProfile?: string, onProgress?: () => void, replyToRunId?: string) {
   let cancelRequest = () => undefined;
   const promise = new Promise<MessageResponse>((resolve, reject) => {
     let socket: WebSocket | null = null;
@@ -157,10 +157,11 @@ function streamMessage(message: string, datasetIds: string[], attachmentIds: str
       try {
         // heartbeat 只刷新连接 watchdog，不进入 execution progress。
         touchConnection();
-        const payload = JSON.parse(raw.data as string) as { type: string; data?: Run | Event | MessageResponse; content?: string; message?: string };
+        const payload = JSON.parse(raw.data as string) as { type: string; data?: Run | Event | MessageResponse; content?: string; token_usage?: TokenUsage; message?: string };
         if (payload.type === "run") { markExecutionProgress(); onRun(payload.data as Run); }
         else if (payload.type === "event") { markExecutionProgress(); onEvent(payload.data as Event); }
-        else if (payload.type === "delta") { markExecutionProgress(); onDelta(payload.content ?? ""); }
+        else if (payload.type === "delta") { markExecutionProgress(); onDelta(payload.content ?? "", payload.token_usage); }
+        else if (payload.type === "usage") { markExecutionProgress(); onDelta("", payload.token_usage); }
         else if (payload.type === "heartbeat") return;
         else if (payload.type === "response") {
           markExecutionProgress();

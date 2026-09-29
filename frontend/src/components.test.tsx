@@ -55,6 +55,14 @@ describe("运行累计 Token 用量", () => {
     rerender(<LiveExecutionStatus phase="running" events={[progress]} durationMs={0} />);
     expect(screen.queryByText(/输入 .*k · 输出/)).toBeNull();
   });
+
+  it("正文开始流入后从正在思考切换为正在生成回复", () => {
+    const started: Event = { id: "model", run_id: "run-1", event_type: "ModelResponseStarted", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "正在思考", payload: {} };
+    const { rerender } = render(<LiveExecutionStatus phase="running" events={[started]} durationMs={1000} />);
+    expect(screen.getByText("正在思考")).toBeTruthy();
+    rerender(<LiveExecutionStatus phase="running" events={[started]} durationMs={2000} streaming />);
+    expect(screen.getByText("正在生成回复")).toBeTruthy();
+  });
 });
 
 describe("统一聊天输入区", () => {

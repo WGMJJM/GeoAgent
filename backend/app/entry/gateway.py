@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Run
+from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Run, TokenUsage
 from app.entry.conversation_service import ConversationService
 from app.state import StateStore
 
@@ -38,7 +38,7 @@ class MessageGateway:
         request: AgentRequest,
         *,
         on_run: Callable[[Run], Awaitable[None]] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> MessageResponse:
         self._validate_dataset_access(request)
         if request.reply_to_run_id:

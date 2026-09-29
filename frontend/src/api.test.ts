@@ -84,14 +84,15 @@ describe("前端 API 契约", () => {
     await Promise.resolve();
     expect(FakeWebSocket.instances).toHaveLength(2);
     const [socketA, socketB] = FakeWebSocket.instances;
-    socketA.onmessage?.({ data: JSON.stringify({ type: "delta", content: "AAA" }) } as MessageEvent);
+    const usage = { local_input_tokens: 100, local_output_tokens: 1, reported_input_tokens: 0, reported_output_tokens: 0, model_calls: 1, reported_calls: 0 };
+    socketA.onmessage?.({ data: JSON.stringify({ type: "delta", content: "AAA", token_usage: usage }) } as MessageEvent);
     socketB.onmessage?.({ data: JSON.stringify({ type: "delta", content: "BBB" }) } as MessageEvent);
     socketA.onmessage?.({ data: JSON.stringify({ type: "response", data: { request_id: "a", route: "direct", message: "完成 A" } }) } as MessageEvent);
     socketB.onmessage?.({ data: JSON.stringify({ type: "response", data: { request_id: "b", route: "direct", message: "完成 B" } }) } as MessageEvent);
     await expect(firstRequest).resolves.toMatchObject({ request_id: "a" });
     await expect(secondRequest).resolves.toMatchObject({ request_id: "b" });
-    expect(first).toHaveBeenCalledWith("AAA");
-    expect(second).toHaveBeenCalledWith("BBB");
+    expect(first).toHaveBeenCalledWith("AAA", usage);
+    expect(second).toHaveBeenCalledWith("BBB", undefined);
   });
 
   it("HTTP 请求在超时后终止而不是无限等待", async () => {

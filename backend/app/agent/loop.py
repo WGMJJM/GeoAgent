@@ -165,7 +165,7 @@ class AgentLoop:
         prepared: LoopPreparedRequest,
         resume_from: Checkpoint | None = None,
         continuation: dict[str, object] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> AgentResult:
         run = prepared.run
         model = self.model_provider(request.model_profile)
@@ -332,13 +332,29 @@ class AgentLoop:
                     )
                     await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在思考",
                                           agent_id=current.agent_id, payload={"turn": current.turn_count})
+                    persisted_usage = (self.store.get_run(current.id) or current).token_usage or TokenUsage()
+                    live_output_tokens = 0
+
+                    def live_usage() -> TokenUsage:
+                        return TokenUsage(
+                            local_input_tokens=persisted_usage.local_input_tokens + local_input_tokens,
+                            local_output_tokens=persisted_usage.local_output_tokens + live_output_tokens,
+                            reported_input_tokens=persisted_usage.reported_input_tokens,
+                            reported_output_tokens=persisted_usage.reported_output_tokens,
+                            model_calls=persisted_usage.model_calls + 1,
+                            reported_calls=persisted_usage.reported_calls,
+                        )
+
+                    if on_model_delta is not None:
+                        await on_model_delta("", live_usage())
                     content_parts = []
                     async with aclosing(model.stream(model_request)) as stream:
                         async for chunk in stream:
                             if chunk.content:
                                 content_parts.append(chunk.content)
+                                live_output_tokens += model.count_tokens(chunk.content)
                                 if on_model_delta is not None:
-                                    await on_model_delta(chunk.content)
+                                    await on_model_delta(chunk.content, live_usage())
                             if chunk.done:
                                 response = ModelResponse(
                                     content="".join(content_parts), tool_calls=chunk.tool_calls,

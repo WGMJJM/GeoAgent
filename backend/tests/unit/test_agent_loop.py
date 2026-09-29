@@ -127,7 +127,7 @@ async def test_streamed_tool_batch_waits_for_terminal_and_does_not_duplicate_ans
             run = store.list_runs()[0]
             if len(self.requests) == 1:
                 yield ModelStreamChunk(content="先查询")
-                assert fragments == ["先查询"]
+                assert fragments == ["", "先查询"]
                 assert store.get_run(run.id).tool_call_count == 0
                 yield ModelStreamChunk(content="数据。")
                 assert store.get_run(run.id).tool_call_count == 0
@@ -142,13 +142,18 @@ async def test_streamed_tool_batch_waits_for_terminal_and_does_not_duplicate_ans
     adapter = StreamingAdapter()
     store, loop = _loop(tmp_path, adapter)
 
-    async def capture(content):
+    live_usage = []
+
+    async def capture(content, token_usage):
         fragments.append(content)
+        live_usage.append(token_usage)
 
     _, result = await _run(loop, store, "查看数据", capture)
     assert result.status is AgentResultStatus.SUCCESS
     assert result.summary == "没有数据。"
-    assert fragments == ["先查询", "数据。", "没有", "数据。"]
+    assert fragments == ["", "先查询", "数据。", "", "没有", "数据。"]
+    assert live_usage[0].local_input_tokens > 0
+    assert live_usage[-1].local_output_tokens > live_usage[0].local_output_tokens
     run = store.get_run(result.trace_id)
     assert run.token_usage.reported_input_tokens == 300
     assert run.token_usage.reported_output_tokens == 30

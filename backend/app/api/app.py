@@ -26,6 +26,7 @@ from app.core.models import (
     AgentRequest,
     ApprovalStatus,
     RunStatus,
+    TokenUsage,
     User,
     UserView,
     new_id,
@@ -481,8 +482,8 @@ def create_app(application: Application | None = None) -> FastAPI:
                     if stream_run is not None and event.run_id == stream_run.id:
                         event_queue.put_nowait(("event", event))
 
-                async def on_model_delta(content: str) -> None:
-                    event_queue.put_nowait(("delta", content))
+                async def on_model_delta(content: str, token_usage: TokenUsage) -> None:
+                    event_queue.put_nowait(("delta", {"content": content, "token_usage": token_usage}))
 
                 async def on_run(item) -> None:
                     nonlocal stream_run
@@ -519,7 +520,11 @@ def create_app(application: Application | None = None) -> FastAPI:
                             elif kind == "heartbeat":
                                 await websocket.send_json({"type": "heartbeat"})
                             else:
-                                await websocket.send_json({"type": "delta", "content": item})
+                                await websocket.send_json({
+                                    "type": "delta" if item["content"] else "usage",
+                                    "content": item["content"],
+                                    "token_usage": item["token_usage"].model_dump(mode="json"),
+                                })
                             event_waiter = asyncio.create_task(event_queue.get())
                             continue
                         response = waiter.result()
@@ -532,7 +537,11 @@ def create_app(application: Application | None = None) -> FastAPI:
                             elif kind == "heartbeat":
                                 await websocket.send_json({"type": "heartbeat"})
                             else:
-                                await websocket.send_json({"type": "delta", "content": item})
+                                await websocket.send_json({
+                                    "type": "delta" if item["content"] else "usage",
+                                    "content": item["content"],
+                                    "token_usage": item["token_usage"].model_dump(mode="json"),
+                                })
                         await websocket.send_json({"type": "response", "data": response.model_dump(mode="json")})
                         break
                 finally:

@@ -18,6 +18,7 @@ type ConversationExecutionState = {
   startedAt: number;
   progressAt: number;
   streamingReply: string;
+  tokenUsage?: TokenUsage | null;
   events: Event[];
 };
 type ConversationDraft = {
@@ -28,6 +29,7 @@ type ConversationDraft = {
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48;
 const SHAPEFILE_EXTENSIONS = new Set([".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj"]);
+const SHAPEFILE_REQUIRED_EXTENSIONS = [".shp", ".shx", ".dbf"];
 const emptyDraft = (): ConversationDraft => ({ message: "", selectedDatasetIds: [], uploadedFiles: [] });
 
 function fileExtension(filename: string): string {
@@ -445,21 +447,21 @@ export function App() {
     setError("");
     setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-user-${requestId}`, role: "user", content: prompt, kind: "text" }]);
     updateDraft(targetConversationId, { message: "", selectedDatasetIds: [], uploadedFiles: [] });
-    setExecution(targetConversationId, { requestId, runId: null, phase: "connecting", startedAt, progressAt: startedAt, streamingReply: "", events: [] });
+    setExecution(targetConversationId, { requestId, runId: null, phase: "connecting", startedAt, progressAt: startedAt, streamingReply: "", tokenUsage: null, events: [] });
     let receivedEvents: Event[] = [];
     const stream = api.streamMessage(
       prompt,
       targetDatasetIds,
       targetAttachmentIds,
       (run) => {
-        setExecution(targetConversationId, (current) => current ? { ...current, runId: run.id, phase: "running" } : current);
+        setExecution(targetConversationId, (current) => current ? { ...current, runId: run.id, phase: "running", tokenUsage: run.token_usage } : current);
         if (activeConversationRef.current === targetConversationId) setSelectedRunId(run.id);
       },
       (event) => {
         receivedEvents = [...receivedEvents, event];
         setExecution(targetConversationId, (current) => current ? { ...current, events: [...current.events, event], streamingReply: event.event_type === "ModelResponseStarted" ? "" : current.streamingReply } : current);
       },
-      (content) => setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: current.streamingReply + content } : current),
+      (content, tokenUsage) => setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: current.streamingReply + content, tokenUsage: tokenUsage ?? current.tokenUsage } : current),
       targetConversationId,
       selectedModelProfile,
       () => setExecution(targetConversationId, (current) => current ? { ...current, progressAt: performance.now() } : current),
@@ -644,6 +646,13 @@ export function App() {
         const key = shapefileStem(file.name);
         shapefiles.set(key, [...(shapefiles.get(key) ?? []), file]);
       }
+      for (const group of shapefiles.values()) {
+        const extensions = new Set(group.map((file) => fileExtension(file.name)));
+        const missing = SHAPEFILE_REQUIRED_EXTENSIONS.filter((extension) => !extensions.has(extension));
+        if (missing.length > 0) {
+          throw new Error(`浏览器不能自动读取未选择的相邻文件。请同时选择同名的 .shp、.shx 和 .dbf（缺少 ${missing.join("、")}），或上传包含完整文件组的 ZIP。`);
+        }
+      }
       const uploaded: Dataset[] = [];
       for (const file of standalone) {
         const dataset = await api.uploadAttachment(file);
@@ -674,7 +683,7 @@ export function App() {
     <main className="main">
        {view !== "chat" && <header className="topbar"><div><h1>{view === "datasets" ? "数据集登记" : view === "agents" ? "智能体活动" : view === "runs" ? "运行与追踪" : "设置"}</h1></div><div className="topbar-actions"><button className="ghost" onClick={() => setView("chat")}>返回对话</button><button className="close-view" type="button" aria-label="关闭当前页面" title="关闭" onClick={() => setView("chat")}><Icon name="close" size={18} /></button><button className="ghost" onClick={() => void refreshAll()}><Icon name="refresh" size={13} /> 刷新</button></div></header>}
       {error && <div className="error">{error}</div>}
-       {view === "chat" && <ProductChat key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
+       {view === "chat" && <ProductChat key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
       {view === "datasets" && <DatasetPanel datasets={datasets} selectedDatasetIds={selectedDatasetIds} onToggleRequestDataset={(id) => setSelectedDatasetIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])} onRegister={registerDataset} busy={false} />}
       {view === "agents" && <AgentPanel runs={conversationRuns} />}
        {view === "runs" && <RunPanel runs={conversationRuns} selectedRunId={selectedRunId} events={events} result={result} datasets={datasets} artifacts={artifacts} onSelect={loadRun} onCancel={cancelRun} onResume={resumeRun} onDelete={deleteRun} onDeleteMany={deleteRunRecords} busy={resumingRunId !== null} />}
@@ -691,6 +700,7 @@ type ProductChatProps = {
   busy: boolean;
   conversationReady: boolean;
   streamingReply: string;
+  liveTokenUsage?: TokenUsage | null;
   elapsedMs: number;
   send: () => Promise<void>;
   cancel: () => Promise<void>;
@@ -718,7 +728,7 @@ type ProductChatProps = {
 };
 
 export function ProductChat({
-  message, setMessage, busy, conversationReady, streamingReply, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, approvals, approvalBusyId, onApprove, onDeny,
+  message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
   const historyRef = useRef<HTMLDivElement>(null);
@@ -745,14 +755,14 @@ export function ProductChat({
     {(messages.length > 0 || busy) && <div className="chat-history" aria-live="polite" ref={historyRef} onScroll={updateScrollPreference}>
       {messages.map((item) => <ChatBubble item={item} runs={runs} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
-        <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={runs.find((run) => run.id === activeRunId)?.token_usage} /></div>
+        <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={liveTokenUsage ?? runs.find((run) => run.id === activeRunId)?.token_usage} streaming={Boolean(streamingReply)} /></div>
         {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(streamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
       </>}
     </div>}
     <div className="composer">
       {replyToRunId && <div className="reply-target-banner" role="status">正在补充运行 {replyToRunId}<button type="button" onClick={() => onReplyToRun(null)}>取消</button></div>}
       <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} rows={2} aria-label="输入消息" placeholder="输入消息" disabled={!conversationReady || sending} />
-      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
+      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-picker"><span>模型</span><select value={selectedModelProfile} onChange={(event) => onModelChange(event.target.value)} disabled={sending} aria-label="选择模型">{modelStatus.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.label}</option>)}</select></div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
   </section>;
 }
@@ -777,24 +787,26 @@ export function TokenUsageSummary({ usage }: { usage?: TokenUsage | null }) {
   const output = reported ? usage.reported_output_tokens : usage.local_output_tokens;
   const format = (value: number) => `${(value / 1000).toFixed(2)}k`;
   const source = reported ? "模型返回的实际用量" : "本地分词估算，不等同于账单用量";
-  return <span className="run-token-usage" title={`${source}；输入 ${input.toLocaleString("zh-CN")} tokens，输出 ${output.toLocaleString("zh-CN")} tokens；累计 ${usage.model_calls} 次模型调用（包含子运行），每轮输入重复计入。每次模型响应结束后更新。`}>输入 {format(input)} · 输出 {format(output)}{reported ? "" : "（本地估算）"}</span>;
+  return <span className="run-token-usage" title={`${source}；输入 ${input.toLocaleString("zh-CN")} tokens，输出 ${output.toLocaleString("zh-CN")} tokens；累计 ${usage.model_calls} 次模型调用（包含子运行），每轮输入重复计入。运行中按本地分词动态估算，响应结束后以模型返回统计校正。`}>输入 {format(input)} · 输出 {format(output)}{reported ? "" : "（本地估算）"}</span>;
 }
 
-export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage }: { events: Event[]; durationMs: number; phase: ExecutionPhase; tokenUsage?: TokenUsage | null }) {
-  return <RunProgress events={events} durationMs={durationMs} live phase={phase} tokenUsage={tokenUsage} />;
+export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage, streaming = false }: { events: Event[]; durationMs: number; phase: ExecutionPhase; tokenUsage?: TokenUsage | null; streaming?: boolean }) {
+  return <RunProgress events={events} durationMs={durationMs} live phase={phase} tokenUsage={tokenUsage} streaming={streaming} />;
 }
 
-export function RunProgress({ events, durationMs, status, live = false, phase = "running", tokenUsage }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase; tokenUsage?: TokenUsage | null }) {
+export function RunProgress({ events, durationMs, status, live = false, phase = "running", tokenUsage, streaming = false }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase; tokenUsage?: TokenUsage | null; streaming?: boolean }) {
   const recentEvents = [...events].reverse();
   const currentEvent = recentEvents.find((event) => event.event_type !== "TokenUsageUpdated");
-  const usage = events.filter((event) => event.event_type === "TokenUsageUpdated").reduce<TokenUsage | null | undefined>((current, event) => {
+  const eventUsage = events.filter((event) => event.event_type === "TokenUsageUpdated").reduce<TokenUsage | null | undefined>((current, event) => {
     const snapshot = event.payload.token_usage as TokenUsage;
-    return !current || snapshot.model_calls > current.model_calls ? snapshot : current;
-  }, tokenUsage);
+    return !current || snapshot.model_calls >= current.model_calls ? snapshot : current;
+  }, undefined);
+  const usage = !eventUsage || (tokenUsage?.model_calls ?? -1) > eventUsage.model_calls ? tokenUsage : eventUsage;
   const connecting = live && phase === "connecting";
-  const thinking = live && currentEvent?.event_type === "ModelResponseStarted";
+  const thinking = live && currentEvent?.event_type === "ModelResponseStarted" && !streaming;
+  const generating = live && currentEvent?.event_type === "ModelResponseStarted" && streaming;
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
-  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在接入 Agent Loop…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : currentEvent ? <><span className="run-progress-marker"><Icon name="check" size={11} /></span><span className="run-progress-text">{eventLabel(currentEvent.event_type)}：{displayEventMessage(currentEvent.message)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} /></div></div>;
+  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在接入 Agent Loop…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <><span className="run-progress-marker"><Icon name="check" size={11} /></span><span className="run-progress-text">{eventLabel(currentEvent.event_type)}：{displayEventMessage(currentEvent.message)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} /></div></div>;
 }
 
 function DatasetPanel({ datasets, selectedDatasetIds, onToggleRequestDataset, onRegister, busy }: { datasets: Dataset[]; selectedDatasetIds: string[]; onToggleRequestDataset: (id: string) => void; onRegister: (path: string, name: string) => Promise<void>; busy: boolean }) {

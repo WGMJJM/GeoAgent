@@ -93,6 +93,9 @@ def test_websocket_delivers_text_before_model_finishes_and_closes_on_cancel(appl
                     break
             run_id = next(item["data"]["id"] for item in packets if item["type"] == "run")
             assert packet["content"] == "第一段"
+            assert packet["token_usage"]["local_input_tokens"] > 0
+            assert packet["token_usage"]["local_output_tokens"] > 0
+            assert any(item["type"] == "usage" and item["token_usage"]["local_output_tokens"] == 0 for item in packets)
             assert not model.finished
             run = application.store.get_run(run_id)
             assert run.status.value == "RUNNING" and run.token_usage is None

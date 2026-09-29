@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Checkpoint, Run, RunStatus
+from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Checkpoint, Run, RunStatus, TokenUsage
 from app.observability import EventType
 from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import persist_result, transition
@@ -29,7 +29,7 @@ class RunManager:
         *,
         metadata: dict[str, object] | None = None,
         on_run: Callable[[Run], Awaitable[None]] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> Run:
         prepared = await self.agent_loop.prepare_request(request, metadata=metadata)
         if on_run is not None:
@@ -60,7 +60,7 @@ class RunManager:
         approved: bool | None = None,
         technical: bool = False,
         on_run: Callable[[Run], Awaitable[None]] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> Run:
         current = self.store.get_run(run_id)
         if current is None:
@@ -146,7 +146,7 @@ class RunManager:
         checkpoint: Checkpoint | None = None,
         *,
         continuation: dict[str, object] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> AgentResult:
         run = prepared.run
         started = time.perf_counter()

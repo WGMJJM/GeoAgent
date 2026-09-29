@@ -12,6 +12,7 @@ from app.core.models import (
     Conversation,
     Message,
     Run,
+    TokenUsage,
     new_id,
 )
 from app.memory import ConversationMemoryService
@@ -68,7 +69,7 @@ class ConversationService:
         request: AgentRequest,
         *,
         on_run: Callable[[Run], Awaitable[None]] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> Run:
         await self._save_user_message(request)
         return await self.run_manager.submit(
@@ -83,7 +84,7 @@ class ConversationService:
         run_id: str,
         *,
         on_run: Callable[[Run], Awaitable[None]] | None = None,
-        on_model_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> tuple[Run, AgentResult]:
         await self._save_user_message(request)
         run = await self.run_manager.continue_run(
