@@ -10,6 +10,7 @@ from typing import Any
 
 from app.config import (
     DEFAULT_EMERGENCY_RECENT_MESSAGES,
+    DEFAULT_SUMMARY_MESSAGE_MAX_CHARS,
     DEFAULT_SUMMARY_RECENT_MESSAGES,
     DEFAULT_SUMMARY_TRIGGER_MESSAGES,
     DEFAULT_SUMMARY_TRIGGER_TOKENS,
@@ -53,6 +54,7 @@ class ConversationSummarizer:
         trigger_messages: int = DEFAULT_SUMMARY_TRIGGER_MESSAGES,
         trigger_tokens: int = DEFAULT_SUMMARY_TRIGGER_TOKENS,
         recent_messages: int = DEFAULT_SUMMARY_RECENT_MESSAGES,
+        message_max_chars: int = DEFAULT_SUMMARY_MESSAGE_MAX_CHARS,
         emergency_recent_messages: int = DEFAULT_EMERGENCY_RECENT_MESSAGES,
         timeout_seconds: float = SUMMARY_TIMEOUT_SECONDS,
     ) -> None:
@@ -60,6 +62,7 @@ class ConversationSummarizer:
         self.trigger_messages = max(1, trigger_messages)
         self.trigger_tokens = max(1, trigger_tokens)
         self.recent_messages = max(1, recent_messages)
+        self.message_max_chars = max(1, message_max_chars)
         self.emergency_recent_messages = max(1, emergency_recent_messages)
         self.timeout_seconds = max(0.1, timeout_seconds)
 
@@ -116,7 +119,12 @@ class ConversationSummarizer:
         if not force and len(eligible) < self.trigger_messages and pending_tokens < self.trigger_tokens:
             return False
 
-        batch = _bounded_batch(eligible, adapter.count_tokens, full_content=force)
+        batch = _bounded_batch(
+            eligible,
+            adapter.count_tokens,
+            full_content=force,
+            max_message_chars=self.message_max_chars,
+        )
         if not batch:
             return False
         verified_runs, verified_resources = self._verified_context(batch, conversation_id, user_id)
@@ -132,7 +140,7 @@ class ConversationSummarizer:
                 {
                     "message_id": item.id,
                     "role": item.role,
-                    "content": item.content if force else item.content[:5000],
+                    "content": item.content if force else item.content[: self.message_max_chars],
                     "dataset_ids": item.dataset_ids,
                     "run_id": item.run_id,
                 }
@@ -381,11 +389,17 @@ def _entry_view(entry: ConversationMemoryEntry) -> dict[str, str | None]:
     }
 
 
-def _bounded_batch(messages: list[Message], count_tokens=estimate_tokens, *, full_content: bool = False) -> list[Message]:
+def _bounded_batch(
+    messages: list[Message],
+    count_tokens=estimate_tokens,
+    *,
+    full_content: bool = False,
+    max_message_chars: int = DEFAULT_SUMMARY_MESSAGE_MAX_CHARS,
+) -> list[Message]:
     batch: list[Message] = []
     tokens = 0
     for message in messages[:SUMMARY_MAX_BATCH_MESSAGES]:
-        estimate = count_tokens(message.content if full_content else message.content[:5000])
+        estimate = count_tokens(message.content if full_content else message.content[:max_message_chars])
         if batch and tokens + estimate > SUMMARY_MAX_BATCH_TOKENS:
             break
         batch.append(message)

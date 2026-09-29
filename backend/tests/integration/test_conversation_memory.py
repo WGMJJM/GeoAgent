@@ -231,7 +231,7 @@ def test_incremental_summary_advances_by_message_range_and_preserves_raw_history
 def test_emergency_summary_bypasses_trigger_but_keeps_latest_eight_complete(application):
     conversation_id, user_id = "summary-emergency", "summary-emergency-owner"
     application.conversations.ensure(conversation_id, "超限摘要", user_id=user_id)
-    long_message = Message(id="msg-emergency-long", conversation_id=conversation_id, role="user", content="完整长消息" * 1500)
+    long_message = Message(id="msg-emergency-long", conversation_id=conversation_id, role="user", content="完整长消息" * 2500)
     old_answer = Message(id="msg-emergency-answer", conversation_id=conversation_id, role="assistant", content="已记录。")
     application.store.save_message(long_message)
     application.store.save_message(old_answer)
@@ -252,6 +252,28 @@ def test_emergency_summary_bypasses_trigger_but_keeps_latest_eight_complete(appl
     assert application.store.list_messages(conversation_id, limit=100) == raw
 
 
+def test_daily_summary_limits_each_message_to_ten_thousand_characters(application):
+    conversation_id, user_id = "summary-message-limit", "summary-message-limit-owner"
+    application.conversations.ensure(conversation_id, "单条摘要边界", user_id=user_id)
+    long_message = Message(
+        id="msg-summary-long",
+        conversation_id=conversation_id,
+        role="user",
+        content="长消息" * 4000,
+    )
+    application.store.save_message(long_message)
+    _seed_messages(application, conversation_id, start=0, exchanges=8)
+    model = _SummaryModel()
+    summarizer = application.conversation_memory.summarizer
+    summarizer.trigger_messages = 1
+
+    assert asyncio.run(summarizer.summarize_pending(conversation_id, user_id, model))
+    payload = json.loads(model.requests[0].messages[1]["content"])
+    assert summarizer.message_max_chars == 10000
+    assert payload["messages"][0]["content"] == long_message.content[:10000]
+    assert application.store.list_messages(conversation_id, limit=100)[0].content == long_message.content
+
+
 @pytest.mark.parametrize("older_tokens", [51199, 51200])
 def test_summary_token_boundary_excludes_recent_messages_and_preserves_uncovered_batch(application, monkeypatch, older_tokens):
     conversation_id, user_id = "summary-token-boundary", "summary-token-owner"
@@ -263,6 +285,7 @@ def test_summary_token_boundary_excludes_recent_messages_and_preserves_uncovered
     monkeypatch.setattr(model, "count_tokens", lambda value: counts.get(value, 10000))
     summarizer = application.conversation_memory.summarizer
     assert (summarizer.recent_messages, summarizer.trigger_messages, summarizer.trigger_tokens) == (16, 24, 51200)
+    assert summarizer.message_max_chars == 10000
     assert summarizer.emergency_recent_messages == 8
     committed = asyncio.run(summarizer.summarize_pending(conversation_id, user_id, model))
     assert committed is (older_tokens == 51200)

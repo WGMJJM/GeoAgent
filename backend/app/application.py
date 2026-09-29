@@ -71,6 +71,7 @@ class Application:
                 trigger_messages=self.settings.summary_trigger_messages,
                 trigger_tokens=self.settings.summary_trigger_tokens,
                 recent_messages=self.settings.summary_recent_messages,
+                message_max_chars=self.settings.summary_message_max_chars,
                 emergency_recent_messages=self.settings.emergency_recent_messages,
             ),
             model_provider=self.get_model_adapter,

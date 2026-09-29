@@ -50,6 +50,7 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     assert settings.summary_recent_messages == 16
     assert settings.summary_trigger_messages == 24
     assert settings.summary_trigger_tokens == 51200
+    assert settings.summary_message_max_chars == 10000
     assert settings.emergency_recent_messages == 8
     assert settings.tool_result_recent_full == 16
     assert settings.tool_result_emergency_fraction == 0.5
