@@ -7,6 +7,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
+from app.application import Application
 from app.config import Settings
 from app.core.tokens import DEFAULT_TOKENIZER_FILE, _load_tokenizer, estimate_tokens
 from app.models.config import ModelProfile
@@ -48,6 +49,27 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     assert settings.tool_context_max_cards == 16
     assert settings.enable_arcpy is True
     assert settings.arcpy_cache == Path("state/arcpy")
+
+
+@pytest.mark.asyncio
+async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
+    settings = Settings(
+        root=tmp_path,
+        database=tmp_path / "state.sqlite3",
+        workspace=tmp_path / "workspace",
+        enable_arcpy=False,
+        model_profiles='[{"id":"primary","label":"主模型","model":"primary","default":true}]',
+        additional_model_profiles='[{"id":"deepseek-flash","label":"DeepSeek Flash","model":"deepseek-flash"}]',
+    )
+    application = Application(settings)
+    try:
+        assert list(application.model_profiles) == ["primary", "deepseek-flash"]
+        assert application.default_model_profile == "primary"
+        status = application.model_status()
+        assert [item["id"] for item in status["profiles"]] == ["primary", "deepseek-flash"]
+        assert status["profiles"][1]["has_api_key"] is False
+    finally:
+        await application.close()
 
 
 def test_local_token_counts_match_bundled_tokenizer_and_cache():

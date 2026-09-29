@@ -154,14 +154,20 @@ class Application:
 
     def _load_model_profiles(self) -> None:
         profiles: list[ModelProfile] = []
-        if self.settings.model_profiles:
+        configured_lists = (
+            ("GEOAGENT_MODEL_PROFILES", self.settings.model_profiles),
+            ("GEOAGENT_ADDITIONAL_MODEL_PROFILES", self.settings.additional_model_profiles),
+        )
+        for setting_name, configured in configured_lists:
+            if not configured:
+                continue
             try:
-                raw_profiles = json.loads(self.settings.model_profiles)
+                raw_profiles = json.loads(configured)
             except json.JSONDecodeError as exc:
-                raise ValueError("GEOAGENT_MODEL_PROFILES 必须是有效的 JSON 数组。") from exc
+                raise ValueError(f"{setting_name} 必须是有效的 JSON 数组。") from exc
             if not isinstance(raw_profiles, list):
-                raise ValueError("GEOAGENT_MODEL_PROFILES 必须是 JSON 数组。")
-            profiles = [ModelProfile.model_validate(item) for item in raw_profiles]
+                raise ValueError(f"{setting_name} 必须是 JSON 数组。")
+            profiles.extend(ModelProfile.model_validate(item) for item in raw_profiles)
         for profile in profiles:
             if profile.id in self.model_profiles:
                 raise ValueError(f"模型配置的编号重复：{profile.id}")

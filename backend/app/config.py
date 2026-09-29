@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     arcpy_executable: Path | None = None
     arcpy_cache: Path = Field(default=Path("state/arcpy"))
     model_profiles: str | None = None
+    additional_model_profiles: str | None = None
     auth_cookie_name: str = "geoagent_session"
     auth_cookie_secure: bool = False
     auth_session_ttl_hours: int = Field(default=168, ge=1)
