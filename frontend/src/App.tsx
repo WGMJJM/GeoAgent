@@ -795,11 +795,14 @@ export function CompletedRunSummary({ run }: { run: Run }) {
 }
 
 export function TokenUsageSummary({ usage, animated = false }: { usage?: TokenUsage | null; animated?: boolean }) {
-  const modelCalls = usage?.model_calls ?? 0;
+  const retainedUsage = useRef<TokenUsage | null>(null);
+  if (usage && usage.model_calls > 0) retainedUsage.current = usage;
+  const currentUsage = usage && usage.model_calls > 0 ? usage : animated ? retainedUsage.current : usage;
+  const modelCalls = currentUsage?.model_calls ?? 0;
   const visible = modelCalls > 0;
-  const reported = visible && usage!.reported_calls === usage!.model_calls;
-  const inputTarget = visible ? (reported ? usage!.reported_input_tokens : usage!.local_input_tokens) : 0;
-  const outputTarget = visible ? (reported ? usage!.reported_output_tokens : usage!.local_output_tokens) : 0;
+  const reported = visible && currentUsage!.reported_calls === currentUsage!.model_calls;
+  const inputTarget = visible ? (reported ? currentUsage!.reported_input_tokens : currentUsage!.local_input_tokens) : 0;
+  const outputTarget = visible ? (reported ? currentUsage!.reported_output_tokens : currentUsage!.local_output_tokens) : 0;
   const input = useAnimatedTokenCount(inputTarget, animated, reported);
   const output = useAnimatedTokenCount(outputTarget, animated, reported);
   if (!visible) return null;
@@ -810,30 +813,48 @@ export function TokenUsageSummary({ usage, animated = false }: { usage?: TokenUs
 function useAnimatedTokenCount(target: number, enabled: boolean, fast: boolean): number {
   const [displayed, setDisplayed] = useState(enabled ? 0 : target);
   const displayedRef = useRef(displayed);
+  const targetRef = useRef(target);
+  const fastRef = useRef(fast);
+  const frameRef = useRef<number | null>(null);
 
   useEffect(() => {
+    targetRef.current = target;
+    fastRef.current = fast;
     if (!enabled) {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
       displayedRef.current = target;
       setDisplayed(target);
       return;
     }
-    const start = displayedRef.current;
-    if (start === target) return;
-    const startedAt = performance.now();
-    const duration = fast ? 240 : 900;
-    let frame = 0;
+    if (frameRef.current !== null || displayedRef.current === target) return;
+    let previousAt = performance.now();
     const step = (now: number) => {
-      const progress = Math.min(1, (now - startedAt) / duration);
-      const next = Math.round(start + (target - start) * progress * progress);
+      const current = displayedRef.current;
+      const difference = targetRef.current - current;
+      if (difference === 0) {
+        frameRef.current = null;
+        return;
+      }
+      const elapsed = Math.max(1, now - previousAt);
+      previousAt = now;
+      const duration = fastRef.current ? 60 : 900;
+      const distance = Math.max(1, Math.ceil(Math.abs(difference) * Math.min(1, elapsed / duration)));
+      const next = difference > 0
+        ? Math.min(targetRef.current, current + distance)
+        : Math.max(targetRef.current, current - distance);
       if (next !== displayedRef.current) {
         displayedRef.current = next;
         setDisplayed(next);
       }
-      if (progress < 1) frame = requestAnimationFrame(step);
+      frameRef.current = requestAnimationFrame(step);
     };
-    frame = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(frame);
+    frameRef.current = requestAnimationFrame(step);
   }, [enabled, fast, target]);
+
+  useEffect(() => () => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+  }, []);
 
   return displayed;
 }

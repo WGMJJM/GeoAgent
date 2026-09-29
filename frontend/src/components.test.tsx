@@ -7,7 +7,10 @@ import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
 import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 const approval: ApprovalRequest = { id: "approval-1", user_id: "user-1", conversation_id: "conv-1", task_id: "task-1", source_run_id: "run-1", tool_call_id: "call-1", tool_name: "vector.buffer", argument_fingerprint: "fingerprint", risk_level: "WRITE", argument_preview: { distance: "500m", path: "<已隐藏>" }, reason: "该操作将生成新的结果数据。", status: "PENDING", created_at: "2026-01-01T00:00:00Z" };
 
@@ -63,6 +66,22 @@ describe("运行累计 Token 用量", () => {
     expect(screen.getByText("正在思考")).toBeTruthy();
     rerender(<LiveExecutionStatus phase="running" events={[started]} durationMs={2000} streaming />);
     expect(screen.getByText("正在生成回复")).toBeTruthy();
+  });
+
+  it("实时 Token 连续追赶新目标，临时缺少快照时不消失", () => {
+    vi.useFakeTimers();
+    const progress: Event = { id: "progress", run_id: "run-1", event_type: "ToolStarted", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "检查数据", payload: {} };
+    const first = { ...usage, reported_calls: 1, local_input_tokens: 8_000, local_output_tokens: 1_000 };
+    const { container, rerender } = render(<LiveExecutionStatus phase="running" events={[progress]} durationMs={1000} tokenUsage={first} smoothTokenUsage />);
+    expect(container.querySelector(".run-token-usage")).toBeTruthy();
+    act(() => vi.advanceTimersByTime(200));
+    const before = container.querySelector(".run-token-usage")?.textContent;
+    rerender(<LiveExecutionStatus phase="running" events={[progress]} durationMs={1200} tokenUsage={{ ...first, local_input_tokens: 10_000, local_output_tokens: 2_000 }} smoothTokenUsage />);
+    act(() => vi.advanceTimersByTime(200));
+    const after = container.querySelector(".run-token-usage")?.textContent;
+    expect(after).not.toBe(before);
+    rerender(<LiveExecutionStatus phase="running" events={[progress]} durationMs={1400} smoothTokenUsage />);
+    expect(container.querySelector(".run-token-usage")).toBeTruthy();
   });
 });
 
