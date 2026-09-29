@@ -9,7 +9,7 @@ import { RunPanel } from "./components/RunPanel";
 import { displayEventMessage, eventLabel, formatLabel, kindLabel, statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
-type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[] };
+type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[]; events?: Event[] };
 type ExecutionPhase = "connecting" | "running";
 type ConversationExecutionState = {
   requestId: string;
@@ -496,7 +496,7 @@ export function App() {
       if (response.result && response.run) {
         const messageId = `local-assistant-${response.result.trace_id}`;
         setRuns((current) => [response.run!, ...current.filter((item) => item.id !== response.run!.id)]);
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: response.result!.summary, kind: "execution", runId: response.run!.id }]);
+        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: response.result!.summary, kind: "execution", runId: response.run!.id, events: receivedEvents }]);
         if (activeConversationRef.current === targetConversationId) {
           setResult(response.result);
           setEvents(receivedEvents);
@@ -855,7 +855,7 @@ export function ChatBubble({ item, runs = [], datasets = [], onShowRun, onReplyT
   const run = item.kind === "execution" && item.runId ? runs.find((candidate) => candidate.id === item.runId) : undefined;
   const executionMessage = item.role === "assistant" && item.kind === "execution";
   const resources = (item.datasetIds ?? []).map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset));
-  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <span className="message-resource" key={dataset.id} title={dataset.path}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></span>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
+  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && (item.events?.length ? <RunProgress events={item.events} durationMs={runDurationMs(run)} status={run.status} tokenUsage={run.token_usage} /> : <CompletedRunSummary run={run} />)}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <span className="message-resource" key={dataset.id} title={dataset.path}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></span>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
 }
 
 export function CompletedRunSummary({ run }: { run: Run }) {
@@ -950,19 +950,22 @@ function liveProgressText(event: Event): string {
 }
 
 export function RunProgress({ events, durationMs, status, live = false, phase = "running", tokenUsage, streaming = false, smoothTokenUsage = false }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase; tokenUsage?: TokenUsage | null; streaming?: boolean; smoothTokenUsage?: boolean }) {
-  const recentEvents = [...events].reverse();
-  const currentEvent = recentEvents.find((event) => event.event_type !== "TokenUsageUpdated");
+  const progressEvents = events.filter((event) => !["TokenUsageUpdated", "CheckpointSaved"].includes(event.event_type));
   const eventUsage = events.filter((event) => event.event_type === "TokenUsageUpdated").reduce<TokenUsage | null | undefined>((current, event) => {
     const snapshot = event.payload.token_usage as TokenUsage;
     return !current || snapshot.model_calls >= current.model_calls ? snapshot : current;
   }, undefined);
   const usage = !eventUsage || (tokenUsage?.model_calls ?? -1) > eventUsage.model_calls ? tokenUsage : eventUsage;
   const connecting = live && phase === "connecting";
-  const thinking = live && currentEvent?.event_type === "ModelResponseStarted" && !streaming;
-  const generating = live && currentEvent?.event_type === "ModelResponseStarted" && streaming;
-  const activeProgress = live && currentEvent ? ACTIVE_PROGRESS_EVENTS.has(currentEvent.event_type) : false;
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
-  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在接入 Agent Loop…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <>{activeProgress ? <span className="run-progress-spinner" /> : <span className="run-progress-marker"><Icon name="check" size={11} /></span>}<span className="run-progress-text">{liveProgressText(currentEvent)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} animated={smoothTokenUsage} /></div></div>;
+  const rows = connecting || progressEvents.length === 0 ? [null] : progressEvents;
+  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-lines">{rows.map((event, index) => {
+    const latest = index === rows.length - 1;
+    const thinking = event?.event_type === "ModelResponseStarted";
+    const active = live && latest && (thinking || ACTIVE_PROGRESS_EVENTS.has(event?.event_type ?? ""));
+    const text = event ? (thinking ? (streaming && latest ? "正在生成回复" : "正在思考") : liveProgressText(event)) : connecting ? "正在接入 Agent Loop…" : "等待智能体事件…";
+    return <div className="run-progress-current" key={event?.id ?? "pending"}>{active || (!event && !connecting) ? <span className="run-progress-spinner" /> : <span className={`run-progress-marker ${connecting ? "waiting" : ""}`}><Icon name={connecting ? "clock" : "check"} size={11} /></span>}<span className="run-progress-text">{text}</span>{latest && <TokenUsageSummary usage={usage} animated={smoothTokenUsage} />}</div>;
+  })}</div></div>;
 }
 
 function DatasetPanel({ datasets, selectedDatasetIds, onToggleRequestDataset, onRegister, busy }: { datasets: Dataset[]; selectedDatasetIds: string[]; onToggleRequestDataset: (id: string) => void; onRegister: (path: string, name: string) => Promise<void>; busy: boolean }) {

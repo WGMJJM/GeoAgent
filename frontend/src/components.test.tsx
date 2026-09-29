@@ -5,7 +5,7 @@ import { ApprovalCard } from "./components/ApprovalCard";
 import { api, ApprovalRequest, Event, MessageResponse, ReasoningEffort, Run, TokenUsage } from "./api";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
-import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
+import { App, ChatBubble, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -210,12 +210,13 @@ describe("统一聊天输入区", () => {
     expect(screen.queryByText("模型正在生成回复：正在思考")).toBeNull();
   });
 
-  it("模型返回工具动作后立即切换为准备状态", () => {
+  it("模型与工具过程按发生顺序换行保留", () => {
     const thinking: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 } };
     const preparing: Event = { id: "event-tool", run_id: "run-1", event_type: "ToolPreparing", message: "正在准备 1 个工具调用", sequence: 4, timestamp: "2026-01-01T10:00:07.000Z", payload: { tools: ["raster.slope"], tool_count: 1 } };
     const { container } = render(<LiveExecutionStatus phase="running" events={[thinking, preparing]} durationMs={7_100} />);
     expect(screen.getByText("正在准备：计算坡度")).toBeTruthy();
-    expect(screen.queryByText("正在思考")).toBeNull();
+    expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(container.querySelectorAll(".run-progress-current")).toHaveLength(2);
     expect(container.querySelector(".run-progress-spinner")).toBeTruthy();
   });
 
@@ -259,6 +260,21 @@ describe("统一聊天输入区", () => {
     expect(screen.getByText("已完成")).toBeTruthy();
     expect(screen.queryByText("等待智能体事件…")).toBeNull();
     expect(container.querySelector(".execution-message")).toBeTruthy();
+  });
+
+  it("刚完成的运行保留连续过程并在下方显示回复", () => {
+    const completed: Run = { ...runRecord("COMPLETED"), started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:08.000Z", tool_call_count: 1 };
+    const events: Event[] = [
+      { id: "thinking", run_id: completed.id, event_type: "ModelResponseStarted", message: "正在思考", sequence: 1, timestamp: "2026-01-01T10:00:01.000Z", payload: { turn: 1 } },
+      { id: "started", run_id: completed.id, event_type: "ToolStarted", message: "正在执行 dataset.inspect", sequence: 2, timestamp: "2026-01-01T10:00:02.000Z", payload: { tool: "dataset.inspect" } },
+      { id: "finished", run_id: completed.id, event_type: "ToolCompleted", message: "数据检查完成", sequence: 3, timestamp: "2026-01-01T10:00:04.000Z", payload: { tool: "dataset.inspect" } },
+    ];
+    const { container } = render(<ChatBubble item={{ id: "completed-message", role: "assistant", content: "这是栅格数据。", kind: "execution", runId: completed.id, events }} runs={[completed]} datasets={[]} onShowRun={vi.fn()} onReplyToRun={vi.fn()} />);
+    expect(screen.getByText("正在思考")).toBeTruthy();
+    expect(screen.getByText("正在执行：检查数据集")).toBeTruthy();
+    expect(screen.getByText("执行完成：检查数据集")).toBeTruthy();
+    expect(screen.getByText("这是栅格数据。")).toBeTruthy();
+    expect(container.querySelectorAll(".run-progress-current")).toHaveLength(3);
   });
 
   it("失败运行仍显示摘要和运行详情入口", () => {
