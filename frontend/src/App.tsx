@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event, fetchRunView, MeasurementSystem, ModelStatus, ReasoningEffort, ResponseStyle, Result, Run, TokenUsage, User, UserProfile } from "./api";
 import { childRunsOf, isExecutionInflight, isMainRun, runDurationMs, runTitle, runsForConversation } from "./domain";
 import { ApprovalCard } from "./components/ApprovalCard";
@@ -746,12 +746,16 @@ type ProductChatProps = {
   onDeny: (approval: ApprovalRequest) => Promise<void>;
 };
 
-type PickerOption = { value: string; label: string };
-
-function ScrollPicker({ label, value, options, disabled, onChange, kind }: { label: string; value: string; options: PickerOption[]; disabled: boolean; onChange: (value: string) => void; kind: "model" | "reasoning" }) {
+function ModelReasoningPicker({ profiles, selectedModelProfile, selectedReasoningEffort, disabled, onModelChange, onReasoningChange }: { profiles: ModelStatus["profiles"]; selectedModelProfile: string; selectedReasoningEffort: ReasoningEffort | ""; disabled: boolean; onModelChange: (value: string) => void; onReasoningChange: (value: ReasoningEffort) => void }) {
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState<"settings" | "models">("settings");
   const rootRef = useRef<HTMLDivElement>(null);
-  const selected = options.find((option) => option.value === value) ?? options[0];
+  const selectedProfile = profiles.find((profile) => profile.id === selectedModelProfile) ?? profiles[0];
+  const efforts = selectedProfile?.reasoning_efforts ?? [];
+  const selectedEffortIndex = Math.max(0, efforts.indexOf(selectedReasoningEffort as ReasoningEffort));
+  const selectedEffort = efforts[selectedEffortIndex];
+  const progress = efforts.length > 1 ? selectedEffortIndex / (efforts.length - 1) * 100 : 0;
+  const showModels = view === "models" || efforts.length === 0;
 
   useEffect(() => {
     if (!open) return;
@@ -770,15 +774,25 @@ function ScrollPicker({ label, value, options, disabled, onChange, kind }: { lab
   }, [open]);
 
   useLayoutEffect(() => {
-    if (open) rootRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
-  }, [open]);
+    if (open && showModels) rootRef.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest" });
+  }, [open, showModels]);
 
-  return <div className={`scroll-picker scroll-picker-${kind}`} ref={rootRef}>
-    <button type="button" className="scroll-picker-trigger" disabled={disabled} aria-label={`${label}：${selected?.label ?? ""}`} aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-      <span>{selected?.label}</span><Icon name="chevronDown" size={13} />
+  return <div className="model-reasoning-picker" ref={rootRef}>
+    <button type="button" className="model-reasoning-trigger" disabled={disabled} aria-label={`选择模型和思考程度：${selectedProfile?.label ?? ""}${selectedEffort ? ` ${REASONING_EFFORT_LABELS[selectedEffort]}` : ""}`} aria-haspopup="dialog" aria-expanded={open} onClick={() => { if (!open) setView("settings"); setOpen((current) => !current); }}>
+      <span className="model-reasoning-name">{selectedProfile?.label}</span>{selectedEffort && <span className="model-reasoning-effort">{REASONING_EFFORT_LABELS[selectedEffort]}</span>}<Icon name="chevronDown" size={13} />
     </button>
-    {open && <div className="scroll-picker-menu" role="listbox" aria-label={label}>
-      {options.map((option) => <button type="button" className={`scroll-picker-option ${option.value === value ? "selected" : ""}`} role="option" aria-selected={option.value === value} key={option.value} onClick={() => { onChange(option.value); setOpen(false); }}><span>{option.label}</span>{option.value === value && <Icon name="check" size={13} />}</button>)}
+    {open && <div className="model-reasoning-popover" role="dialog" aria-label="模型和思考程度">
+      {showModels ? <>
+        <div className="model-list-head">{efforts.length > 0 && <button type="button" aria-label="返回思考程度" onClick={() => setView("settings")}>‹</button>}<strong>选择模型</strong></div>
+        <div className="model-option-list" role="listbox" aria-label="选择模型">{profiles.map((profile) => <button type="button" className={`model-option ${profile.id === selectedProfile?.id ? "selected" : ""}`} role="option" aria-selected={profile.id === selectedProfile?.id} key={profile.id} onClick={() => { onModelChange(profile.id); setView("settings"); setOpen(false); }}><span>{profile.label}</span>{profile.id === selectedProfile?.id && <Icon name="check" size={14} />}</button>)}</div>
+      </> : <>
+        <div className="reasoning-popover-head"><Icon name="bolt" size={17} /><strong>{REASONING_EFFORT_LABELS[selectedEffort]}</strong><button type="button" aria-label="恢复默认思考程度" title="恢复默认" onClick={() => selectedProfile?.default_reasoning_effort && onReasoningChange(selectedProfile.default_reasoning_effort)}><Icon name="refresh" size={16} /></button></div>
+        <button type="button" className="popover-model-link" onClick={() => setView("models")}><span>{selectedProfile?.label}</span><b>›</b></button>
+        <div className="reasoning-range-wrap">
+          <input type="range" min="0" max={efforts.length - 1} step="1" value={selectedEffortIndex} aria-label="选择思考程度" style={{ "--reasoning-progress": `${progress}%` } as CSSProperties} onChange={(event) => onReasoningChange(efforts[Number(event.target.value)])} />
+          <div className="reasoning-range-dots" aria-hidden="true">{efforts.map((effort, index) => <i className={index <= selectedEffortIndex ? "active" : ""} key={effort} />)}</div>
+        </div>
+      </>}
     </div>}
   </div>;
 }
@@ -789,7 +803,6 @@ export function ProductChat({
   const sending = busy;
   const historyRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
-  const selectedProfile = modelStatus?.profiles.find((profile) => profile.id === selectedModelProfile);
   const wasBusyRef = useRef(busy);
 
   const updateScrollPreference = () => {
@@ -825,7 +838,7 @@ export function ProductChat({
     <div className="composer">
       {replyToRunId && <div className="reply-target-banner" role="status">正在补充运行 {replyToRunId}<button type="button" onClick={() => onReplyToRun(null)}>取消</button></div>}
       <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} rows={2} aria-label="输入消息" placeholder="输入消息" title="Enter 发送，Shift+Enter 换行" disabled={!conversationReady || sending} />
-      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <div className="model-controls"><ScrollPicker kind="model" label="选择模型" value={selectedModelProfile} options={modelStatus.profiles.map((profile) => ({ value: profile.id, label: profile.label }))} disabled={sending} onChange={onModelChange} />{selectedProfile && selectedProfile.reasoning_efforts.length > 0 && <ScrollPicker kind="reasoning" label="选择思考程度" value={selectedReasoningEffort} options={selectedProfile.reasoning_efforts.map((effort) => ({ value: effort, label: REASONING_EFFORT_LABELS[effort] }))} disabled={sending} onChange={(value) => onReasoningChange(value as ReasoningEffort)} />}</div> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
+      <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <ModelReasoningPicker profiles={modelStatus.profiles} selectedModelProfile={selectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} disabled={sending} onModelChange={onModelChange} onReasoningChange={onReasoningChange} /> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
   </section>;
 }

@@ -125,7 +125,7 @@ describe("统一聊天输入区", () => {
     expect(screen.getByText("历史消息")).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "输入消息" })).toBeTruthy();
     expect(screen.getByLabelText("添加文件")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "选择模型：通义千问" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "选择模型和思考程度：通义千问" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "规划" })).toBeNull();
     expect(screen.getByText("历史消息")).toBeTruthy();
     expect(screen.getAllByRole("textbox")).toHaveLength(1);
@@ -135,14 +135,14 @@ describe("统一聊天输入区", () => {
     const onReasoningChange = vi.fn();
     const profile = { ...productChatProps.modelStatus.profiles[0], id: "deepseek-flash", label: "DeepSeek Flash", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[], default_reasoning_effort: "medium" as const };
     render(<ProductChat {...productChatProps} modelStatus={{ ...productChatProps.modelStatus, default_profile: profile.id, profiles: [profile] }} selectedModelProfile={profile.id} selectedReasoningEffort="xhigh" onReasoningChange={onReasoningChange} />);
-    const trigger = screen.getByRole("button", { name: "选择思考程度：极高" });
-    expect(screen.queryByRole("listbox", { name: "选择思考程度" })).toBeNull();
+    const trigger = screen.getByRole("button", { name: "选择模型和思考程度：DeepSeek Flash 极高" });
+    expect(screen.queryByRole("slider", { name: "选择思考程度" })).toBeNull();
     fireEvent.click(trigger);
-    expect(screen.getByRole("listbox", { name: "选择思考程度" })).toBeTruthy();
-    expect(screen.getByRole("option", { name: "极高" }).getAttribute("aria-selected")).toBe("true");
-    fireEvent.click(screen.getByRole("option", { name: "最高" }));
+    const slider = screen.getByRole("slider", { name: "选择思考程度" });
+    expect((slider as HTMLInputElement).value).toBe("3");
+    expect(screen.getAllByText("极高")).toHaveLength(2);
+    fireEvent.change(slider, { target: { value: "4" } });
     expect(onReasoningChange).toHaveBeenCalledWith("max");
-    expect(screen.queryByRole("listbox", { name: "选择思考程度" })).toBeNull();
   });
 
   it("Enter 发送，Shift+Enter 保留换行", () => {
