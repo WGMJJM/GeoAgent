@@ -85,6 +85,39 @@ async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
         await application.close()
 
 
+@pytest.mark.asyncio
+async def test_gpt_6_sol_profile_can_be_selected_as_default_without_ultra(tmp_path):
+    settings = Settings(
+        root=tmp_path,
+        database=tmp_path / "state.sqlite3",
+        workspace=tmp_path / "workspace",
+        model_profiles=json.dumps([{
+            "id": "qwen",
+            "label": "通义千问",
+            "model": "qwen",
+        }]),
+        additional_model_profiles=json.dumps([{
+            "id": "gpt-6-sol",
+            "label": "GPT-6 Sol",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "placeholder",
+            "model": "gpt-6-sol",
+            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+            "default_reasoning_effort": "medium",
+            "default": True,
+        }]),
+        enable_arcpy=False,
+    )
+    application = Application(settings)
+    try:
+        assert application.default_model_profile == "gpt-6-sol"
+        profile = application.model_profiles["gpt-6-sol"]
+        assert profile.reasoning_efforts == ["low", "medium", "high", "xhigh", "max"]
+        assert "ultra" not in profile.reasoning_efforts
+    finally:
+        await application.close()
+
+
 def test_local_token_counts_match_bundled_tokenizer_and_cache():
     tokenizer = Tokenizer.from_file(str(DEFAULT_TOKENIZER_FILE))
     for content in ("", "坡度分析 DEM 重投影 EPSG:32650", '{"dataset_id":"ds_1","distance":500}', "hello world"):
