@@ -10,6 +10,7 @@ const shapes = {
   close: <path d="m6 6 12 12M6 18 18 6" />,
   trash: <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />,
   refresh: <path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6" />,
+  chevronDown: <path d="m7 10 5 5 5-5" />,
   check: <path d="m5 12 4 4L19 6" />,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   attachment: <path d="m8 12 7-7a4 4 0 0 1 6 6L10 22a6 6 0 0 1-8-8L13 3m-7 13 9-9" />,
