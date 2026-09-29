@@ -97,7 +97,6 @@ class ArcPyToolDefinition:
 
 _STRING_TYPES = {
     "string",
-    "field",
     "linear unit",
     "sql expression",
     "where clause",
@@ -105,7 +104,6 @@ _STRING_TYPES = {
     "coordinate system",
     "spatial reference",
     "字符串",
-    "字段",
     "线性单位",
     "sql 表达式",
     "where 子句",
@@ -113,6 +111,7 @@ _STRING_TYPES = {
     "坐标系",
     "空间参考",
 }
+_FIELD_TYPES = {"field", "字段"}
 _INTEGER_TYPES = {"long", "short", "long integer", "short integer", "长整型", "短整型"}
 _NUMBER_TYPES = {"double", "float", "双精度型", "浮点型"}
 _BOOLEAN_TYPES = {"boolean", "bool", "布尔", "布尔型"}
@@ -250,6 +249,8 @@ def parameter_kind(parameter: ArcPyParameter) -> str | None:
         return "number"
     if values & _SPATIAL_REFERENCE_TYPES:
         return "spatial_reference"
+    if values & _FIELD_TYPES:
+        return "field"
     if values & _STRING_TYPES:
         return "string"
     return None
@@ -262,6 +263,7 @@ def _is_dataset_parameter(parameter: ArcPyParameter) -> bool:
 def _property_schema(parameter: ArcPyParameter, kind: str) -> dict[str, Any]:
     value_type = {
         "dataset": "string",
+        "field": "string",
         "spatial_reference": "string",
         "string": "string",
         "integer": "integer",
@@ -269,14 +271,26 @@ def _property_schema(parameter: ArcPyParameter, kind: str) -> dict[str, Any]:
         "boolean": "boolean",
     }[kind]
     datatype = _datatype_text(parameter)
-    prefix = "GeoAgent Dataset ID; " if kind == "dataset" else ""
+    prefix = (
+        "GeoAgent Dataset ID; "
+        if kind == "dataset"
+        else "输入数据集中的真实字段名; "
+        if kind == "field"
+        else ""
+    )
     item: dict[str, Any] = {
         "type": value_type,
         "description": f"{prefix}{parameter.display_name} (ArcPy: {datatype})",
     }
-    enum = [value for value in parameter.filter_list if isinstance(value, (str, int, float, bool))]
-    if value_type == "string" and enum and all(isinstance(value, str) and value.isascii() for value in enum):
-        item["enum"] = enum
+    filter_type = (parameter.filter_type or "").strip().casefold()
+    filter_values = [value for value in parameter.filter_list if isinstance(value, (str, int, float, bool))]
+    if filter_type == "valuelist" and filter_values:
+        item["enum"] = filter_values
+    elif filter_type in {"feature", "field"} and filter_values:
+        label = "允许的要素类型" if filter_type == "feature" else "允许的字段类型"
+        item["description"] += f"; {label}: {', '.join(str(value) for value in filter_values)}"
+    elif filter_type == "range" and len(filter_values) == 2 and value_type in {"integer", "number"}:
+        item["minimum"], item["maximum"] = filter_values
     if parameter.multi_value:
         return {
             "type": "array",

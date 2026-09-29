@@ -60,6 +60,45 @@ def _slope_description(version: str = "3.4.3") -> dict:
     }
 
 
+def _feature_analysis_description(version: str = "3.4.3") -> dict:
+    return {
+        "name": "FeatureAnalysis_stats",
+        "version": version,
+        "usage": "FeatureAnalysis_stats(Input_Features, Output_Features, Analysis_Field)",
+        "parameters": [
+            {
+                "name": "Input_Features",
+                "display_name": "输入要素",
+                "direction": "Input",
+                "datatype": "要素图层",
+                "parameter_type": "Required",
+                "multi_value": False,
+                "filter_type": "Feature",
+                "filter_list": ["Point", "Multipoint", "Polygon"],
+            },
+            {
+                "name": "Output_Features",
+                "display_name": "输出要素",
+                "direction": "Output",
+                "datatype": "要素类",
+                "parameter_type": "Required",
+                "multi_value": False,
+            },
+            {
+                "name": "Analysis_Field",
+                "display_name": "分析字段",
+                "direction": "Input",
+                "datatype": "字段",
+                "parameter_type": "Required",
+                "multi_value": False,
+                "dependencies": [0],
+                "filter_type": "Field",
+                "filter_list": ["Short", "Long", "Float", "Double", "BigInteger"],
+            },
+        ],
+    }
+
+
 class FakeWorker:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
@@ -83,6 +122,23 @@ class FakeWorker:
 
     def close(self):
         self.closed = True
+
+
+class FeatureAnalysisWorker(FakeWorker):
+    def request(self, action, payload=None, **_kwargs):
+        payload = payload or {}
+        self.calls.append((action, payload))
+        if action == "ping":
+            return {"version": "3.4.3", "product": "ArcGIS Pro"}
+        if action == "catalog":
+            return {"version": "3.4.3", "tools": ["FeatureAnalysis_stats"]}
+        if action == "describe":
+            return _feature_analysis_description()
+        if action == "execute":
+            output = Path(payload["values"][1])
+            output.write_bytes(b"fake vector")
+            return {"outputs": [str(output)], "messages": self.messages}
+        raise AssertionError(action)
 
 
 class FakeRegistry:
@@ -119,9 +175,25 @@ def test_localized_arcpy_parameters_become_dataset_scalar_and_generated_output_s
     assert definition.metadata.input_schema["properties"]["in_raster"]["type"] == "string"
     assert "Dataset ID" in definition.metadata.input_schema["properties"]["in_raster"]["description"]
     assert definition.metadata.input_schema["properties"]["z_factor"]["type"] == "number"
-    assert "enum" not in definition.metadata.input_schema["properties"]["output_measurement"]
+    assert definition.metadata.input_schema["properties"]["output_measurement"]["enum"] == ["度", "增量百分比"]
     assert "out_raster" not in definition.metadata.input_schema["properties"]
     assert definition.generated_outputs == {"out_raster": ".tif"}
+
+
+def test_feature_and_field_filters_describe_constraints_without_replacing_real_values():
+    spec = ArcPyToolSpec.from_dict(_feature_analysis_description(), public_name="arcpy.featureanalysis_stats")
+    definition = build_tool_definition(spec)
+    properties = definition.metadata.input_schema["properties"]
+
+    assert definition.input_kinds == {"Input_Features": "dataset", "Analysis_Field": "field"}
+    assert properties["Input_Features"]["type"] == "string"
+    assert "enum" not in properties["Input_Features"]
+    assert "Dataset ID" in properties["Input_Features"]["description"]
+    assert "Point, Multipoint, Polygon" in properties["Input_Features"]["description"]
+    assert properties["Analysis_Field"]["type"] == "string"
+    assert "enum" not in properties["Analysis_Field"]
+    assert "真实字段名" in properties["Analysis_Field"]["description"]
+    assert "Short, Long, Float, Double, BigInteger" in properties["Analysis_Field"]["description"]
 
 
 def test_unknown_required_parameter_rejects_tool_instead_of_guessing_schema():
@@ -252,6 +324,44 @@ def test_provider_caches_light_catalog_materializes_one_schema_and_executes_with
 
     provider.close()
     assert worker.closed is True
+
+
+def test_provider_resolves_dataset_id_and_passes_real_field_name(tmp_path):
+    executable = tmp_path / "propy.bat"
+    executable.write_text("test", encoding="utf-8")
+    source_path = tmp_path / "provinces.shp"
+    source_path.write_bytes(b"source")
+    source = Dataset(
+        id="ds_provinces",
+        name="provinces",
+        kind=DatasetKind.VECTOR,
+        path=str(source_path),
+        format="shp",
+        owner_user_id="user-1",
+    )
+    worker = FeatureAnalysisWorker()
+    provider = ArcPyProvider(executable, tmp_path / "cache", worker=worker)
+    registered = provider.materialize("arcpy.featureanalysis_stats")
+    context = ToolContext(
+        run_id="run-1",
+        agent_id="agent-loop",
+        call_id="call-1",
+        services={
+            "workspace": WorkspaceManager(tmp_path / "workspace"),
+            "registry": FakeRegistry(source),
+            "user_id": "user-1",
+        },
+    )
+
+    registered.handler(
+        {"Input_Features": source.id, "Analysis_Field": "pm2_5_2020"},
+        context,
+    )
+
+    execute_payload = next(payload for action, payload in worker.calls if action == "execute")
+    assert execute_payload["values"][0] == str(source_path.resolve())
+    assert execute_payload["values"][1].endswith(".shp")
+    assert execute_payload["values"][2] == "pm2_5_2020"
 
 
 def test_new_provider_reuses_versioned_catalog_and_tool_schema_cache(tmp_path):
