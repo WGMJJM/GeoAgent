@@ -48,7 +48,6 @@
 .run-progress,.run-summary{width:100%}
 .live-execution-row{width:100%;flex:0 0 auto}
 .run-progress-marker.waiting{background:var(--warning-soft);color:var(--warning)}
-.run-progress-lines{display:grid;gap:1px;padding:4px 0 2px}.run-progress-lines .run-progress-current{padding:3px 0}.run-progress-lines .run-progress-current:not(:last-child){color:var(--muted)}
 .run-summary-current,.run-progress-current{flex-wrap:wrap;row-gap:5px}
 .run-token-usage{margin-left:12px;color:var(--text-secondary);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 @media(max-width:600px){.run-token-usage{flex-basis:100%;margin-left:25px}}

@@ -9,7 +9,7 @@ import { RunPanel } from "./components/RunPanel";
 import { displayEventMessage, eventLabel, formatLabel, kindLabel, statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
-type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[]; events?: Event[] };
+type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[] };
 type ExecutionPhase = "connecting" | "running";
 type ConversationExecutionState = {
   requestId: string;
@@ -49,6 +49,14 @@ function assistantText(value: string): string {
     .replace(/__(.*?)__/gs, "$1")
     .replace(/^\s*[*-]\s+/gm, "• ")
     .replace(/\*\*/g, "");
+}
+
+function settledReply(streamed: string, completed: string): string {
+  const visible = streamed.trim();
+  const final = completed.trim();
+  if (!visible) return completed;
+  if (!final || visible.endsWith(final)) return visible;
+  return `${visible}\n\n${final}`;
 }
 
 function errorMessage(error: unknown): string {
@@ -465,6 +473,8 @@ export function App() {
     updateDraft(targetConversationId, { message: "", selectedDatasetIds: [], uploadedFiles: [] });
     setExecution(targetConversationId, { requestId, runId: null, phase: "connecting", startedAt, progressAt: startedAt, streamingReply: "", tokenUsage: null, events: [] });
     let receivedEvents: Event[] = [];
+    let streamedReply = "";
+    let separateNextReply = false;
     const stream = api.streamMessage(
       prompt,
       targetDatasetIds,
@@ -475,13 +485,19 @@ export function App() {
       },
       (event) => {
         receivedEvents = [...receivedEvents, event];
+        if (event.event_type === "ModelResponseStarted") separateNextReply = Boolean(streamedReply.trim());
         setExecution(targetConversationId, (current) => current ? {
           ...current,
           events: [...current.events, event],
-          streamingReply: ["ModelResponseStarted", "ToolPreparing"].includes(event.event_type) ? "" : current.streamingReply,
         } : current);
       },
-      (content, tokenUsage) => setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: current.streamingReply + content, tokenUsage: tokenUsage ?? current.tokenUsage } : current),
+      (content, tokenUsage) => {
+        if (content) {
+          streamedReply += `${separateNextReply ? "\n\n" : ""}${content}`;
+          separateNextReply = false;
+        }
+        setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: streamedReply, tokenUsage: tokenUsage ?? current.tokenUsage } : current);
+      },
       targetConversationId,
       selectedModelProfile,
       () => setExecution(targetConversationId, (current) => current ? { ...current, progressAt: performance.now() } : current),
@@ -496,7 +512,7 @@ export function App() {
       if (response.result && response.run) {
         const messageId = `local-assistant-${response.result.trace_id}`;
         setRuns((current) => [response.run!, ...current.filter((item) => item.id !== response.run!.id)]);
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: response.result!.summary, kind: "execution", runId: response.run!.id, events: receivedEvents }]);
+        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: settledReply(streamedReply, response.result!.summary), kind: "execution", runId: response.run!.id }]);
         if (activeConversationRef.current === targetConversationId) {
           setResult(response.result);
           setEvents(receivedEvents);
@@ -509,7 +525,7 @@ export function App() {
           await Promise.allSettled(refreshes);
         })(), targetConversationId);
       } else {
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-assistant-${response.request_id}`, role: "assistant", content: response.message, kind: "text" }]);
+        setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-assistant-${response.request_id}`, role: "assistant", content: settledReply(streamedReply, response.message), kind: "text" }]);
         background(refreshConversations(), targetConversationId);
       }
       // 先让完成消息能从 runs 缓存派生摘要，再移除 live state；React 会在同一轮提交中
@@ -805,10 +821,6 @@ export function ProductChat({
   message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
-  const eventTypes = events.map((event) => event.event_type);
-  const latestModelStart = eventTypes.lastIndexOf("ModelResponseStarted");
-  const latestToolPreparation = eventTypes.lastIndexOf("ToolPreparing");
-  const visibleStreamingReply = latestToolPreparation > latestModelStart ? "" : streamingReply;
   const historyRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
   const wasBusyRef = useRef(busy);
@@ -840,7 +852,7 @@ export function ProductChat({
       {messages.map((item) => <ChatBubble item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
         <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={liveTokenUsage ?? runs.find((run) => run.id === activeRunId)?.token_usage} streaming={Boolean(streamingReply)} smoothTokenUsage /></div>
-        {visibleStreamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(visibleStreamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
+        {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(streamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
       </>}
     </div>}
     <div className="composer">
@@ -855,7 +867,7 @@ export function ChatBubble({ item, runs = [], datasets = [], onShowRun, onReplyT
   const run = item.kind === "execution" && item.runId ? runs.find((candidate) => candidate.id === item.runId) : undefined;
   const executionMessage = item.role === "assistant" && item.kind === "execution";
   const resources = (item.datasetIds ?? []).map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset));
-  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && (item.events?.length ? <RunProgress events={item.events} durationMs={runDurationMs(run)} status={run.status} tokenUsage={run.token_usage} /> : <CompletedRunSummary run={run} />)}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <span className="message-resource" key={dataset.id} title={dataset.path}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></span>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
+  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <span className="message-resource" key={dataset.id} title={dataset.path}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></span>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
 }
 
 export function CompletedRunSummary({ run }: { run: Run }) {
@@ -950,22 +962,19 @@ function liveProgressText(event: Event): string {
 }
 
 export function RunProgress({ events, durationMs, status, live = false, phase = "running", tokenUsage, streaming = false, smoothTokenUsage = false }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase; tokenUsage?: TokenUsage | null; streaming?: boolean; smoothTokenUsage?: boolean }) {
-  const progressEvents = events.filter((event) => !["TokenUsageUpdated", "CheckpointSaved"].includes(event.event_type));
+  const recentEvents = [...events].reverse();
+  const currentEvent = recentEvents.find((event) => event.event_type !== "TokenUsageUpdated");
   const eventUsage = events.filter((event) => event.event_type === "TokenUsageUpdated").reduce<TokenUsage | null | undefined>((current, event) => {
     const snapshot = event.payload.token_usage as TokenUsage;
     return !current || snapshot.model_calls >= current.model_calls ? snapshot : current;
   }, undefined);
   const usage = !eventUsage || (tokenUsage?.model_calls ?? -1) > eventUsage.model_calls ? tokenUsage : eventUsage;
   const connecting = live && phase === "connecting";
+  const thinking = live && currentEvent?.event_type === "ModelResponseStarted" && !streaming;
+  const generating = live && currentEvent?.event_type === "ModelResponseStarted" && streaming;
+  const activeProgress = live && currentEvent ? ACTIVE_PROGRESS_EVENTS.has(currentEvent.event_type) : false;
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
-  const rows = connecting || progressEvents.length === 0 ? [null] : progressEvents;
-  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-lines">{rows.map((event, index) => {
-    const latest = index === rows.length - 1;
-    const thinking = event?.event_type === "ModelResponseStarted";
-    const active = live && latest && (thinking || ACTIVE_PROGRESS_EVENTS.has(event?.event_type ?? ""));
-    const text = event ? (thinking ? (streaming && latest ? "正在生成回复" : "正在思考") : liveProgressText(event)) : connecting ? "正在接入 Agent Loop…" : "等待智能体事件…";
-    return <div className="run-progress-current" key={event?.id ?? "pending"}>{active || (!event && !connecting) ? <span className="run-progress-spinner" /> : <span className={`run-progress-marker ${connecting ? "waiting" : ""}`}><Icon name={connecting ? "clock" : "check"} size={11} /></span>}<span className="run-progress-text">{text}</span>{latest && <TokenUsageSummary usage={usage} animated={smoothTokenUsage} />}</div>;
-  })}</div></div>;
+  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在接入 Agent Loop…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <>{activeProgress ? <span className="run-progress-spinner" /> : <span className="run-progress-marker"><Icon name="check" size={11} /></span>}<span className="run-progress-text">{liveProgressText(currentEvent)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} animated={smoothTokenUsage} /></div></div>;
 }
 
 function DatasetPanel({ datasets, selectedDatasetIds, onToggleRequestDataset, onRegister, busy }: { datasets: Dataset[]; selectedDatasetIds: string[]; onToggleRequestDataset: (id: string) => void; onRegister: (path: string, name: string) => Promise<void>; busy: boolean }) {
