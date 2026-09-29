@@ -68,7 +68,8 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
                                model_input_tokens=128000, tool_result_recent_full=16,
                                tool_result_emergency_fraction=0.5,
-                               tool_context_tokens=6400, tool_context_max_cards=8)
+                               tool_context_tokens=6400, tool_context_max_cards=8,
+                               emergency_recent_messages=8)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
         store,

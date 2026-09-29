@@ -8,6 +8,12 @@ import logging
 import re
 from typing import Any
 
+from app.config import (
+    DEFAULT_EMERGENCY_RECENT_MESSAGES,
+    DEFAULT_SUMMARY_RECENT_MESSAGES,
+    DEFAULT_SUMMARY_TRIGGER_MESSAGES,
+    DEFAULT_SUMMARY_TRIGGER_TOKENS,
+)
 from app.core.models import ConversationMemory, ConversationMemoryEntry, Message
 from app.core.tokens import estimate_tokens
 from app.models import ModelAdapter, ModelRequest
@@ -15,9 +21,6 @@ from app.state import StateStore
 
 logger = logging.getLogger(__name__)
 
-SUMMARY_TRIGGER_MESSAGES = 12
-SUMMARY_TRIGGER_TOKENS = 6400
-SUMMARY_RECENT_MESSAGES = 8
 SUMMARY_MAX_BATCH_MESSAGES = 32
 SUMMARY_MAX_BATCH_TOKENS = 6000
 SUMMARY_TIMEOUT_SECONDS = 20
@@ -47,25 +50,32 @@ class ConversationSummarizer:
         self,
         store: StateStore,
         *,
-        trigger_messages: int = SUMMARY_TRIGGER_MESSAGES,
-        trigger_tokens: int = SUMMARY_TRIGGER_TOKENS,
-        recent_messages: int = SUMMARY_RECENT_MESSAGES,
+        trigger_messages: int = DEFAULT_SUMMARY_TRIGGER_MESSAGES,
+        trigger_tokens: int = DEFAULT_SUMMARY_TRIGGER_TOKENS,
+        recent_messages: int = DEFAULT_SUMMARY_RECENT_MESSAGES,
+        emergency_recent_messages: int = DEFAULT_EMERGENCY_RECENT_MESSAGES,
         timeout_seconds: float = SUMMARY_TIMEOUT_SECONDS,
     ) -> None:
         self.store = store
         self.trigger_messages = max(1, trigger_messages)
         self.trigger_tokens = max(1, trigger_tokens)
         self.recent_messages = max(1, recent_messages)
+        self.emergency_recent_messages = max(1, emergency_recent_messages)
         self.timeout_seconds = max(0.1, timeout_seconds)
 
     async def summarize_all_pending(
         self, conversation_id: str, user_id: str, adapter: ModelAdapter | None, *, protected_message_id: str
     ) -> bool:
-        """超限时绕过平时触发阈值，逐批覆盖最近八条之前的全部消息。"""
+        """超限时绕过平时触发阈值，逐批覆盖紧急保留窗口之前的全部消息。"""
 
         changed = False
         while await self.summarize_pending(
-            conversation_id, user_id, adapter, force=True, protected_message_id=protected_message_id
+            conversation_id,
+            user_id,
+            adapter,
+            force=True,
+            protected_message_id=protected_message_id,
+            recent_messages=self.emergency_recent_messages,
         ):
             changed = True
         return changed
@@ -78,6 +88,7 @@ class ConversationSummarizer:
         *,
         force: bool = False,
         protected_message_id: str | None = None,
+        recent_messages: int | None = None,
     ) -> bool:
         if adapter is None:
             return False
@@ -91,9 +102,10 @@ class ConversationSummarizer:
             return False
 
         unprocessed = self.store.list_messages_after(conversation_id, memory.summarized_through_message_id)
-        if len(unprocessed) <= self.recent_messages:
+        keep_recent = self.recent_messages if recent_messages is None else max(1, recent_messages)
+        if len(unprocessed) <= keep_recent:
             return False
-        eligible = unprocessed[:-self.recent_messages]
+        eligible = unprocessed[:-keep_recent]
         if protected_message_id is not None:
             protected_index = next((index for index, item in enumerate(eligible) if item.id == protected_message_id), None)
             if protected_index is not None:

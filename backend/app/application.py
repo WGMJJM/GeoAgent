@@ -28,6 +28,7 @@ from app.gis.vector import VectorService
 from app.gis.visualization import MapRenderer
 from app.memory import (
     ConversationMemoryService,
+    ConversationSummarizer,
     UserProfileService,
 )
 from app.models import ModelAdapter
@@ -63,7 +64,17 @@ class Application:
         self.shell_executor = ShellExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
         self.checkpoints = CheckpointStore(self.store)
         self.profile = UserProfileService(self.store)
-        self.conversation_memory = ConversationMemoryService(self.store, model_provider=self.get_model_adapter)
+        self.conversation_memory = ConversationMemoryService(
+            self.store,
+            summarizer=ConversationSummarizer(
+                self.store,
+                trigger_messages=self.settings.summary_trigger_messages,
+                trigger_tokens=self.settings.summary_trigger_tokens,
+                recent_messages=self.settings.summary_recent_messages,
+                emergency_recent_messages=self.settings.emergency_recent_messages,
+            ),
+            model_provider=self.get_model_adapter,
+        )
         self.model_profiles: dict[str, ModelProfile] = {}
         self.model_adapters: dict[str, ModelAdapter] = {}
         self.default_model_profile: str | None = None

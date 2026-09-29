@@ -11,6 +11,10 @@ from app.core.tokens import DEFAULT_TOKENIZER_FILE
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = PROJECT_ROOT / "backend" / ".env"
+DEFAULT_SUMMARY_RECENT_MESSAGES = 16
+DEFAULT_SUMMARY_TRIGGER_MESSAGES = 24
+DEFAULT_SUMMARY_TRIGGER_TOKENS = 51200
+DEFAULT_EMERGENCY_RECENT_MESSAGES = 8
 
 
 class Settings(BaseSettings):
@@ -30,6 +34,10 @@ class Settings(BaseSettings):
     max_tokens: int = Field(default=12800, ge=1)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     model_input_tokens: int = Field(default=128000, ge=1)
+    summary_recent_messages: int = Field(default=DEFAULT_SUMMARY_RECENT_MESSAGES, ge=1)
+    summary_trigger_messages: int = Field(default=DEFAULT_SUMMARY_TRIGGER_MESSAGES, ge=1)
+    summary_trigger_tokens: int = Field(default=DEFAULT_SUMMARY_TRIGGER_TOKENS, ge=1)
+    emergency_recent_messages: int = Field(default=DEFAULT_EMERGENCY_RECENT_MESSAGES, ge=1)
     tool_result_recent_full: int = Field(default=16, ge=1)
     tool_result_emergency_fraction: float = Field(default=0.5, gt=0, le=1)
     tool_context_tokens: int = Field(default=6400, ge=1)

@@ -311,7 +311,7 @@ class AgentLoop:
                             model_messages,
                             model_tools,
                             input_budget_tokens=self.settings.model_input_tokens,
-                            recent_messages=self.context.conversation_memory.summarizer.recent_messages,
+                            recent_messages=self.settings.emergency_recent_messages,
                             recent_results=self.settings.tool_result_recent_full,
                             count_tokens=model.count_tokens,
                         )
