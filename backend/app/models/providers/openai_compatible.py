@@ -27,6 +27,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self.supports_json_object = config.supports_json_object
         self.supports_structured_output = config.supports_json_object
         self.supports_json_schema = config.supports_json_schema
+        self._stream_tail_tasks: set[asyncio.Task[None]] = set()
         # 本地 Ollama、vLLM 等兼容服务通常不校验 API Key；官方或云端服务
         # 仍由用户在配置中填写真实密钥。OpenAI SDK 要求传入非空字符串，
         # 因此对无密钥的本地服务使用占位值，不会把它发送为业务凭据。
@@ -73,6 +74,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         input_tokens = None
         output_tokens = None
         finish_reason = None
+        tail_handed_off = False
         async with asyncio.timeout(self.config.timeout_seconds):
             stream = await self.client.chat.completions.create(
                 model=self.config.model,
@@ -112,11 +114,23 @@ class OpenAICompatibleAdapter(ModelAdapter):
                                 if raw_call.function.arguments:
                                     call["function"]["arguments"] += raw_call.function.arguments
                     # include_usage 的统计包通常位于 finish_reason 之后，choices 为空。
-                    # 正文即时推送，决策聚合到统计包或正常 EOF；仍受现有请求超时约束。
-                    if finish_reason and usage is not None:
-                        break
+                    # finish_reason 已明确正文或工具调用完整；尾部统计不再阻塞 Agent。
+                    if finish_reason:
+                        if input_tokens is None or output_tokens is None:
+                            self._handoff_stream_tail(stream, request.on_usage)
+                            tail_handed_off = True
+                        yield ModelStreamChunk(
+                            tool_calls=_restore_tool_names([tool_calls[index] for index in sorted(tool_calls)], alias_to_name),
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            model=model,
+                            finish_reason=finish_reason,
+                            done=True,
+                        )
+                        return
             finally:
-                await stream.close()
+                if not tail_handed_off:
+                    await stream.close()
         # 某些兼容服务没有发送 finish_reason，但正常关闭了流；仍然给上层
         # 一个明确 terminal chunk，兼容旧服务，同时不会把“正文已到齐”当作结束。
         yield ModelStreamChunk(
@@ -128,7 +142,32 @@ class OpenAICompatibleAdapter(ModelAdapter):
             done=True,
         )
 
+    def _handoff_stream_tail(self, stream, on_usage) -> None:
+        task = asyncio.create_task(self._receive_stream_tail(stream, on_usage))
+        self._stream_tail_tasks.add(task)
+        task.add_done_callback(self._stream_tail_tasks.discard)
+
+    async def _receive_stream_tail(self, stream, on_usage) -> None:
+        try:
+            async with asyncio.timeout(self.config.timeout_seconds):
+                async for chunk in stream:
+                    usage = getattr(chunk, "usage", None)
+                    if usage is not None:
+                        if on_usage is not None:
+                            await on_usage(usage.prompt_tokens, usage.completion_tokens)
+                        break
+        except Exception:
+            # finish_reason 之后的统计属于补充信息，失败不能反向改变已完成的模型回复。
+            pass
+        finally:
+            await stream.close()
+
     async def close(self) -> None:
+        tasks = tuple(self._stream_tail_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.client.close()
 
 

@@ -142,6 +142,7 @@ class _FakeCompletions:
 def _adapter(chunks):
     adapter = object.__new__(OpenAICompatibleAdapter)
     adapter.config = ModelConfig(model="fake", timeout_seconds=1)
+    adapter._stream_tail_tasks = set()
     adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(chunks)))
     return adapter
 
@@ -228,25 +229,73 @@ async def test_openai_stream_emits_terminal_chunk_when_provider_closes_without_f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tokens", [(123, 45), (0, 0)])
-async def test_stream_reads_usage_packet_after_finish_without_buffering_text(tokens):
+async def test_stream_receives_usage_packet_in_background_after_finish(tokens):
+    received = []
+    usage_received = asyncio.Event()
+
+    async def on_usage(input_tokens, output_tokens):
+        received.append((input_tokens, output_tokens))
+        usage_received.set()
+
     adapter = _adapter([
         SimpleNamespace(model="fake", usage=None, choices=[_choice(content="第一段")]),
         SimpleNamespace(model="fake", usage=None, choices=[_choice(content="第二段", finish_reason="stop")]),
         SimpleNamespace(model="fake", usage=SimpleNamespace(prompt_tokens=tokens[0], completion_tokens=tokens[1]), choices=[]),
     ])
-    stream = adapter.stream(ModelRequest(messages=[], response_format={"type": "json_object"}))
+    stream = adapter.stream(ModelRequest(messages=[], response_format={"type": "json_object"}, on_usage=on_usage))
     assert (await anext(stream)).content == "第一段"
     assert (await anext(stream)).content == "第二段"
     terminal = await anext(stream)
     await stream.aclose()
+    await asyncio.wait_for(usage_received.wait(), timeout=0.5)
 
     assert terminal.done and terminal.finish_reason == "stop"
-    assert (terminal.input_tokens, terminal.output_tokens) == tokens
+    assert (terminal.input_tokens, terminal.output_tokens) == (None, None)
+    assert received == [tokens]
     completions = adapter.client.chat.completions
     assert completions.closed
     assert len(completions.requests) == 1
     assert completions.requests[0]["stream_options"] == {"include_usage": True}
     assert completions.requests[0]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_stream_terminal_does_not_wait_for_delayed_usage_packet(monkeypatch):
+    release_usage = asyncio.Event()
+    usage_received = asyncio.Event()
+    closed = []
+
+    class DelayedUsageStream:
+        async def __aiter__(self):
+            yield SimpleNamespace(model="fake", usage=None, choices=[_choice(content="完整回答")])
+            yield SimpleNamespace(model="fake", usage=None, choices=[_choice(finish_reason="stop")])
+            await release_usage.wait()
+            yield SimpleNamespace(model="fake", usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2), choices=[])
+
+        async def close(self):
+            closed.append(True)
+
+    adapter = _adapter([])
+
+    async def create(**_kwargs):
+        return DelayedUsageStream()
+
+    async def on_usage(_input_tokens, _output_tokens):
+        usage_received.set()
+
+    monkeypatch.setattr(adapter.client.chat.completions, "create", create)
+    stream = adapter.stream(ModelRequest(messages=[], on_usage=on_usage))
+    assert (await anext(stream)).content == "完整回答"
+    terminal = await asyncio.wait_for(anext(stream), timeout=0.1)
+    await stream.aclose()
+
+    assert terminal.done and terminal.finish_reason == "stop"
+    assert not usage_received.is_set()
+
+    release_usage.set()
+    await asyncio.wait_for(usage_received.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    assert closed == [True]
 
 
 @pytest.mark.asyncio

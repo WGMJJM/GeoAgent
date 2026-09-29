@@ -327,11 +327,27 @@ class AgentLoop:
                                 trace_id=current.id,
                             ),
                         )
+                    usage_run_id = current.id
+
+                    async def record_delayed_usage(input_tokens: int, output_tokens: int) -> None:
+                        updates = self.store.add_run_token_usage(usage_run_id, TokenUsage(
+                            reported_input_tokens=input_tokens,
+                            reported_output_tokens=output_tokens,
+                            reported_calls=1,
+                        ))
+                        for measured_run in updates:
+                            await self.trace.emit(
+                                measured_run.id, EventType.TOKEN_USAGE_UPDATED, "模型累计用量已更新",
+                                agent_id=measured_run.agent_id,
+                                payload={"token_usage": measured_run.token_usage.model_dump(mode="json")},
+                            )
+
                     model_request = ModelRequest(
                         messages=model_messages,
                         tools=model_tools,
                         max_tokens=self.settings.max_tokens,
                         reasoning_effort=request.reasoning_effort,
+                        on_usage=record_delayed_usage,
                     )
                     await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在思考",
                                           agent_id=current.agent_id, payload={"turn": current.turn_count})

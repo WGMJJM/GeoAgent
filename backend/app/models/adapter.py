@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.core.tokens import estimate_tokens
 from app.core.models import ReasoningEffort
+from app.core.tokens import estimate_tokens
 
 
 class ModelRequest(BaseModel):
@@ -21,6 +21,7 @@ class ModelRequest(BaseModel):
     max_tokens: int = 12800
     response_format: dict[str, Any] | None = None
     reasoning_effort: ReasoningEffort | None = None
+    on_usage: Callable[[int, int], Awaitable[None]] | None = Field(default=None, exclude=True)
 
 
 class ModelResponse(BaseModel):
