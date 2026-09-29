@@ -411,6 +411,15 @@ class AgentLoop:
                             "tool_calls": assistant_calls,
                         }
                     )
+                if pending:
+                    tool_names = list(dict.fromkeys(item[1] for item in pending))
+                    await self.trace.emit(
+                        current.id,
+                        EventType.TOOL_PREPARING,
+                        f"正在准备 {len(pending)} 个工具调用",
+                        payload={"tools": tool_names, "tool_count": len(pending)},
+                        agent_id=current.agent_id,
+                    )
                 ask_question: str | None = None
                 delegate_wait: ToolResult | None = None
                 execution_uncertain = False
@@ -481,6 +490,13 @@ class AgentLoop:
                             ask_question = str(arguments["question"]).strip()
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.BLOCKED, output={"waiting_for_user": True, "question": ask_question})
                     elif name == "tool.search":
+                        await self.trace.emit(
+                            current.id,
+                            EventType.TOOL_STARTED,
+                            "正在检索可用工具",
+                            payload={"tool": name},
+                            agent_id=current.agent_id,
+                        )
                         problem = validate_arguments(arguments, TOOL_SEARCH_DEFINITION["function"]["parameters"])
                         if problem:
                             result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
@@ -510,7 +526,21 @@ class AgentLoop:
                                     next_activations = set()
                                 next_activations.update(item["name"] for item in search_output["tools"])
                                 _remember_tools(discovered_names, reversed([item["name"] for item in search_output["tools"]]))
+                        await self.trace.emit(
+                            current.id,
+                            EventType.TOOL_COMPLETED if result.status is ToolStatus.SUCCESS else EventType.TOOL_FAILED,
+                            "工具检索完成" if result.status is ToolStatus.SUCCESS else "工具检索失败",
+                            payload={"tool": name, "status": result.status.value},
+                            agent_id=current.agent_id,
+                        )
                     elif name == "conversation.search_history":
+                        await self.trace.emit(
+                            current.id,
+                            EventType.TOOL_STARTED,
+                            "正在检索会话历史",
+                            payload={"tool": name},
+                            agent_id=current.agent_id,
+                        )
                         problem = validate_arguments(arguments, SEARCH_HISTORY_TOOL["function"]["parameters"])
                         if current.parent_run_id:
                             result = _blocked_result(persisted_id, "SUBAGENT_HISTORY_FORBIDDEN", "子任务不能读取主会话历史。")
@@ -529,6 +559,13 @@ class AgentLoop:
                                 status=ToolStatus.SUCCESS,
                                 output=[{"message_id": item.id, "role": item.role, "content": item.content[:3000]} for item in found],
                             )
+                        await self.trace.emit(
+                            current.id,
+                            EventType.TOOL_COMPLETED if result.status is ToolStatus.SUCCESS else EventType.TOOL_FAILED,
+                            "会话历史检索完成" if result.status is ToolStatus.SUCCESS else "会话历史检索失败",
+                            payload={"tool": name, "status": result.status.value},
+                            agent_id=current.agent_id,
+                        )
                     else:
                         try:
                             registered = self.registry.get(name)

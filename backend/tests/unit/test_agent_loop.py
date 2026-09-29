@@ -158,7 +158,12 @@ async def test_streamed_tool_batch_waits_for_terminal_and_does_not_duplicate_ans
     assert run.token_usage.reported_input_tokens == 300
     assert run.token_usage.reported_output_tokens == 30
     assert run.token_usage.model_calls == 2
-    assert sum(event.event_type == "ModelResponseStarted" for event in store.list_events(run.id)) == 2
+    events = store.list_events(run.id)
+    assert sum(event.event_type == "ModelResponseStarted" for event in events) == 2
+    preparing = next(index for index, event in enumerate(events) if event.event_type == "ToolPreparing")
+    started = next(index for index, event in enumerate(events) if event.event_type == "ToolStarted")
+    assert preparing < started
+    assert events[preparing].payload == {"tools": ["dataset.list"], "tool_count": 1}
 
 
 @pytest.mark.asyncio

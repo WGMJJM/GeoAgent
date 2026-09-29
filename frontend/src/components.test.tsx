@@ -51,7 +51,7 @@ describe("运行累计 Token 用量", () => {
     expect(screen.getByText("输入 0.90k · 输出 0.10k")).toBeTruthy();
     rerender(<LiveExecutionStatus phase="running" events={[progress, measured, measured]} durationMs={2000} />);
     expect(screen.getByText("输入 1.20k · 输出 0.25k")).toBeTruthy();
-    expect(screen.getByText("工具开始执行：检查栅格")).toBeTruthy();
+    expect(screen.getByText("正在执行：检查栅格")).toBeTruthy();
     expect(screen.queryByText(/模型累计用量已更新/)).toBeNull();
     const older: Event = { ...measured, id: "older", payload: { token_usage: { ...usage, model_calls: 1, reported_calls: 1, reported_input_tokens: 100 } } };
     rerender(<LiveExecutionStatus phase="running" events={[progress, measured, older]} durationMs={2000} />);
@@ -191,6 +191,15 @@ describe("统一聊天输入区", () => {
     render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={6_100} events={[started]} />);
     expect(screen.getByText("正在思考")).toBeTruthy();
     expect(screen.queryByText("模型正在生成回复：正在思考")).toBeNull();
+  });
+
+  it("模型返回工具动作后立即切换为准备状态", () => {
+    const thinking: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 } };
+    const preparing: Event = { id: "event-tool", run_id: "run-1", event_type: "ToolPreparing", message: "正在准备 1 个工具调用", sequence: 4, timestamp: "2026-01-01T10:00:07.000Z", payload: { tools: ["raster.slope"], tool_count: 1 } };
+    const { container } = render(<LiveExecutionStatus phase="running" events={[thinking, preparing]} durationMs={7_100} />);
+    expect(screen.getByText("正在准备：计算坡度")).toBeTruthy();
+    expect(screen.queryByText("正在思考")).toBeNull();
+    expect(container.querySelector(".run-progress-spinner")).toBeTruthy();
   });
 
   it("新消息和流式增量自动跟随到底部，用户上翻后暂停跟随", () => {

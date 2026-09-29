@@ -60,6 +60,7 @@ export const EVENT_LABELS: Record<string, string> = {
   DecisionMade: "已确定下一步动作",
   TokenUsageUpdated: "Token 用量更新",
   ModelResponseStarted: "模型正在生成回复",
+  ToolPreparing: "正在准备工具",
   SubTaskCreated: "已创建子任务",
   SubAgentSpawned: "已启动子智能体",
   ToolStarted: "工具开始执行",
@@ -88,6 +89,10 @@ export const EVENT_LABELS: Record<string, string> = {
 };
 
 export const TOOL_LABELS: Record<string, string> = {
+  "tool.search": "检索可用工具",
+  "conversation.search_history": "检索会话历史",
+  "agent.ask_user": "询问用户",
+  "agent.delegate": "委派子任务",
   "dataset.list": "列出数据集",
   "dataset.inspect": "检查数据集",
   "dataset.register": "登记数据集",
