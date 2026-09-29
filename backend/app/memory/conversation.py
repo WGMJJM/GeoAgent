@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 import logging
-import re
-from collections.abc import Callable, Iterable
-from datetime import UTC, datetime
+from collections.abc import Callable
 
 from app.core.models import (
     AgentRequest,
-    AgentResult,
     ConversationMemory,
-    ConversationMemoryEntry,
     Message,
-    Run,
-    RunStatus,
 )
 from app.models import ModelAdapter
 from app.state import StateStore
@@ -25,9 +19,6 @@ logger = logging.getLogger(__name__)
 
 
 class ConversationMemoryService:
-    MAX_ENTRIES = 20
-    MAX_CONTENT_LENGTH = 500
-
     def __init__(
         self,
         store: StateStore,
@@ -96,78 +87,6 @@ class ConversationMemoryService:
         self.store.save_conversation_memory(memory)
         return self.get(conversation_id, user_id) or memory
 
-    def apply_result(self, request: AgentRequest, run: Run, result: AgentResult) -> ConversationMemory | None:
-        if not request.user_id:
-            return None
-        memory = self.get_or_create(request.conversation_id, request.user_id)
-        stored_run = self.store.get_run(run.id)
-        if (
-            stored_run is None
-            or stored_run.conversation_id != request.conversation_id
-            or not self.store.run_belongs_to_user(stored_run.id, request.user_id)
-        ):
-            return memory
-
-        references: list[ConversationMemoryEntry] = []
-        for dataset_id in result.datasets:
-            dataset = self.store.get_dataset_for_user(dataset_id, request.user_id)
-            if dataset is None:
-                continue
-            references.append(
-                ConversationMemoryEntry(
-                    content=f"数据集：{dataset.name}（{dataset.kind.value}）",
-                    source_task_id=stored_run.task_id,
-                    source_run_id=stored_run.id,
-                    reference_type="dataset",
-                    reference_id=dataset.id,
-                )
-            )
-        for artifact_id in result.artifacts:
-            artifact = self.store.get_artifact_for_user(artifact_id, request.user_id)
-            if artifact is None:
-                continue
-            references.append(
-                ConversationMemoryEntry(
-                    content=f"结果文件：{artifact.name}",
-                    source_task_id=stored_run.task_id,
-                    source_run_id=stored_run.id,
-                    reference_type="artifact",
-                    reference_id=artifact.id,
-                )
-            )
-
-        unresolved: list[ConversationMemoryEntry] = []
-        if stored_run.status in {RunStatus.WAITING_USER, RunStatus.WAITING_APPROVAL} and result.error in {
-            "WAITING_USER",
-            "NEEDS_CLARIFICATION",
-            "APPROVAL_REQUIRED",
-        }:
-            unresolved.append(
-                ConversationMemoryEntry(
-                    content=_clip(result.summary),
-                    source_task_id=stored_run.task_id,
-                    source_run_id=stored_run.id,
-                )
-            )
-
-        unresolved_topics = memory.unresolved_topics
-        if stored_run.status in {RunStatus.COMPLETED, RunStatus.PARTIAL_COMPLETED} and stored_run.task_id:
-            source_run_id = stored_run.metadata.get("continued_from") or stored_run.metadata.get("approved_from")
-            if source_run_id:
-                unresolved_topics = [item for item in unresolved_topics if item.source_run_id != source_run_id]
-            elif len(unresolved_topics) == 1:
-                # 兼容旧数据：只有唯一待确认项且同一 Task 完成时才清除。
-                unresolved_topics = [item for item in unresolved_topics if item.source_task_id != stored_run.task_id]
-
-        updated = self._add_entries(
-            memory,
-            important_references=references,
-            unresolved_topics=unresolved,
-            unresolved_topics_override=unresolved_topics,
-        )
-        self.store.save_conversation_memory(updated)
-        return updated
-
     async def _summarize_after_assistant_persisted(self, message: Message) -> None:
         """摘要失败仅记录日志，不改变已经持久化的用户对话结果。"""
 
@@ -222,51 +141,5 @@ class ConversationMemoryService:
             limit=limit,
             exclude_message_ids=exclude_message_ids,
         )
-
-    def _add_entries(
-        self,
-        memory: ConversationMemory,
-        *,
-        important_references: Iterable[ConversationMemoryEntry] = (),
-        unresolved_topics: Iterable[ConversationMemoryEntry] = (),
-        unresolved_topics_override: list[ConversationMemoryEntry] | None = None,
-    ) -> ConversationMemory:
-        references = _append_entries(memory.important_references, important_references)
-        unresolved_base = unresolved_topics_override if unresolved_topics_override is not None else memory.unresolved_topics
-        unresolved = _append_entries(unresolved_base, unresolved_topics)
-        return memory.model_copy(
-            update={
-                "important_references": references[-self.MAX_ENTRIES :],
-                "unresolved_topics": unresolved[-self.MAX_ENTRIES :],
-                "updated_at": datetime.now(UTC),
-            }
-        )
-
-
-def _append_entries(
-    current: Iterable[ConversationMemoryEntry],
-    incoming: Iterable[ConversationMemoryEntry],
-) -> list[ConversationMemoryEntry]:
-    result = list(current)
-    for item in incoming:
-        if not item.content.strip() or any(_same_entry(existing, item) for existing in result):
-            continue
-        result.append(item.model_copy(update={"content": _clip(item.content)}))
-    return result
-
-
-def _same_entry(left: ConversationMemoryEntry, right: ConversationMemoryEntry) -> bool:
-    if left.reference_type and right.reference_type and left.reference_type == right.reference_type and left.reference_id == right.reference_id:
-        return True
-    return (
-        left.content.casefold() == right.content.casefold()
-        and left.source_message_id == right.source_message_id
-        and left.source_run_id == right.source_run_id
-    )
-
-
-def _clip(value: str, limit: int = ConversationMemoryService.MAX_CONTENT_LENGTH) -> str:
-    return re.sub(r"\s+", " ", value).strip()[:limit]
-
 
 __all__ = ["ConversationMemoryService"]

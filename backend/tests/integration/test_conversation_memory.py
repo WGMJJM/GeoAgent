@@ -2,10 +2,8 @@ import asyncio
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.agent.context import SYSTEM_PROMPT, USER_MEMORY_PREFIX, prepare_model_messages
-from app.api import create_app
 from app.core.models import (
     AgentRequest,
     AgentResult,
@@ -25,12 +23,6 @@ from app.core.models import (
     WorkingMemory,
 )
 from app.models import ModelAdapter, ModelRequest, ModelResponse
-
-
-def _register(client: TestClient, username: str) -> dict:
-    response = client.post("/api/v1/auth/register", json={"username": username, "password": "password123", "display_name": username})
-    assert response.status_code == 200, response.text
-    return response.json()
 
 
 class _SummaryModel(ModelAdapter):
@@ -98,70 +90,6 @@ async def _save_messages(application, conversation_id: str, user_id: str, user_t
     await application.conversation_memory.save_message(
         Message(conversation_id=conversation_id, role="assistant", content=assistant_text), user_id=user_id
     )
-
-
-def test_conversation_memory_survives_task_boundary_and_isolated_by_conversation(application):
-    with TestClient(create_app(application)) as client_a, TestClient(create_app(application)) as client_b:
-        user_a = _register(client_a, "conversation-a")
-        user_b = _register(client_b, "conversation-b")
-        conversation_a = application.conversations.create("会话 A", user_id=user_a["id"])
-        conversation_b = application.conversations.create("会话 B", user_id=user_b["id"])
-        task_a = Task(goal="任务 A", conversation_id=conversation_a.id)
-        application.store.save_task(task_a)
-        run_a = Run(conversation_id=conversation_a.id, task_id=task_a.id, agent_id="main", status=RunStatus.COMPLETED)
-        application.store.save_run(run_a)
-        request = AgentRequest(user_id=user_a["id"], conversation_id=conversation_a.id, user_input="这次会话后续都以 2020 年为基准")
-        memory = application.conversation_memory.get_or_create(conversation_a.id, user_a["id"])
-        assert memory is not None
-        assert memory.key_facts == []
-        application.conversation_memory.apply_result(request, run_a, AgentResult(agent_id="main", task_id=task_a.id, status=AgentResultStatus.SUCCESS, summary="完成", trace_id=run_a.id))
-        task_b = Task(goal="任务 B", conversation_id=conversation_a.id)
-        application.store.save_task(task_b)
-        run_b = Run(conversation_id=conversation_a.id, task_id=task_b.id, agent_id="main", status=RunStatus.COMPLETED)
-        continued = application.conversation_memory.get(conversation_a.id, user_a["id"])
-        assert continued is not None
-        assert continued.key_facts == []
-        assert application.store.get_conversation_memory_for_user(conversation_b.id, user_b["id"]) is None
-        assert application.store.get_working_memory(task_a.id) is None
-        application.store.save_working_memory(WorkingMemory(task_id=task_b.id, conversation_id=conversation_a.id))
-        assert application.store.get_working_memory(task_b.id) is not None
-        assert application.store.get_working_memory(task_a.id) is None
-        assert run_b.task_id == task_b.id
-
-
-def test_conversation_memory_deduplicates_results_and_resolves_blocked_topic(application):
-    with TestClient(create_app(application)) as client:
-        user = _register(client, "conversation-dedupe")
-        conversation = application.conversations.create("去重", user_id=user["id"])
-        task = Task(goal="字段选择", conversation_id=conversation.id)
-        application.store.save_task(task)
-        run = Run(conversation_id=conversation.id, task_id=task.id, agent_id="main", status=RunStatus.WAITING_USER)
-        application.store.save_run(run)
-        request = AgentRequest(user_id=user["id"], conversation_id=conversation.id, user_input="请选择人口字段")
-        blocked = AgentResult(agent_id="main", task_id=task.id, status=AgentResultStatus.BLOCKED, summary="请选择人口字段", error="WAITING_USER", trace_id=run.id)
-        application.conversation_memory.apply_result(request, run, blocked)
-        application.conversation_memory.apply_result(request, run, blocked)
-        first = application.conversation_memory.get(conversation.id, user["id"])
-        assert first is not None
-        assert len(first.unresolved_topics) == 1
-        application.store.save_dataset(Dataset(id="ds-final", name="人口结果", kind=DatasetKind.VECTOR, path="人口结果.geojson", format="GeoJSON"))
-        success_run = run.model_copy(update={"id": "run-resolved", "status": RunStatus.COMPLETED})
-        application.store.save_run(success_run)
-        success = AgentResult(agent_id="main", task_id=task.id, status=AgentResultStatus.SUCCESS, summary="已完成", datasets=["ds-final"], trace_id=success_run.id)
-        application.conversation_memory.apply_result(request, success_run, success)
-        application.conversation_memory.apply_result(request, success_run, success)
-        resolved = application.conversation_memory.get(conversation.id, user["id"])
-        assert resolved is not None
-        assert resolved.unresolved_topics == []
-        assert len([item for item in resolved.important_references if item.reference_id == "ds-final"]) == 1
-
-        error_run = run.model_copy(update={"id": "run-crs", "status": RunStatus.FAILED})
-        application.store.save_run(error_run)
-        error = AgentResult(agent_id="main", task_id=task.id, status=AgentResultStatus.FAILED, summary="CRS 错误", error="CRS_MISSING", trace_id=error_run.id)
-        application.conversation_memory.apply_result(request, error_run, error)
-        after_error = application.conversation_memory.get(conversation.id, user["id"])
-        assert after_error is not None
-        assert after_error.unresolved_topics == []
 
 
 def test_message_persistence_precedes_summary_and_failure_does_not_trigger_it(application, monkeypatch):
