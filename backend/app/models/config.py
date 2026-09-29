@@ -1,6 +1,7 @@
 """模型配置。"""
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -10,6 +11,7 @@ from app.core.tokens import DEFAULT_TOKENIZER_FILE
 
 class ModelConfig(BaseModel):
     provider: str = "openai-compatible"
+    wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     base_url: str | None = None
     api_key: str | None = None
     model: str | None = None
@@ -30,6 +32,7 @@ class ModelProfile(BaseModel):
     id: str = Field(min_length=1)
     label: str = Field(min_length=1)
     provider: str = "openai-compatible"
+    wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     base_url: str | None = None
     api_key: str | None = None
     model: str = Field(min_length=1)
@@ -53,6 +56,7 @@ class ModelProfile(BaseModel):
     def as_config(self, *, tokenizer_file: Path = DEFAULT_TOKENIZER_FILE) -> ModelConfig:
         return ModelConfig(
             provider=self.provider,
+            wire_api=self.wire_api,
             base_url=self.base_url,
             api_key=self.api_key,
             model=self.model,

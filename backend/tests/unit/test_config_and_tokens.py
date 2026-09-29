@@ -13,6 +13,7 @@ from app.config import Settings
 from app.core.tokens import DEFAULT_TOKENIZER_FILE, _load_tokenizer, estimate_tokens
 from app.models.config import ModelProfile
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
+from app.models.providers.openai_responses import OpenAIResponsesAdapter
 
 DEEPSEEK_TOKENIZER_FILE = Path(__file__).resolve().parents[2] / "resources/tokenizers/deepseek-v4.1.json"
 
@@ -102,6 +103,7 @@ async def test_gpt_6_sol_profile_can_be_selected_as_default_without_ultra(tmp_pa
             "base_url": "https://example.invalid/v1",
             "api_key": "placeholder",
             "model": "gpt-6-sol",
+            "wire_api": "responses",
             "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
             "default_reasoning_effort": "medium",
             "default": True,
@@ -112,6 +114,9 @@ async def test_gpt_6_sol_profile_can_be_selected_as_default_without_ultra(tmp_pa
     try:
         assert application.default_model_profile == "gpt-6-sol"
         profile = application.model_profiles["gpt-6-sol"]
+        assert profile.wire_api == "responses"
+        assert isinstance(application.get_model_adapter("gpt-6-sol"), OpenAIResponsesAdapter)
+        assert isinstance(application.get_model_adapter("qwen"), OpenAICompatibleAdapter)
         assert profile.reasoning_efforts == ["low", "medium", "high", "xhigh", "max"]
         assert "ultra" not in profile.reasoning_efforts
     finally:

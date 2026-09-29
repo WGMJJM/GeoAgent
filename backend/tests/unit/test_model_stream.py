@@ -6,6 +6,7 @@ import pytest
 from app.models import ModelRequest, ModelResponse
 from app.models.config import ModelConfig
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
+from app.models.providers.openai_responses import OpenAIResponsesAdapter
 
 
 def _tool_definition(name):
@@ -325,3 +326,97 @@ async def test_stream_timeout_closes_connection_and_never_emits_terminal(monkeyp
     with pytest.raises(TimeoutError):
         await anext(stream)
     assert closed == [True]
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_converts_tools_history_reasoning_and_json_format():
+    requests = []
+    response = SimpleNamespace(
+        model="gpt-6-sol",
+        status="completed",
+        incomplete_details=None,
+        output_text="",
+        output=[SimpleNamespace(type="function_call", call_id="call-new", name="dataset__inspect", arguments='{"dataset_id":"ds_1"}')],
+        usage=SimpleNamespace(input_tokens=321, output_tokens=45),
+    )
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return response
+
+    adapter = object.__new__(OpenAIResponsesAdapter)
+    adapter.config = ModelConfig(
+        model="gpt-6-sol",
+        wire_api="responses",
+        reasoning_efforts=["low", "medium", "high", "xhigh", "max"],
+    )
+    adapter.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    result = await adapter.complete(ModelRequest(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call-old", "type": "function", "function": {"name": "dataset.inspect", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-old", "content": "已完成"},
+        ],
+        tools=[_tool_definition("dataset.inspect")],
+        response_format={"type": "json_object"},
+        reasoning_effort="xhigh",
+    ))
+
+    sent = requests[0]
+    assert sent["tools"][0]["name"] == "dataset__inspect"
+    assert "function" not in sent["tools"][0]
+    assert sent["input"][1] == {"type": "function_call", "call_id": "call-old", "name": "dataset__inspect", "arguments": "{}"}
+    assert sent["input"][2] == {"type": "function_call_output", "call_id": "call-old", "output": "已完成"}
+    assert sent["reasoning"] == {"effort": "xhigh"}
+    assert sent["text"] == {"format": {"type": "json_object"}}
+    assert "temperature" not in sent
+    assert result.tool_calls[0]["function"]["name"] == "dataset.inspect"
+    assert (result.input_tokens, result.output_tokens, result.finish_reason) == (321, 45, "tool_calls")
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_streams_text_then_publishes_terminal_usage():
+    final = SimpleNamespace(
+        model="gpt-6-sol",
+        status="completed",
+        incomplete_details=None,
+        output_text="你好",
+        output=[],
+        usage=SimpleNamespace(input_tokens=12, output_tokens=3),
+    )
+    events = [
+        SimpleNamespace(type="response.output_text.delta", delta="你"),
+        SimpleNamespace(type="response.output_text.delta", delta="好"),
+        SimpleNamespace(type="response.completed", response=final),
+    ]
+
+    class Stream:
+        closed = False
+
+        async def __aiter__(self):
+            for event in events:
+                yield event
+
+        async def close(self):
+            self.closed = True
+
+    stream = Stream()
+    requests = []
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return stream
+
+    adapter = object.__new__(OpenAIResponsesAdapter)
+    adapter.config = ModelConfig(model="gpt-6-sol", wire_api="responses", timeout_seconds=1)
+    adapter.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    chunks = [chunk async for chunk in adapter.stream(ModelRequest(messages=[{"role": "user", "content": "你好"}]))]
+
+    assert "".join(chunk.content for chunk in chunks) == "你好"
+    assert requests[0]["stream"] is True
+    assert chunks[-1].done and chunks[-1].finish_reason == "stop"
+    assert (chunks[-1].input_tokens, chunks[-1].output_tokens) == (12, 3)
+    assert stream.closed

@@ -32,7 +32,7 @@ from app.memory import (
 )
 from app.models import ModelAdapter
 from app.models.config import ModelProfile
-from app.models.providers import OpenAICompatibleAdapter
+from app.models.providers import OpenAICompatibleAdapter, OpenAIResponsesAdapter
 from app.observability import EventBus, Metrics, TraceRecorder
 from app.run import RunManager
 from app.run.checkpoints import CheckpointStore
@@ -186,7 +186,8 @@ class Application:
             if profile.id in self.model_profiles:
                 raise ValueError(f"模型配置的编号重复：{profile.id}")
             self.model_profiles[profile.id] = profile
-            adapter = OpenAICompatibleAdapter(profile.as_config(tokenizer_file=self.settings.tokenizer_file))
+            config = profile.as_config(tokenizer_file=self.settings.tokenizer_file)
+            adapter = OpenAIResponsesAdapter(config) if profile.wire_api == "responses" else OpenAICompatibleAdapter(config)
             self.model_adapters[profile.id] = adapter
 
         if profiles:
@@ -216,6 +217,7 @@ class Application:
                 "id": profile.id,
                 "label": profile.label,
                 "provider": profile.provider,
+                "wire_api": profile.wire_api,
                 "base_url": profile.base_url,
                 "model": profile.model,
                 "timeout_seconds": profile.timeout_seconds,
