@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import re
 
 from openai import AsyncOpenAI
 
 from app.core.tokens import estimate_tokens
 from app.models.adapter import ModelAdapter, ModelRequest, ModelResponse, ModelStreamChunk
 from app.models.config import ModelConfig
+
+_PROVIDER_TOOL_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
@@ -34,18 +38,20 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         reasoning_effort = _reasoning_effort(self.config, request)
+        tools, name_to_alias, alias_to_name = _provider_tools(request.tools)
         async with asyncio.timeout(self.config.timeout_seconds):
             response = await self.client.chat.completions.create(
                 model=self.config.model,
-                messages=request.messages,
-                tools=request.tools or None if _capability(self, "supports_tools", True) else None,
+                messages=_provider_messages(request.messages, name_to_alias),
+                tools=tools or None if _capability(self, "supports_tools", True) else None,
                 response_format=request.response_format if _capability(self, "supports_json_object", True) or _capability(self, "supports_json_schema", False) else None,
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
                 **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             )
         message = response.choices[0].message
-        return ModelResponse(content=message.content or "", tool_calls=[call.model_dump() for call in (message.tool_calls or [])], input_tokens=response.usage.prompt_tokens if response.usage else None, output_tokens=response.usage.completion_tokens if response.usage else None, model=response.model, finish_reason=response.choices[0].finish_reason)
+        tool_calls = _restore_tool_names([call.model_dump() for call in (message.tool_calls or [])], alias_to_name)
+        return ModelResponse(content=message.content or "", tool_calls=tool_calls, input_tokens=response.usage.prompt_tokens if response.usage else None, output_tokens=response.usage.completion_tokens if response.usage else None, model=response.model, finish_reason=response.choices[0].finish_reason)
 
     async def stream(self, request: ModelRequest):
         if not _capability(self, "supports_stream", True):
@@ -62,6 +68,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return
         tool_calls: dict[int, dict] = {}
         reasoning_effort = _reasoning_effort(self.config, request)
+        tools, name_to_alias, alias_to_name = _provider_tools(request.tools)
         model = None
         input_tokens = None
         output_tokens = None
@@ -69,8 +76,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         async with asyncio.timeout(self.config.timeout_seconds):
             stream = await self.client.chat.completions.create(
                 model=self.config.model,
-                messages=request.messages,
-                tools=request.tools or None if _capability(self, "supports_tools", True) else None,
+                messages=_provider_messages(request.messages, name_to_alias),
+                tools=tools or None if _capability(self, "supports_tools", True) else None,
                 response_format=request.response_format if _capability(self, "supports_json_object", True) or _capability(self, "supports_json_schema", False) else None,
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
@@ -113,7 +120,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         # 某些兼容服务没有发送 finish_reason，但正常关闭了流；仍然给上层
         # 一个明确 terminal chunk，兼容旧服务，同时不会把“正文已到齐”当作结束。
         yield ModelStreamChunk(
-            tool_calls=[tool_calls[index] for index in sorted(tool_calls)],
+            tool_calls=_restore_tool_names([tool_calls[index] for index in sorted(tool_calls)], alias_to_name),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             model=model,
@@ -137,3 +144,50 @@ def _reasoning_effort(config: ModelConfig, request: ModelRequest):
     if effort and effort not in config.reasoning_efforts:
         raise ValueError(f"模型 {config.model} 不支持思考程度 {effort}")
     return effort
+
+
+def _provider_tools(tools: list[dict]) -> tuple[list[dict], dict[str, str], dict[str, str]]:
+    """把内部命名空间转换为 OpenAI 兼容接口普遍接受的函数名。"""
+
+    provider_tools = copy.deepcopy(tools)
+    name_to_alias: dict[str, str] = {}
+    alias_to_name: dict[str, str] = {}
+    for tool in provider_tools:
+        function = tool.get("function")
+        if not isinstance(function, dict) or not isinstance(function.get("name"), str):
+            continue
+        name = function["name"]
+        alias = _provider_tool_name(name)
+        existing = alias_to_name.get(alias)
+        if existing is not None and existing != name:
+            raise ValueError(f"工具名称映射冲突：{existing} 与 {name}")
+        function["name"] = alias
+        name_to_alias[name] = alias
+        alias_to_name[alias] = name
+    return provider_tools, name_to_alias, alias_to_name
+
+
+def _provider_messages(messages: list[dict], name_to_alias: dict[str, str]) -> list[dict]:
+    """同步转换历史 assistant tool_calls，保持多轮工具协议一致。"""
+
+    provider_messages = copy.deepcopy(messages)
+    for message in provider_messages:
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") if isinstance(call, dict) else None
+            if isinstance(function, dict) and isinstance(function.get("name"), str):
+                function["name"] = name_to_alias.get(function["name"], _provider_tool_name(function["name"]))
+    return provider_messages
+
+
+def _restore_tool_names(tool_calls: list[dict], alias_to_name: dict[str, str]) -> list[dict]:
+    """模型响应离开适配层前恢复 GeoAgent 的内部工具名称。"""
+
+    for call in tool_calls:
+        function = call.get("function") if isinstance(call, dict) else None
+        if isinstance(function, dict) and function.get("name") in alias_to_name:
+            function["name"] = alias_to_name[function["name"]]
+    return tool_calls
+
+
+def _provider_tool_name(name: str) -> str:
+    return name if _PROVIDER_TOOL_NAME.fullmatch(name) else re.sub(r"[^a-zA-Z0-9_-]", "__", name)

@@ -8,6 +8,25 @@ from app.models.config import ModelConfig
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
 
 
+def _tool_definition(name):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "测试工具",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+class _ToolCall:
+    def __init__(self, name):
+        self.name = name
+
+    def model_dump(self):
+        return {"id": "call-1", "type": "function", "function": {"name": self.name, "arguments": "{}"}}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("usage", [None, SimpleNamespace(prompt_tokens=0, completion_tokens=0), SimpleNamespace(prompt_tokens=123, completion_tokens=45)])
 async def test_complete_reads_existing_response_usage_without_an_extra_request(usage):
@@ -47,6 +66,38 @@ async def test_reasoning_effort_is_forwarded_only_for_declared_levels():
     with pytest.raises(ValueError, match="不支持思考程度"):
         adapter.config = ModelConfig(model="fake")
         await adapter.complete(ModelRequest(messages=[], reasoning_effort="high"))
+
+
+@pytest.mark.asyncio
+async def test_complete_maps_provider_safe_tool_names_and_restores_internal_names():
+    requests = []
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(model="fake", usage=None, choices=[SimpleNamespace(
+            message=SimpleNamespace(content="", tool_calls=[_ToolCall("dataset__inspect")]),
+            finish_reason="tool_calls",
+        )])
+
+    adapter = object.__new__(OpenAICompatibleAdapter)
+    adapter.config = ModelConfig(model="fake")
+    adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    response = await adapter.complete(ModelRequest(
+        messages=[{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "old", "type": "function", "function": {"name": "dataset.inspect", "arguments": "{}"}},
+                {"id": "older", "type": "function", "function": {"name": "raster.slope", "arguments": "{}"}},
+            ],
+        }],
+        tools=[_tool_definition("dataset.inspect")],
+    ))
+
+    assert requests[0]["tools"][0]["function"]["name"] == "dataset__inspect"
+    assert requests[0]["messages"][0]["tool_calls"][0]["function"]["name"] == "dataset__inspect"
+    assert requests[0]["messages"][0]["tool_calls"][1]["function"]["name"] == "raster__slope"
+    assert response.tool_calls[0]["function"]["name"] == "dataset.inspect"
 
 
 def _choice(*, finish_reason=None, content="", tool_calls=None):
@@ -131,6 +182,37 @@ async def test_openai_stream_assembles_tool_call_fragments_at_finish_reason():
     assert terminal.done is True
     assert terminal.finish_reason == "tool_calls"
     assert terminal.tool_calls == [{"id": "call-1", "type": "function", "function": {"name": "dataset.inspect", "arguments": '{"dataset_id":"roads"}'}}]
+
+
+@pytest.mark.asyncio
+async def test_stream_restores_aliased_tool_name_after_fragment_assembly():
+    adapter = _adapter([
+        SimpleNamespace(
+            model="fake",
+            usage=None,
+            choices=[_choice(tool_calls=[_tool_fragment(index=0, call_id="call-1", name="dataset__", arguments="{")])],
+        ),
+        SimpleNamespace(
+            model="fake",
+            usage=None,
+            choices=[_choice(finish_reason="tool_calls", tool_calls=[_tool_fragment(index=0, name="inspect", arguments="}")])],
+        ),
+    ])
+
+    request = ModelRequest(
+        messages=[{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "old", "type": "function", "function": {"name": "dataset.inspect", "arguments": "{}"}}],
+        }],
+        tools=[_tool_definition("dataset.inspect")],
+    )
+    chunks = [chunk async for chunk in adapter.stream(request)]
+    sent = adapter.client.chat.completions.requests[0]
+
+    assert sent["tools"][0]["function"]["name"] == "dataset__inspect"
+    assert sent["messages"][0]["tool_calls"][0]["function"]["name"] == "dataset__inspect"
+    assert chunks[-1].tool_calls[0]["function"]["name"] == "dataset.inspect"
 
 
 @pytest.mark.asyncio
