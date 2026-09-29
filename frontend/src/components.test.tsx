@@ -134,10 +134,11 @@ describe("统一聊天输入区", () => {
   it("只为声明支持的模型显示中文思考程度", () => {
     const onReasoningChange = vi.fn();
     const profile = { ...productChatProps.modelStatus.profiles[0], id: "deepseek-flash", label: "DeepSeek Flash", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[], default_reasoning_effort: "medium" as const };
-    render(<ProductChat {...productChatProps} modelStatus={{ ...productChatProps.modelStatus, default_profile: profile.id, profiles: [profile] }} selectedModelProfile={profile.id} selectedReasoningEffort="xhigh" onReasoningChange={onReasoningChange} />);
+    const { container } = render(<ProductChat {...productChatProps} modelStatus={{ ...productChatProps.modelStatus, default_profile: profile.id, profiles: [profile] }} selectedModelProfile={profile.id} selectedReasoningEffort="xhigh" onReasoningChange={onReasoningChange} />);
     const trigger = screen.getByRole("button", { name: "选择模型和思考程度：DeepSeek Flash 极高" });
     expect(screen.queryByRole("slider", { name: "选择思考程度" })).toBeNull();
     fireEvent.click(trigger);
+    expect(container.querySelector('[data-icon="bolt"]')).toBeNull();
     const slider = screen.getByRole("slider", { name: "选择思考程度" });
     expect((slider as HTMLInputElement).value).toBe("3");
     expect(screen.getAllByText("极高")).toHaveLength(2);
