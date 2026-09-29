@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS conversation_memories (
     payload_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS conversation_tool_states (
+    conversation_id TEXT PRIMARY KEY,
+    discovered_names_json TEXT NOT NULL DEFAULT '[]',
+    used_names_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     conversation_id TEXT NOT NULL,
@@ -506,6 +513,63 @@ class StateStore:
             row = db.execute("SELECT * FROM conversations WHERE id=? AND user_id=?", (conversation_id, user_id)).fetchone()
         return Conversation.model_validate(dict(row)) if row else None
 
+    def remember_conversation_tools(
+        self,
+        conversation_id: str,
+        *,
+        discovered_names: list[str] | tuple[str, ...] = (),
+        used_names: list[str] | tuple[str, ...] = (),
+    ) -> None:
+        """按最近出现顺序保存会话工具目录；完整 Schema 始终由当前 Provider 重新物化。"""
+
+        discovered = [name for name in discovered_names if isinstance(name, str) and name]
+        used = [name for name in used_names if isinstance(name, str) and name]
+        if not discovered and not used:
+            return
+        timestamp = utc_now().isoformat()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM conversations WHERE id=?", (conversation_id,)).fetchone() is None:
+                db.rollback()
+                return
+            row = db.execute(
+                "SELECT discovered_names_json,used_names_json FROM conversation_tool_states WHERE conversation_id=?",
+                (conversation_id,),
+            ).fetchone()
+            current_discovered = json.loads(row[0]) if row else []
+            current_used = json.loads(row[1]) if row else []
+            _append_recent_names(current_discovered, discovered)
+            _append_recent_names(current_used, used)
+            db.execute(
+                """INSERT INTO conversation_tool_states
+                (conversation_id,discovered_names_json,used_names_json,updated_at) VALUES(?,?,?,?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                discovered_names_json=excluded.discovered_names_json,
+                used_names_json=excluded.used_names_json,
+                updated_at=excluded.updated_at""",
+                (conversation_id, self._json(current_discovered), self._json(current_used), timestamp),
+            )
+            db.commit()
+
+    def get_conversation_tool_state(
+        self,
+        conversation_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> tuple[list[str], list[str]]:
+        query = (
+            "SELECT s.discovered_names_json,s.used_names_json "
+            "FROM conversation_tool_states s JOIN conversations c ON c.id=s.conversation_id "
+            "WHERE s.conversation_id=?"
+        )
+        args: tuple[Any, ...] = (conversation_id,)
+        if user_id is not None:
+            query += " AND c.user_id=?"
+            args += (user_id,)
+        with self._connect() as db:
+            row = db.execute(query, args).fetchone()
+        return (json.loads(row[0]), json.loads(row[1])) if row else ([], [])
+
     def delete_conversation(self, conversation_id: str, *, user_id: str | None = None) -> bool:
         with self._connect() as db:
             query = "SELECT id FROM conversations WHERE id=?"
@@ -536,6 +600,7 @@ class StateStore:
                 db.execute("DELETE FROM messages_fts WHERE conversation_id=?", (conversation_id,))
             db.execute("DELETE FROM messages WHERE conversation_id=?", (conversation_id,))
             db.execute("DELETE FROM conversation_memories WHERE conversation_id=?", (conversation_id,))
+            db.execute("DELETE FROM conversation_tool_states WHERE conversation_id=?", (conversation_id,))
             db.execute("DELETE FROM planning_sessions WHERE conversation_id=?", (conversation_id,))
             db.execute("DELETE FROM working_memories WHERE conversation_id=?", (conversation_id,))
             if task_ids:
@@ -1146,7 +1211,7 @@ class StateStore:
         return consumed
 
     def save_tool_call(self, call: ToolCall, result: ToolResult | None = None) -> None:
-        status = ToolExecutionStatus.COMPLETED.value if result is not None else ToolExecutionStatus.PENDING.value
+        status = (_tool_execution_status(result) if result is not None else ToolExecutionStatus.PENDING).value
         timestamp = utc_now().isoformat()
         with self._connect() as db:
             db.execute(
@@ -1171,6 +1236,48 @@ class StateStore:
             return None
         result = self._model(ToolResult, row[1]) if row[1] else None
         return ToolExecutionStatus(row[0]), result
+
+    def get_tool_call_record(self, call_id: str) -> tuple[ToolCall, ToolResult | None] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id,run_id,name,arguments_json,result_json FROM tool_calls WHERE id=?",
+                (call_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]))
+        return call, self._model(ToolResult, row[4]) if row[4] else None
+
+    def list_tool_results_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int,
+        user_id: str | None = None,
+        exclude_run_id: str | None = None,
+    ) -> list[tuple[ToolCall, ToolResult]]:
+        query = (
+            "SELECT tc.id,tc.run_id,tc.name,tc.arguments_json,tc.result_json "
+            "FROM tool_calls tc JOIN runs r ON r.id=tc.run_id "
+            "JOIN conversations c ON c.id=r.conversation_id "
+            "WHERE r.conversation_id=? AND tc.result_json IS NOT NULL"
+        )
+        args: tuple[Any, ...] = (conversation_id,)
+        if user_id is not None:
+            query += " AND c.user_id=?"
+            args += (user_id,)
+        if exclude_run_id is not None:
+            query += " AND tc.run_id<>?"
+            args += (exclude_run_id,)
+        query += " ORDER BY COALESCE(tc.updated_at,tc.created_at) DESC LIMIT ?"
+        args += (max(1, limit),)
+        with self._connect() as db:
+            rows = db.execute(query, args).fetchall()
+        records = []
+        for row in rows:
+            call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]))
+            records.append((call, self._model(ToolResult, row[4])))
+        return records
 
     def mark_tool_call_running(self, call: ToolCall) -> bool:
         timestamp = utc_now().isoformat()
@@ -1197,13 +1304,7 @@ class StateStore:
             return True
 
     def save_tool_call_result(self, call_id: str, result: ToolResult) -> None:
-        status = (
-            ToolExecutionStatus.BLOCKED
-            if result.status is ToolStatus.BLOCKED
-            else ToolExecutionStatus.COMPLETED
-            if result.status in {ToolStatus.SUCCESS, ToolStatus.PARTIAL_SUCCESS}
-            else ToolExecutionStatus.FAILED
-        )
+        status = _tool_execution_status(result)
         with self._connect() as db:
             db.execute("UPDATE tool_calls SET status=?, result_json=?, updated_at=? WHERE id=?", (status.value, result.model_dump_json(), utc_now().isoformat(), call_id))
             db.commit()
@@ -1352,6 +1453,21 @@ class StateStore:
         with self._connect() as db:
             rows = db.execute("SELECT payload_json FROM trace_events WHERE run_id=? ORDER BY sequence", (run_id,)).fetchall()
         return [self._model(TraceEvent, row[0]) for row in rows]
+
+
+def _append_recent_names(current: list[str], incoming: list[str]) -> None:
+    for name in incoming:
+        if name in current:
+            current.remove(name)
+        current.append(name)
+
+
+def _tool_execution_status(result: ToolResult) -> ToolExecutionStatus:
+    if result.status is ToolStatus.BLOCKED:
+        return ToolExecutionStatus.BLOCKED
+    if result.status in {ToolStatus.SUCCESS, ToolStatus.PARTIAL_SUCCESS}:
+        return ToolExecutionStatus.COMPLETED
+    return ToolExecutionStatus.FAILED
 
 def _has_message_fts(db: sqlite3.Connection) -> bool:
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts'").fetchone() is not None

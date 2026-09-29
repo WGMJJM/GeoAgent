@@ -23,6 +23,7 @@ from app.core.models import (
     Message,
     RiskLevel,
     RunStatus,
+    ToolExecutionStatus,
     ToolMetadata,
 )
 from app.core.tokens import estimate_tokens
@@ -209,6 +210,7 @@ async def test_dataset_list_uses_tool_result_in_same_model_loop(tmp_path):
         "dataset.inspect",
         "agent.ask_user",
         "conversation.search_history",
+        "conversation.read_tool_result",
     }
     for model_request in adapter.requests:
         assert _assert_tool_visibility(loop, model_request)["cached"] == []
@@ -360,6 +362,87 @@ async def test_search_injects_deferred_tool_on_next_turn_and_executes_it(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_fresh_run_reuses_conversation_tool_capability_without_research(tmp_path):
+    tool_name = "test.conversation_capability"
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "find", "function": {"name": "tool.search", "arguments": '{"query":"conversation capability"}'}}]),
+        ModelResponse(tool_calls=[{"id": "execute", "function": {"name": tool_name, "arguments": "{}"}}]),
+        ModelResponse(content="第一次运行完成。"),
+        ModelResponse(content="新运行直接看到了此前使用的工具。"),
+    )
+    store, loop = _loop(tmp_path, adapter)
+    loop.registry.register(
+        ToolMetadata(name=tool_name, description="conversation capability", input_schema={"type": "object"}),
+        lambda _arguments, _context: {"output": {"value": 42}},
+        deferred=True,
+    )
+    conversation = store.create_conversation("跨运行工具", user_id="test-user")
+    first_request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="查找并调用工具")
+    first = await loop.run(first_request, prepared=await loop.prepare_request(first_request))
+
+    second_request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="继续处理")
+    second = await loop.run(second_request, prepared=await loop.prepare_request(second_request))
+
+    assert first.status is AgentResultStatus.SUCCESS
+    assert second.status is AgentResultStatus.SUCCESS
+    discovered, used = store.get_conversation_tool_state(conversation.id, user_id="test-user")
+    assert discovered == [tool_name]
+    assert used == [tool_name]
+    assert len(adapter.requests) == 4
+    assert tool_name in {item["function"]["name"] for item in adapter.requests[3].tools}
+
+
+@pytest.mark.asyncio
+async def test_fresh_run_sees_execution_index_and_reads_one_original_result(tmp_path):
+    dataset = Dataset(id="ds_roads", name="roads", kind=DatasetKind.VECTOR, path="roads.gpkg", format="GPKG")
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "list", "function": {"name": "dataset.list", "arguments": "{}"}}]),
+        ModelResponse(content="已经读取数据列表。"),
+    )
+    store, loop = _loop(tmp_path, adapter, [dataset])
+    conversation = store.create_conversation("跨运行结果", user_id="test-user")
+    first_request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="列出数据")
+    first = await loop.run(first_request, prepared=await loop.prepare_request(first_request))
+    source_call_id = f"{first.trace_id}:list"
+    adapter.responses.extend(
+        [
+            ModelResponse(
+                tool_calls=[{
+                    "id": "read_previous",
+                    "function": {
+                        "name": "conversation.read_tool_result",
+                        "arguments": json.dumps({"run_id": first.trace_id, "tool_call_id": source_call_id}),
+                    },
+                }]
+            ),
+            ModelResponse(content="已读取上一运行的真实工具结果。"),
+        ]
+    )
+
+    second_request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="上一轮实际看到了什么？")
+    second = await loop.run(second_request, prepared=await loop.prepare_request(second_request))
+
+    assert second.status is AgentResultStatus.SUCCESS
+    execution_context = next(
+        item["content"]
+        for item in adapter.requests[2].messages
+        if item["role"] == "system" and "recent_tool_executions" in item["content"]
+    )
+    assert first.trace_id in execution_context
+    assert source_call_id in execution_context
+    assert '"tool_name":"dataset.list"' in execution_context
+    assert '"result_body_available":true' in execution_context
+    assert "roads" not in execution_context
+    observation = next(
+        json.loads(item["content"])
+        for item in adapter.requests[3].messages
+        if item.get("tool_call_id") == "read_previous"
+    )
+    assert observation["status"] == "SUCCESS"
+    assert observation["output"]["tool_result"]["output"]["datasets"][0]["name"] == "roads"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("selected_count", [1, 2])
 @pytest.mark.parametrize("first_result", ["success", "failure", "invalid_arguments"])
 async def test_unused_candidates_become_cards_and_used_schemas_survive_resume(tmp_path, selected_count, first_result):
@@ -488,7 +571,7 @@ async def test_unused_card_restores_from_cache_without_research_or_same_batch_ex
     assert searches == [{"query": "restore_primary", "english_query": "restore_secondary"}]
     assert {item["name"] for item in _assert_tool_visibility(loop, adapter.requests[2])["cached"]} == set(names[1:])
     observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[3].messages if item["role"] == "tool"}
-    assert observations["restore"]["output"]["source"] == "run_cache"
+    assert observations["restore"]["output"]["source"] == "conversation_cache"
     assert observations["restore"]["output"]["already_callable"] is False
     assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
     assert executed == [f"{result.trace_id}:first", f"{result.trace_id}:second"]
@@ -526,14 +609,14 @@ async def test_visible_schema_cache_query_reports_availability_without_search_or
     assert executed == [{"dataset_id": "ds_roads", "distance": 25}]
     assert store.get_run(result.trace_id).tool_call_count == 3
     observation = json.loads(next(item["content"] for item in adapter.requests[2].messages if item.get("tool_call_id") == "redundant"))
-    assert observation["output"]["source"] == "run_cache"
+    assert observation["output"]["source"] == "conversation_cache"
     assert observation["output"]["already_callable"] is True
     assert "本轮已提供完整 Schema" in observation["output"]["message"]
     for model_request in adapter.requests:
         _assert_tool_visibility(loop, model_request)
     decisions = [item for item in store.list_events(result.trace_id) if item.event_type == "DecisionMade"]
     assert decisions[1].payload["tool_visibility"]["callable"] == [item["function"]["name"] for item in adapter.requests[1].tools]
-    assert decisions[1].payload["searches"] == [{"call_id": f"{result.trace_id}:redundant", "source": "run_cache", "already_callable": True, "tools": ["vector.buffer"]}]
+    assert decisions[1].payload["searches"] == [{"call_id": f"{result.trace_id}:redundant", "source": "conversation_cache", "already_callable": True, "tools": ["vector.buffer"]}]
 
 
 @pytest.mark.asyncio
@@ -557,7 +640,9 @@ async def test_search_does_not_activate_tool_earlier_in_same_batch(tmp_path):
 
     assert result.status is AgentResultStatus.SUCCESS
     assert calls == []
-    assert store.get_tool_call(f"{result.trace_id}:forged") is None
+    saved = store.get_tool_call(f"{result.trace_id}:forged")
+    assert saved is not None and saved[0] is ToolExecutionStatus.BLOCKED
+    assert saved[1].error.code == "DEFERRED_TOOL_NOT_ACTIVE"
     observation = adapter.requests[1].messages[-1]["content"]
     assert "DEFERRED_TOOL_NOT_ACTIVE" in observation
     assert {message.get("tool_call_id") for message in adapter.requests[1].messages if message.get("role") == "tool"} == {"search", "forged"}
@@ -809,7 +894,7 @@ async def test_eight_tool_limit_keeps_discovery_records_and_restores_from_cache(
     assert names[0] not in {item["function"]["name"] for item in adapter.requests[9].tools}
     assert names[0] in {item["function"]["name"] for item in adapter.requests[11].tools}
     observations = {item["tool_call_id"]: json.loads(item["content"]) for item in adapter.requests[11].messages if item["role"] == "tool"}
-    assert observations["restore"]["output"]["source"] == "run_cache"
+    assert observations["restore"]["output"]["source"] == "conversation_cache"
     assert observations["restore"]["output"]["already_callable"] is False
     assert observations["evicted"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"
     assert observations["premature"]["error"]["code"] == "DEFERRED_TOOL_NOT_ACTIVE"

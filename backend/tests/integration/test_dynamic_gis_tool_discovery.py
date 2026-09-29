@@ -215,7 +215,7 @@ def test_reprojection_reuses_called_slope_or_restores_unused_card(application, a
                 assert "raster.slope" not in {item["name"] for item in visibility["cached"]}
                 if not attempt_slope_first:
                     restored = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "restore_slope"))
-                    assert restored["output"]["source"] == "run_cache"
+                    assert restored["output"]["source"] == "conversation_cache"
                 observation = json.loads(next(item["content"] for item in request.messages if item.get("tool_call_id") == "project"))
                 return ModelResponse(tool_calls=[call("raster.slope", {"dataset_id": observation["output"]["id"]}, "slope")])
             return ModelResponse(content="已复用或从卡片恢复坡度工具，完成真实坡度计算。")

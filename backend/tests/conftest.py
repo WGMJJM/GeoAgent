@@ -10,7 +10,15 @@ from app.config import Settings
 
 @pytest.fixture
 def application(tmp_path) -> Iterator[Application]:
-    settings = Settings(root=tmp_path, database=tmp_path / "state.sqlite3", workspace=tmp_path / "workspace", model_profiles="", enable_arcpy=False)
+    settings = Settings(
+        root=tmp_path,
+        database=tmp_path / "state.sqlite3",
+        workspace=tmp_path / "workspace",
+        model_profiles="",
+        additional_model_profiles="",
+        model_reasoning_config="",
+        enable_arcpy=False,
+    )
     app = Application(settings)
     app.start()
     try:

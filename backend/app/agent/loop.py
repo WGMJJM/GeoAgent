@@ -82,6 +82,23 @@ SEARCH_HISTORY_TOOL = {
     },
 }
 
+READ_TOOL_RESULT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "conversation.read_tool_result",
+        "description": "按会话执行索引中的精确 Run ID 和 Tool Call ID 读取一条历史工具原始结果；仅在索引与最终回复不足以完成当前目标时使用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "minLength": 1},
+                "tool_call_id": {"type": "string", "minLength": 1},
+            },
+            "required": ["run_id", "tool_call_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 @dataclass(slots=True)
 class LoopPreparedRequest:
     """统一模型循环运行时的不可变请求绑定。"""
@@ -126,6 +143,7 @@ class AgentLoop:
             store,
             profile_service=context_services.get("profile"),
             conversation_memory=context_services["conversation_memory"],
+            recent_tool_results=settings.tool_result_recent_full,
         )
         self.model_adapter: ModelAdapter | None = None
         self.model_adapters: dict[str, ModelAdapter] = {}
@@ -206,9 +224,23 @@ class AgentLoop:
         if run.metadata.get("conversation_history_count") != history_count:
             run = run.model_copy(update={"metadata": {**run.metadata, "conversation_history_count": history_count}})
             self.store.save_run(run)
-        activated_names = self._restore_activated_names(resume_from, request, run)
-        discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names))) if resume_from else []
-        used_names = set(resume_from.state.get("used_tool_names", [])) if resume_from else set()
+        if resume_from is not None:
+            activated_names = self._restore_activated_names(resume_from, request, run)
+            discovered_names = list(resume_from.state.get("discovered_tool_names", sorted(activated_names)))
+            used_names = set(resume_from.state.get("used_tool_names", []))
+        elif run.parent_run_id:
+            activated_names, discovered_names, used_names = set(), [], set()
+        else:
+            discovered_names, previously_used = self.store.get_conversation_tool_state(
+                request.conversation_id,
+                user_id=request.user_id,
+            )
+            for name in previously_used:
+                _remember_tools(discovered_names, [name])
+            services = self._execution_services(request, run)
+            runtime_context = self._discovery_context(request, services, run)
+            activated_names = self._available_activations(set(previously_used), runtime_context)
+            used_names = set()
         compacted_ids = set(resume_from.state.get("compacted_tool_call_ids", [])) if resume_from else set()
         summarized_ids = set(resume_from.state.get("summarized_tool_call_ids", [])) if resume_from else set()
         pending_approvals = self._pending_approvals(resume_from)
@@ -523,10 +555,10 @@ class AgentLoop:
                                 cached_name = next((name for name in discovered_names if name.casefold() == query), None)
                                 if "english_query" not in arguments and cached_name in self._available_activations(set(discovered_names), search_context):
                                     already_callable = cached_name in {item["function"]["name"] for item in model_tools}
-                                    search_output = {"tools": [self.catalog.card(cached_name).public()], "source": "run_cache", "already_callable": already_callable}
+                                    search_output = {"tools": [self.catalog.card(cached_name).public()], "source": "conversation_cache", "already_callable": already_callable}
                                     if already_callable:
                                         search_output["message"] = "该工具在本轮已提供完整 Schema，可直接按 Schema 调用，无需再次搜索。"
-                                    searches.append({"call_id": persisted_id, "source": "run_cache", "already_callable": already_callable, "tools": [cached_name]})
+                                    searches.append({"call_id": persisted_id, "source": "conversation_cache", "already_callable": already_callable, "tools": [cached_name]})
                                 else:
                                     search_output = self.catalog.tool_search(arguments, search_context)
                                     searches.append({"call_id": persisted_id, "source": "catalog", "tools": [item["name"] for item in search_output["tools"]]})
@@ -581,6 +613,56 @@ class AgentLoop:
                             payload={"tool": name, "status": result.status.value},
                             agent_id=current.agent_id,
                         )
+                    elif name == "conversation.read_tool_result":
+                        await self.trace.emit(
+                            current.id,
+                            EventType.TOOL_STARTED,
+                            "正在读取历史工具结果",
+                            payload={"tool": name},
+                            agent_id=current.agent_id,
+                        )
+                        problem = validate_arguments(arguments, READ_TOOL_RESULT_TOOL["function"]["parameters"])
+                        source_run = self.store.get_run(str(arguments.get("run_id") or ""))
+                        record = self.store.get_tool_call_record(str(arguments.get("tool_call_id") or ""))
+                        source_visible = bool(
+                            source_run
+                            and (
+                                self.store.run_belongs_to_user(source_run.id, request.user_id)
+                                if request.user_id
+                                else True
+                            )
+                        )
+                        if current.parent_run_id:
+                            result = _blocked_result(persisted_id, "SUBAGENT_HISTORY_FORBIDDEN", "子任务不能读取主会话工具结果。")
+                        elif problem:
+                            result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
+                        elif (
+                            source_run is None
+                            or source_run.conversation_id != request.conversation_id
+                            or not source_visible
+                            or record is None
+                            or record[0].run_id != source_run.id
+                            or record[1] is None
+                        ):
+                            result = _failed_result(persisted_id, "TOOL_RESULT_NOT_FOUND", "当前会话中不存在该工具结果。")
+                        else:
+                            source_call, source_result = record
+                            result = ToolResult(
+                                call_id=persisted_id,
+                                status=ToolStatus.SUCCESS,
+                                output={
+                                    "source_run_id": source_run.id,
+                                    "tool_call": source_call.model_dump(mode="json"),
+                                    "tool_result": source_result.model_dump(mode="json"),
+                                },
+                            )
+                        await self.trace.emit(
+                            current.id,
+                            EventType.TOOL_COMPLETED if result.status is ToolStatus.SUCCESS else EventType.TOOL_FAILED,
+                            "历史工具结果读取完成" if result.status is ToolStatus.SUCCESS else "历史工具结果读取失败",
+                            payload={"tool": name, "status": result.status.value},
+                            agent_id=current.agent_id,
+                        )
                     else:
                         try:
                             registered = self.registry.get(name)
@@ -630,7 +712,7 @@ class AgentLoop:
                                                 "arguments": arguments,
                                             }
                                             pending_approvals.append(approval)
-                    if current.parent_run_id and name not in {"agent.ask_user", "tool.search", "conversation.search_history", "agent.delegate"}:
+                    if name not in {"agent.ask_user", "tool.search", "conversation.search_history", "conversation.read_tool_result", "agent.delegate"}:
                         approval_waiting = result.error is not None and result.error.code == "APPROVAL_REQUIRED" and result.error.details.get("approval_id")
                         if not approval_waiting and self.store.get_tool_call(persisted_id) is None:
                             self.store.save_tool_call(ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id), result)
@@ -779,6 +861,7 @@ class AgentLoop:
         definitions = [TOOL_SEARCH_DEFINITION, ASK_USER_TOOL]
         if context.allowed_tool_names is None:
             definitions.append(SEARCH_HISTORY_TOOL)
+            definitions.append(READ_TOOL_RESULT_TOOL)
             if self.delegation is not None:
                 definitions.append(DELEGATE_TOOL)
         available = self._available_tool_names(context, activated_names)
@@ -1020,6 +1103,8 @@ class AgentLoop:
         ]
         previous = self.store.latest_checkpoint(run.id)
         pending_tool_calls = pending_tool_calls if pending_tool_calls is not None else (previous.state.get("pending_tool_calls", []) if previous else [])
+        resolved_discovered = discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else [])
+        resolved_used = sorted(used_names) if used_names is not None else (previous.state.get("used_tool_names", []) if previous else [])
         self.store.save_checkpoint(
             Checkpoint(
                 run_id=run.id,
@@ -1030,8 +1115,8 @@ class AgentLoop:
                     "protocol_messages": protocol_messages,
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
-                    "discovered_tool_names": discovered_names if discovered_names is not None else (previous.state.get("discovered_tool_names", previous.state.get("activated_tool_names", [])) if previous else []),
-                    "used_tool_names": sorted(used_names) if used_names is not None else (previous.state.get("used_tool_names", []) if previous else []),
+                    "discovered_tool_names": resolved_discovered,
+                    "used_tool_names": resolved_used,
                     "compacted_tool_call_ids": sorted(compacted_ids) if compacted_ids is not None else (previous.state.get("compacted_tool_call_ids", []) if previous else []),
                     "summarized_tool_call_ids": sorted(summarized_ids) if summarized_ids is not None else (previous.state.get("summarized_tool_call_ids", []) if previous else []),
                     "conversation_history_count": run.metadata.get("conversation_history_count", 0),
@@ -1043,6 +1128,15 @@ class AgentLoop:
                 },
             )
         )
+        if not run.parent_run_id:
+            used_set = set(resolved_used)
+            ordered_used = [name for name in resolved_discovered if name in used_set]
+            ordered_used.extend(name for name in resolved_used if name not in ordered_used)
+            self.store.remember_conversation_tools(
+                request.conversation_id,
+                discovered_names=resolved_discovered,
+                used_names=ordered_used,
+            )
 
     async def _finish(self, run: Run, result: AgentResult, *, request: AgentRequest) -> AgentResult:
         current = self.store.get_run(run.id) or run

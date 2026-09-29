@@ -82,6 +82,11 @@ def test_delete_conversation_cascades_records_and_preserves_user_resources(appli
     application.store.save_message(Message(id="message_delete", conversation_id=conversation.id, role="user", content="删除这个对话", dataset_ids=[root_dataset.id]))
     application.store.save_working_memory(WorkingMemory(task_id=task.id, conversation_id=conversation.id, active_dataset_ids=[root_dataset.id]))
     application.store.save_conversation_memory(ConversationMemory(conversation_id=conversation.id, user_id="user-delete", summary="待删除摘要"))
+    application.store.remember_conversation_tools(
+        conversation.id,
+        discovered_names=["vector.buffer"],
+        used_names=["vector.buffer"],
+    )
     now = utc_now().isoformat()
     with application.store._connect() as db:
         db.execute(
@@ -132,7 +137,7 @@ def test_delete_conversation_cascades_records_and_preserves_user_resources(appli
     assert application.store.list_approvals("user-delete") == []
 
     with application.store._connect() as db:
-        for table in ("trace_events", "checkpoints", "tool_calls", "dataset_lineage", "approvals", "planning_sessions", "subtasks", "tasks", "working_memories", "messages", "runs", "conversation_memories"):
+        for table in ("trace_events", "checkpoints", "tool_calls", "dataset_lineage", "approvals", "planning_sessions", "subtasks", "tasks", "working_memories", "messages", "runs", "conversation_memories", "conversation_tool_states"):
             assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
 
     assert application.store.get_dataset(root_dataset.id) == root_dataset
