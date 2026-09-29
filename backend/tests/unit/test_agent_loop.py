@@ -68,7 +68,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
                                model_input_tokens=128000, tool_result_recent_full=16,
                                tool_result_emergency_fraction=0.5,
-                               tool_context_tokens=6400, tool_context_max_cards=8,
+                               tool_context_tokens=12800, tool_context_max_cards=8,
                                emergency_recent_messages=8)
     dataset_view = DatasetView(datasets or [])
     loop = AgentLoop(
@@ -849,6 +849,7 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
 
 def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     _, loop = _loop(tmp_path, None)
+    loop.settings.tool_context_tokens //= 2
     names = [f"test.detailed_{index}" for index in range(18)]
     for name in names:
         loop.registry.register(ToolMetadata(name=name, description="Detailed operation", input_schema={
