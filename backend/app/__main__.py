@@ -9,7 +9,6 @@ import json
 from app.api.app import create_app
 from app.application import Application
 from app.demo import seed_demo
-from evaluation import EvaluationRunner
 
 
 def main() -> None:
@@ -35,6 +34,8 @@ def main() -> None:
         result = asyncio.run(application.ask(args.query))
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2))
     if args.evaluate:
+        from evaluation import EvaluationRunner
+
         summary = asyncio.run(EvaluationRunner(application).run())
         payload = summary.model_dump(mode="json")
         payload["失败用例"] = [
