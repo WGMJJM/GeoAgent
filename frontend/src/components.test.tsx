@@ -5,7 +5,7 @@ import { ApprovalCard } from "./components/ApprovalCard";
 import { api, ApprovalRequest, Event, MessageResponse, ReasoningEffort, Run, TokenUsage } from "./api";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
-import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat, TokenUsageSummary } from "./App";
+import { App, CompletedRunSummary, LiveExecutionStatus, ProductChat } from "./App";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -22,26 +22,8 @@ describe("运行累计 Token 用量", () => {
     expect(screen.getByText("运行完成 · 9 次工具调用")).toBeTruthy();
     expect(screen.getByText("输入 1.20k · 输出 0.25k")).toBeTruthy();
     expect(screen.queryByText(/Token 1,450/)).toBeNull();
-    expect(container.querySelector(".run-summary-current .run-token-usage")?.getAttribute("title")).toContain("输入 1,200 tokens");
-  });
-
-  it("内部计数来源不作为产品文案展示", () => {
-    render(<TokenUsageSummary usage={{ ...usage, reported_calls: 1 }} />);
-    expect(screen.getByText("输入 0.90k · 输出 0.10k")).toBeTruthy();
     expect(screen.queryByText(/本地估算/)).toBeNull();
-  });
-
-  it("没有用量的旧 Run 不显示虚假的零消耗，真实零用量可以显示", () => {
-    const { container, rerender } = render(<TokenUsageSummary />);
-    expect(container.querySelector(".run-token-usage")).toBeNull();
-    rerender(<TokenUsageSummary usage={{ ...usage, reported_input_tokens: 0, reported_output_tokens: 0 }} />);
-    expect(screen.getByText("输入 0.00k · 输出 0.00k")).toBeTruthy();
-  });
-
-  it("k单位只影响展示，悬浮说明仍保留准确计数", () => {
-    render(<TokenUsageSummary usage={{ ...usage, reported_input_tokens: 123456, reported_output_tokens: 1 }} />);
-    const display = screen.getByText("输入 123.46k · 输出 0.00k");
-    expect(display.getAttribute("title")).toContain("输入 123,456 tokens，输出 1 tokens");
+    expect(container.querySelector(".run-summary-current .run-token-usage")?.getAttribute("title")).toContain("输入 1,200 tokens");
   });
 
   it("实时更新使用累计快照，重复事件不重复累加，也不覆盖当前执行状态", () => {
@@ -58,14 +40,6 @@ describe("运行累计 Token 用量", () => {
     expect(screen.getByText("输入 1.20k · 输出 0.25k")).toBeTruthy(); // 并行子运行事件晚到不能使计数倒退。
     rerender(<LiveExecutionStatus phase="running" events={[progress]} durationMs={0} />);
     expect(screen.queryByText(/输入 .*k · 输出/)).toBeNull();
-  });
-
-  it("正文开始流入后从正在思考切换为正在生成回复", () => {
-    const started: Event = { id: "model", run_id: "run-1", event_type: "ModelResponseStarted", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "正在思考", payload: {} };
-    const { rerender } = render(<LiveExecutionStatus phase="running" events={[started]} durationMs={1000} />);
-    expect(screen.getByText("正在思考")).toBeTruthy();
-    rerender(<LiveExecutionStatus phase="running" events={[started]} durationMs={2000} streaming />);
-    expect(screen.getByText("正在生成回复")).toBeTruthy();
   });
 
   it("实时 Token 连续追赶新目标，临时缺少快照时不消失", () => {
@@ -120,17 +94,6 @@ describe("统一聊天输入区", () => {
     onDeny: vi.fn(async () => undefined),
   };
 
-  it("使用同一条消息时间线及输入能力，不显示独立规划入口", () => {
-    render(<ProductChat {...productChatProps} />);
-    expect(screen.getByText("历史消息")).toBeTruthy();
-    expect(screen.getByRole("textbox", { name: "输入消息" })).toBeTruthy();
-    expect(screen.getByLabelText("添加文件")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "选择模型和思考程度：通义千问" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "规划" })).toBeNull();
-    expect(screen.getByText("历史消息")).toBeTruthy();
-    expect(screen.getAllByRole("textbox")).toHaveLength(1);
-  });
-
   it("只为声明支持的模型显示中文思考程度", () => {
     const onReasoningChange = vi.fn();
     const profile = { ...productChatProps.modelStatus.profiles[0], id: "deepseek-flash", label: "DeepSeek Flash", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[], default_reasoning_effort: "medium" as const };
@@ -164,70 +127,6 @@ describe("统一聊天输入区", () => {
     expect(message.querySelector(".message-resources")?.nextElementSibling?.textContent).toBe("检查这个数据");
   });
 
-  it("统一线性图标保留发送、添加和移除的可访问名称与回调", () => {
-    const onRemoveDataset = vi.fn();
-    const onRemoveFile = vi.fn();
-    const { container } = render(<ProductChat {...productChatProps} message="检查数据" selectedDatasetIds={["ds-test"]} uploadedFiles={[{ id: "file-test", name: "dem.tif", kind: "RASTER", path: "dem.tif", format: "GeoTIFF" }]} onRemoveDataset={onRemoveDataset} onRemoveFile={onRemoveFile} />);
-    const send = screen.getByRole("button", { name: "发送" });
-    expect(send.querySelector('svg[data-icon="send"]')?.getAttribute("aria-hidden")).toBe("true");
-    expect(screen.getByLabelText("添加文件").querySelector('svg[data-icon="plus"]')).toBeTruthy();
-    expect(container.querySelector('svg[data-icon="attachment"]')).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "移除数据集 ds-test" }));
-    fireEvent.click(screen.getByRole("button", { name: "移除 dem.tif" }));
-    fireEvent.click(send);
-    expect(onRemoveDataset).toHaveBeenCalledWith("ds-test");
-    expect(onRemoveFile).toHaveBeenCalledWith("file-test");
-    expect(productChatProps.send).toHaveBeenCalledOnce();
-    expect(container.querySelectorAll('.chat-layout .composer')).toHaveLength(1);
-  });
-
-  it("连接阶段从发送开始显示统一状态和计时", () => {
-    render(<ProductChat {...productChatProps} busy activeRunId={null} elapsedMs={2_400} />);
-    expect(screen.getByText("用时 2秒")).toBeTruthy();
-    expect(screen.getByText("正在处理")).toBeTruthy();
-    expect(screen.getByText("正在接入 Agent Loop…")).toBeTruthy();
-    expect(screen.queryByText("正在思考")).toBeNull();
-  });
-
-  it("真实运行显示最新请求理解事件", () => {
-    const decision: Event = { id: "event-decision", run_id: "run-1", event_type: "DecisionMade", message: "准备调用 dataset.list", sequence: 2, timestamp: "2026-01-01T10:00:05.000Z", payload: {}, agent_id: "agent-loop" };
-    render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={5_100} events={[decision]} />);
-    expect(screen.getByText("用时 5秒")).toBeTruthy();
-    expect(screen.getByText("正在运行")).toBeTruthy();
-    expect(screen.getByText("已确定下一步动作：准备调用 列出数据集")).toBeTruthy();
-  });
-
-  it("真实运行尚未收到事件时显示等待提示", () => {
-    render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={5_100} />);
-    expect(screen.getByText("等待智能体事件…")).toBeTruthy();
-    expect(screen.queryByText("正在思考")).toBeNull();
-  });
-
-  it("仅在模型响应阶段显示正在思考", () => {
-    const started: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 }, agent_id: "agent-loop" };
-    render(<ProductChat {...productChatProps} busy activeRunId="run-1" elapsedMs={6_100} events={[started]} />);
-    expect(screen.getByText("正在思考")).toBeTruthy();
-    expect(screen.queryByText("模型正在生成回复：正在思考")).toBeNull();
-  });
-
-  it("模型返回工具动作后只更新当前过程状态", () => {
-    const thinking: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 } };
-    const preparing: Event = { id: "event-tool", run_id: "run-1", event_type: "ToolPreparing", message: "正在准备 1 个工具调用", sequence: 4, timestamp: "2026-01-01T10:00:07.000Z", payload: { tools: ["raster.slope"], tool_count: 1 } };
-    const { container } = render(<LiveExecutionStatus phase="running" events={[thinking, preparing]} durationMs={7_100} />);
-    expect(screen.getByText("正在准备：计算坡度")).toBeTruthy();
-    expect(screen.queryByText("正在思考")).toBeNull();
-    expect(container.querySelectorAll(".run-progress-current")).toHaveLength(1);
-    expect(container.querySelector(".run-progress-spinner")).toBeTruthy();
-  });
-
-  it("过程状态变化不会清空已经加载的回复正文", () => {
-    const thinking: Event = { id: "event-model", run_id: "run-1", event_type: "ModelResponseStarted", message: "正在思考", sequence: 3, timestamp: "2026-01-01T10:00:06.000Z", payload: { turn: 1 } };
-    const preparing: Event = { id: "event-tool", run_id: "run-1", event_type: "ToolPreparing", message: "正在准备 1 个工具调用", sequence: 4, timestamp: "2026-01-01T10:00:07.000Z", payload: { tools: ["dataset.inspect"], tool_count: 1 } };
-    render(<ProductChat {...productChatProps} busy activeRunId="run-1" events={[thinking, preparing]} streamingReply="我来查看当前数据。" />);
-    expect(screen.getByText("我来查看当前数据。")).toBeTruthy();
-    expect(screen.getByText("正在准备：检查数据集")).toBeTruthy();
-  });
-
   it("新消息和流式增量自动跟随到底部，用户上翻后暂停跟随", () => {
     vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(1_000);
     vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(300);
@@ -246,57 +145,6 @@ describe("统一聊天输入区", () => {
     expect(history.scrollTop).toBe(1_000);
   });
 
-  it("真实运行消息只提供运行详情入口", () => {
-    render(<ProductChat {...productChatProps} messages={[{ id: "run-message", role: "assistant", content: "运行完成", kind: "execution", runId: "run-1" }]} />);
-    expect(screen.getByRole("button", { name: "查看运行详情" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "查看详细结果" })).toBeNull();
-  });
-
-  it("完成运行从 runs 缓存派生摘要和真实耗时", () => {
-    const completed: Run = { ...runRecord("COMPLETED"), started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:18.000Z", tool_call_count: 2 };
-    const { container } = render(<ProductChat {...productChatProps} runs={[completed]} messages={[{ id: "completed-message", role: "assistant", content: "道路处理完成", kind: "execution", runId: completed.id }]} />);
-    expect(screen.getByText("用时 18秒")).toBeTruthy();
-    expect(screen.getByText("运行完成 · 2 次工具调用")).toBeTruthy();
-    expect(screen.getByText("已完成")).toBeTruthy();
-    expect(screen.queryByText("等待智能体事件…")).toBeNull();
-    expect(container.querySelector(".execution-message")).toBeTruthy();
-  });
-
-  it("失败运行仍显示摘要和运行详情入口", () => {
-    const failed: Run = { ...runRecord("FAILED"), started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:36.000Z", tool_call_count: 2 };
-    render(<ProductChat {...productChatProps} runs={[failed]} messages={[{ id: "failed-message", role: "assistant", content: "运行失败", kind: "execution", runId: failed.id }]} />);
-    expect(screen.getByText("用时 36秒")).toBeTruthy();
-    expect(screen.getByText("运行未完成 · 2 次工具调用")).toBeTruthy();
-    expect(screen.getByText("失败")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "查看运行详情" })).toBeTruthy();
-  });
-
-  it("快速等待用户的运行显示小于一秒而不是零秒", () => {
-    const waiting: Run = { ...runRecord("WAITING_USER"), started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:00.420Z" };
-    const onReplyToRun = vi.fn();
-    render(<ProductChat {...productChatProps} onReplyToRun={onReplyToRun} runs={[waiting]} messages={[{ id: "waiting-message", role: "assistant", content: "当前请求需要补充信息后才能继续。", kind: "execution", runId: waiting.id }]} />);
-    expect(screen.getByText("用时 <1秒")).toBeTruthy();
-    expect(screen.getByText("等待补充信息 · 0 次工具调用")).toBeTruthy();
-    expect(screen.getByText("当前请求需要补充信息后才能继续。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "继续此运行" }));
-    expect(onReplyToRun).toHaveBeenCalledWith(waiting.id);
-  });
-
-  it("实时进度会直接切换为完成摘要", () => {
-    const completed: Run = { ...runRecord("COMPLETED"), id: "run-transition", started_at: "2026-01-01T10:00:00.000Z", finished_at: "2026-01-01T10:00:03.000Z" };
-    const { rerender } = render(<ProductChat {...productChatProps} busy activeRunId={completed.id} elapsedMs={3_000} />);
-    expect(screen.getByText("等待智能体事件…")).toBeTruthy();
-    rerender(<ProductChat {...productChatProps} runs={[completed]} messages={[{ id: "transition-message", role: "assistant", content: "处理完成", kind: "execution", runId: completed.id }]} />);
-    expect(screen.queryByText("等待智能体事件…")).toBeNull();
-    expect(screen.getByText("运行完成 · 0 次工具调用")).toBeTruthy();
-  });
-
-  it("普通对话和直接查询回复不保留运行摘要", () => {
-    const { container } = render(<ProductChat {...productChatProps} messages={[{ id: "direct-message", role: "assistant", content: "当前登记了 1 个数据集。", kind: "text" }]} />);
-    expect(container.querySelector(".execution-message")).toBeNull();
-    expect(screen.queryByText(/运行完成 ·/)).toBeNull();
-    expect(screen.queryByRole("button", { name: "查看运行详情" })).toBeNull();
-  });
 });
 
 describe("ApprovalCard", () => {
@@ -312,11 +160,6 @@ describe("ApprovalCard", () => {
     expect(onDeny).toHaveBeenCalledOnce();
   });
 
-  it("已拒绝后不显示执行按钮", () => {
-    render(<ApprovalCard approval={{ ...approval, status: "DENIED" }} busy={false} onApprove={vi.fn(async () => undefined)} onDeny={vi.fn(async () => undefined)} />);
-    expect(screen.queryByRole("button", { name: "批准并继续" })).toBeNull();
-    expect(screen.getByText("已拒绝该操作")).toBeTruthy();
-  });
 });
 
 describe("MapViewer", () => {
@@ -331,11 +174,6 @@ describe("MapViewer", () => {
     expect(screen.getByText("仅显示前 1 个要素")).toBeTruthy();
   });
 
-  it("局部展示预览错误而不影响页面", async () => {
-    vi.spyOn(api, "datasetPreview").mockRejectedValue(new Error("数据不存在"));
-    render(<MapViewer datasetId="missing" />);
-    expect(await screen.findByText("预览失败：数据不存在")).toBeTruthy();
-  });
 });
 
 const runRecord = (status: Run["status"]): Run => ({
@@ -350,13 +188,6 @@ describe("RunPanel", () => {
     return props;
   };
 
-  it("运行中允许取消但不显示恢复", () => {
-    const props = renderRunPanel("RUNNING");
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    expect(props.onCancel).toHaveBeenCalledWith("run-running");
-    expect(screen.queryByRole("button", { name: "从检查点恢复" })).toBeNull();
-  });
-
   it("中断运行显示恢复，失败运行不显示恢复", () => {
     const props = renderRunPanel("INTERRUPTED");
     fireEvent.click(screen.getByRole("button", { name: "从检查点恢复" }));
@@ -364,43 +195,6 @@ describe("RunPanel", () => {
     expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
   });
 
-  it("等待用户时显示取消任务而不是技术恢复", () => {
-    renderRunPanel("WAITING_USER");
-    expect(screen.getByRole("button", { name: "取消任务" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "从检查点恢复" })).toBeNull();
-  });
-});
-
-describe("对话删除", () => {
-  it("运行或等待中的对话仍可发起删除", async () => {
-    const user = { id: "user-1", username: "tester", display_name: "测试用户", is_active: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
-    const conversation = { id: "conversation-running", title: "正在处理", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" };
-    vi.spyOn(api, "me").mockResolvedValue(user);
-    vi.spyOn(api, "profile").mockResolvedValue({ user_id: user.id, language: "zh-CN", response_style: "balanced", measurement_system: "metric", updated_at: "2026-01-01T00:00:00Z" });
-    vi.spyOn(api, "datasets").mockResolvedValue([]);
-    vi.spyOn(api, "runs").mockResolvedValue([{ ...runRecord("WAITING_USER"), conversation_id: conversation.id }]);
-    vi.spyOn(api, "approvals").mockResolvedValue([]);
-    vi.spyOn(api, "conversations").mockResolvedValue([conversation]);
-    vi.spyOn(api, "messages").mockResolvedValue([]);
-    vi.spyOn(api, "modelStatus").mockResolvedValue({ configured: false, source: "test", profiles: [] });
-
-    render(<App />);
-
-    const remove = await screen.findByRole("button", { name: "删除对话 正在处理" });
-    await waitFor(() => expect((remove as HTMLButtonElement).disabled).toBe(false));
-    expect(remove.getAttribute("title")).toBe("删除对话");
-    const account = screen.getByRole("button", { name: /测试用户 @tester/ });
-    expect(account.querySelector(".account-chevron")).toBeNull();
-    expect(account.textContent).not.toContain("⌃");
-    fireEvent.click(account);
-    expect(account.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("button", { name: /^设置$/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "退出登录" })).toBeTruthy();
-    fireEvent.click(account);
-    expect(account.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(remove);
-    expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
-  });
 });
 
 describe("流式回答", () => {

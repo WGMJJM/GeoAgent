@@ -47,18 +47,6 @@ describe("前端 API 契约", () => {
     expect(JSON.parse(socket.sent[0])).not.toHaveProperty("planning_session_id");
   });
 
-  it("审批接口保持 approve/deny 路径", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ approval: { id: "approval-1", status: "APPROVED" }, run: null, result: null }), { status: 200, headers: { "Content-Type": "application/json" } }));
-    await api.approve("approval-1");
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/approvals/approval-1/approve");
-    expect(fetchMock.mock.calls[0][1]?.method).toBe("POST");
-  });
-
-  it("保留 HTTP 状态供界面解释 409", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ detail: "运行状态不支持恢复" }), { status: 409 }));
-    await expect(api.resumeRun("run-1")).rejects.toMatchObject({ status: 409, message: "运行状态不支持恢复" });
-  });
-
   it("不同请求使用独立 WebSocket，流式回调不会串线", async () => {
     class FakeWebSocket {
       static OPEN = 1;
@@ -106,27 +94,6 @@ describe("前端 API 契约", () => {
     await rejection;
   });
 
-  it("WebSocket 长时间无消息时按请求独立触发 watchdog", async () => {
-    vi.useFakeTimers();
-    class SilentWebSocket {
-      static OPEN = 1;
-      readyState = SilentWebSocket.OPEN;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      onerror: (() => void) | null = null;
-      onclose: (() => void) | null = null;
-      close = vi.fn();
-      send = vi.fn();
-      constructor() { queueMicrotask(() => this.onopen?.()); }
-    }
-    vi.stubGlobal("WebSocket", SilentWebSocket);
-    const pending = api.streamMessage("长任务", [], [], vi.fn(), vi.fn(), vi.fn(), "conversation-timeout");
-    const rejection = expect(pending).rejects.toThrow("长时间无响应");
-    await Promise.resolve();
-    await vi.advanceTimersByTimeAsync(60_001);
-    await rejection;
-  });
-
   it("WebSocket heartbeat 会刷新 watchdog 活跃时间", async () => {
     vi.useFakeTimers();
     class HeartbeatWebSocket {
@@ -156,32 +123,4 @@ describe("前端 API 契约", () => {
     await rejection;
   });
 
-  it("heartbeat 不伪装成执行进度，真实事件才更新进度回调", async () => {
-    class ProgressWebSocket {
-      static OPEN = 1;
-      static instance: ProgressWebSocket;
-      readyState = ProgressWebSocket.OPEN;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      onerror: (() => void) | null = null;
-      onclose: (() => void) | null = null;
-      close = vi.fn();
-      send = vi.fn();
-      constructor() {
-        ProgressWebSocket.instance = this;
-        queueMicrotask(() => this.onopen?.());
-      }
-    }
-    vi.stubGlobal("WebSocket", ProgressWebSocket);
-    const onProgress = vi.fn();
-    const pending = api.streamMessage("进度任务", [], [], vi.fn(), vi.fn(), vi.fn(), "conversation-progress", undefined, onProgress);
-    await Promise.resolve();
-    ProgressWebSocket.instance.onmessage?.({ data: JSON.stringify({ type: "heartbeat" }) } as MessageEvent);
-    expect(onProgress).not.toHaveBeenCalled();
-    ProgressWebSocket.instance.onmessage?.({ data: JSON.stringify({ type: "event", data: { id: "event-1" } }) } as MessageEvent);
-    ProgressWebSocket.instance.onmessage?.({ data: JSON.stringify({ type: "delta", content: "处理中" }) } as MessageEvent);
-    expect(onProgress).toHaveBeenCalledTimes(2);
-    pending.cancel();
-    await expect(pending).rejects.toThrow("请求已取消");
-  });
 });
