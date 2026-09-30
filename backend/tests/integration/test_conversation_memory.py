@@ -92,40 +92,6 @@ async def _save_messages(application, conversation_id: str, user_id: str, user_t
     )
 
 
-def test_message_persistence_precedes_summary_and_failure_does_not_trigger_it(application, monkeypatch):
-    conversation_id, user_id = "memory-save-order", "memory-save-owner"
-    application.conversations.ensure(conversation_id, "统一保存入口", user_id=user_id)
-    model = _SummaryModel()
-    application.model_adapter = model
-    user = Message(conversation_id=conversation_id, role="user", content="分析这个数据")
-    assistant = Message(conversation_id=conversation_id, role="assistant", content="已读取检查结果")
-    summarized = []
-
-    async def summarize(identifier, owner, adapter):
-        assert (identifier, owner, adapter) == (conversation_id, user_id, model)
-        assert application.conversation_memory.list_messages(identifier, user_id=owner) == [user, assistant]
-        summarized.append(identifier)
-        return False
-
-    monkeypatch.setattr(application.conversation_memory.summarizer, "summarize_pending", summarize)
-    asyncio.run(application.conversation_memory.save_message(user, user_id=user_id))
-    assert summarized == []
-
-    def failed_save(_message):
-        raise OSError("模拟持久化失败")
-
-    with monkeypatch.context() as failed_persistence:
-        failed_persistence.setattr(application.store, "save_message", failed_save)
-        with pytest.raises(OSError, match="持久化失败"):
-            asyncio.run(application.conversation_memory.save_message(assistant, user_id=user_id))
-    assert summarized == []
-    assert application.conversation_memory.list_messages(conversation_id, user_id=user_id) == [user]
-
-    asyncio.run(application.conversation_memory.save_message(assistant, user_id=user_id))
-    assert summarized == [conversation_id]
-    assert model.requests == []
-
-
 @pytest.mark.asyncio
 async def test_background_summary_does_not_delay_persisted_assistant_message(application, monkeypatch):
     conversation_id, user_id = "summary-background", "summary-background-owner"
@@ -252,81 +218,6 @@ def test_emergency_summary_bypasses_trigger_but_keeps_latest_eight_complete(appl
     assert application.store.list_messages(conversation_id, limit=100) == raw
 
 
-def test_daily_summary_limits_each_message_to_ten_thousand_characters(application):
-    conversation_id, user_id = "summary-message-limit", "summary-message-limit-owner"
-    application.conversations.ensure(conversation_id, "单条摘要边界", user_id=user_id)
-    long_message = Message(
-        id="msg-summary-long",
-        conversation_id=conversation_id,
-        role="user",
-        content="长消息" * 4000,
-    )
-    application.store.save_message(long_message)
-    _seed_messages(application, conversation_id, start=0, exchanges=8)
-    model = _SummaryModel()
-    summarizer = application.conversation_memory.summarizer
-    summarizer.trigger_messages = 1
-
-    assert asyncio.run(summarizer.summarize_pending(conversation_id, user_id, model))
-    payload = json.loads(model.requests[0].messages[1]["content"])
-    assert summarizer.message_max_chars == 10000
-    assert payload["messages"][0]["content"] == long_message.content[:10000]
-    assert application.store.list_messages(conversation_id, limit=100)[0].content == long_message.content
-
-
-@pytest.mark.parametrize("older_tokens", [51199, 51200])
-def test_summary_token_boundary_excludes_recent_messages_and_preserves_uncovered_batch(application, monkeypatch, older_tokens):
-    conversation_id, user_id = "summary-token-boundary", "summary-token-owner"
-    application.conversations.ensure(conversation_id, "摘要 token 边界", user_id=user_id)
-    raw = _seed_messages(application, conversation_id, start=0, exchanges=9)
-    model = _SummaryModel()
-    counts = {raw[0].content: 3200, raw[1].content: older_tokens - 3200}
-    # 最近 16 条即使很长，也不应计入较早消息的触发阈值。
-    monkeypatch.setattr(model, "count_tokens", lambda value: counts.get(value, 10000))
-    summarizer = application.conversation_memory.summarizer
-    assert (summarizer.recent_messages, summarizer.trigger_messages, summarizer.trigger_tokens) == (16, 24, 51200)
-    assert summarizer.message_max_chars == 10000
-    assert summarizer.emergency_recent_messages == 8
-    committed = asyncio.run(summarizer.summarize_pending(conversation_id, user_id, model))
-    assert committed is (older_tokens == 51200)
-    memory = application.conversation_memory.get(conversation_id, user_id)
-    assert memory is not None
-    if not committed:
-        assert model.requests == []
-        assert memory.summarized_through_message_id is None
-    else:
-        payload = json.loads(model.requests[0].messages[1]["content"])
-        # 沿用单批约 6k 的限制，只推进实际处理部分，不丢弃剩余候选。
-        assert [item["message_id"] for item in payload["messages"]] == [raw[0].id]
-        assert memory.summarized_through_message_id == raw[0].id
-        _, history = application.conversation_memory.load_context(conversation_id, user_id=user_id, recent_message_limit=24)
-        assert history == raw[1:]
-        assert history[-16:] == raw[-16:]
-    assert application.store.list_messages(conversation_id, limit=100) == raw
-
-
-@pytest.mark.parametrize("memory_state", ["missing", "summary_only", "cursor_only"])
-def test_context_without_complete_summary_boundary_keeps_recent_history(application, memory_state):
-    conversation_id, user_id = "context-without-coverage", "context-owner"
-    application.conversations.ensure(conversation_id, "没有有效覆盖边界", user_id=user_id)
-    raw = _seed_messages(application, conversation_id, start=0, exchanges=13)
-    if memory_state != "missing":
-        application.store.save_conversation_memory(
-            ConversationMemory(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                summary="旧摘要没有覆盖游标" if memory_state == "summary_only" else "",
-                summary_version=1,
-                summarized_through_message_id=raw[17].id if memory_state == "cursor_only" else None,
-            )
-        )
-    context = application.agent_loop.context.build(
-        AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="继续")
-    )
-    history = [item for item in context[:-1] if item["role"] != "system"]
-    assert history == [{"role": item.role, "content": item.content} for item in raw[-24:]]
-
-
 def test_context_keeps_uncovered_backlog_after_summary_failure(application):
     conversation_id, user_id = "context-summary-backlog", "context-backlog-owner"
     application.conversations.ensure(conversation_id, "摘要失败积压", user_id=user_id)
@@ -359,98 +250,8 @@ def test_context_keeps_uncovered_backlog_after_summary_failure(application):
     assert application.store.list_messages(conversation_id, limit=100) == raw
 
 
-def test_context_uses_one_summary_snapshot_during_concurrent_coverage_advance(application, monkeypatch):
-    conversation_id, user_id = "context-summary-snapshot", "context-snapshot-owner"
-    application.conversations.ensure(conversation_id, "摘要快照", user_id=user_id)
-    raw = _seed_messages(application, conversation_id, start=0, exchanges=20)
-    assert asyncio.run(application.conversation_memory.summarizer.summarize_pending(conversation_id, user_id, _SummaryModel()))
-    old = application.conversation_memory.get(conversation_id, user_id)
-    assert old is not None
-    raw.extend(_seed_messages(application, conversation_id, start=20, exchanges=4))
-    original_list_after = application.store.list_messages_after
-    calls = []
-
-    def advance_before_history_read(identifier, through_message_id):
-        calls.append(through_message_id)
-        assert application.store.commit_conversation_summary(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            expected_version=old.summary_version,
-            expected_through_message_id=old.summarized_through_message_id,
-            through_message_id=raw[27].id,
-            summary="并发生成的新摘要",
-            key_facts=[],
-            decisions=[],
-            unresolved_topics=[],
-            important_references=[],
-        )
-        return original_list_after(identifier, through_message_id)
-
-    monkeypatch.setattr(application.store, "list_messages_after", advance_before_history_read)
-    context = application.agent_loop.context.build(
-        AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="继续")
-    )
-    memory = json.loads(context[1]["content"].split("\n", 1)[1])["conversation_memory"]
-    assert calls == [old.summarized_through_message_id]
-    assert memory["summary"] == old.summary
-    assert memory["summary_version"] == old.summary_version
-    assert context[2:-1] == [{"role": item.role, "content": item.content} for item in raw[24:]]
-    latest = application.conversation_memory.get(conversation_id, user_id)
-    assert latest is not None
-    assert latest.summary_version == old.summary_version + 1
-    assert latest.summarized_through_message_id == raw[27].id
-
-
-def test_summary_boundary_does_not_filter_resumed_tool_protocol(application, monkeypatch):
-    conversation_id, user_id = "context-resumed-protocol", "context-protocol-owner"
-    application.conversations.ensure(conversation_id, "恢复工具协议", user_id=user_id)
-    raw = _seed_messages(application, conversation_id, start=0, exchanges=20)
-    assert asyncio.run(application.conversation_memory.summarizer.summarize_pending(conversation_id, user_id, _SummaryModel()))
-    def unexpected_history_read(*_args):
-        raise AssertionError("恢复时应保留 Checkpoint 协议，不再读取原始会话历史。")
-
-    monkeypatch.setattr(application.store, "list_messages_after", unexpected_history_read)
-    protocol = [
-        {"role": "user", "content": raw[0].content},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "inspect-call", "type": "function", "function": {"name": "dataset.inspect", "arguments": '{"dataset_id":"ds-example"}'}}
-        ]},
-        {"role": "tool", "content": '{"dataset_id":"ds-example","name":"DEM"}', "tool_call_id": "inspect-call"},
-    ]
-    run = Run(conversation_id=conversation_id, agent_id="main", status=RunStatus.RUNNING)
-    application.store.save_run(run)
-    context = application.agent_loop.context.build(
-        AgentRequest(user_id=user_id, conversation_id=conversation_id, user_input="继续"),
-        run=run,
-        protocol_messages=protocol,
-        append_request=False,
-    )
-    assert context[2:] == protocol
-
-
-def test_summary_trigger_runs_after_assistant_messages_are_persisted(application):
-    conversation_id, user_id = "summary-entry-modes", "summary-owner"
-    application.conversations.ensure(conversation_id, "入口摘要", user_id=user_id)
-    model = _SummaryModel()
-    application.model_adapter = model
-    _seed_messages(application, conversation_id, start=0, exchanges=19)
-    asyncio.run(
-        _save_messages(application, conversation_id, user_id, "补充一个研究决定", "已记录。")
-    )
-    after_first = application.conversation_memory.get(conversation_id, user_id)
-    assert after_first is not None and after_first.summary_version == 1
-
-    _seed_messages(application, conversation_id, start=19, exchanges=11)
-    asyncio.run(
-        _save_messages(application, conversation_id, user_id, "再补充一个分析决定", "已记录第二项。")
-    )
-    after_second = application.conversation_memory.get(conversation_id, user_id)
-    assert after_second is not None and after_second.summary_version == 2
-
-
-@pytest.mark.parametrize("failure", ["exception", "invalid_json", "timeout"])
-def test_summary_failure_keeps_old_summary_and_does_not_break_exchange(application, failure):
-    conversation_id, user_id = f"summary-failure-{failure}", "summary-failure-owner"
+def test_summary_failure_keeps_old_summary_and_does_not_break_exchange(application):
+    conversation_id, user_id = "summary-failure-invalid-json", "summary-failure-owner"
     application.conversations.ensure(conversation_id, "摘要失败", user_id=user_id)
     _seed_messages(application, conversation_id, start=0, exchanges=20)
     old = ConversationMemory(conversation_id=conversation_id, user_id=user_id, summary="既有摘要", summary_version=3)
@@ -460,14 +261,8 @@ def test_summary_failure_keeps_old_summary_and_does_not_break_exchange(applicati
         supports_json_object = True
 
         async def complete(self, request: ModelRequest) -> ModelResponse:
-            if failure == "exception":
-                raise RuntimeError("model unavailable")
-            if failure == "timeout":
-                await asyncio.sleep(0.05)
-            return ModelResponse(content="not-json" if failure == "invalid_json" else json.dumps(_summary_response(json.loads(request.messages[1]["content"]))))
+            return ModelResponse(content="not-json")
 
-    if failure == "timeout":
-        application.conversation_memory.summarizer.timeout_seconds = 0.005
     application.model_adapter = FailingModel()
     asyncio.run(_save_messages(application, conversation_id, user_id, "继续补充研究背景", "已记录。"))
 

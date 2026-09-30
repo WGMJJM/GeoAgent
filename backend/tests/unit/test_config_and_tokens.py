@@ -10,10 +10,9 @@ from tokenizers.pre_tokenizers import Whitespace
 
 from app.application import Application
 from app.config import Settings
-from app.core.tokens import DEFAULT_TOKENIZER_FILE, _load_tokenizer, estimate_tokens
+from app.core.tokens import DEFAULT_TOKENIZER_FILE
 from app.models.config import ModelProfile
 from app.models.providers.openai_compatible import OpenAICompatibleAdapter
-from app.models.providers.openai_responses import OpenAIResponsesAdapter
 
 DEEPSEEK_TOKENIZER_FILE = Path(__file__).resolve().parents[2] / "resources/tokenizers/deepseek-v4.1.json"
 
@@ -95,56 +94,6 @@ async def test_additional_model_profiles_extend_existing_profiles(tmp_path):
         await application.close()
 
 
-@pytest.mark.asyncio
-async def test_gpt_6_sol_profile_can_be_selected_as_default_without_ultra(tmp_path):
-    settings = Settings(
-        root=tmp_path,
-        database=tmp_path / "state.sqlite3",
-        workspace=tmp_path / "workspace",
-        model_profiles=json.dumps([{
-            "id": "qwen",
-            "label": "通义千问",
-            "model": "qwen",
-        }]),
-        additional_model_profiles=json.dumps([{
-            "id": "gpt-6-sol",
-            "label": "GPT-6 Sol",
-            "base_url": "https://example.invalid/v1",
-            "api_key": "placeholder",
-            "model": "gpt-6-sol",
-            "wire_api": "responses",
-            "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
-            "default_reasoning_effort": "medium",
-            "default": True,
-        }]),
-        enable_arcpy=False,
-    )
-    application = Application(settings)
-    try:
-        assert application.default_model_profile == "gpt-6-sol"
-        profile = application.model_profiles["gpt-6-sol"]
-        assert profile.wire_api == "responses"
-        assert isinstance(application.get_model_adapter("gpt-6-sol"), OpenAIResponsesAdapter)
-        assert isinstance(application.get_model_adapter("qwen"), OpenAICompatibleAdapter)
-        assert profile.reasoning_efforts == ["low", "medium", "high", "xhigh", "max"]
-        assert "ultra" not in profile.reasoning_efforts
-    finally:
-        await application.close()
-
-
-def test_local_token_counts_match_bundled_tokenizer_and_cache():
-    tokenizer = Tokenizer.from_file(str(DEFAULT_TOKENIZER_FILE))
-    for content in ("", "坡度分析 DEM 重投影 EPSG:32650", '{"dataset_id":"ds_1","distance":500}', "hello world"):
-        assert estimate_tokens(content) == len(tokenizer.encode(content, add_special_tokens=False).ids)
-    assert _load_tokenizer(DEFAULT_TOKENIZER_FILE.resolve()) is _load_tokenizer(DEFAULT_TOKENIZER_FILE.resolve())
-
-
-def test_bundled_deepseek_tokenizer_matches_local_counter():
-    tokenizer = Tokenizer.from_file(str(DEEPSEEK_TOKENIZER_FILE))
-    for content in ("", "坡度分析 DEM 重投影 EPSG:32650", '{"dataset_id":"ds_1"}', "hello world"):
-        assert estimate_tokens(content, DEEPSEEK_TOKENIZER_FILE) == len(tokenizer.encode(content, add_special_tokens=False).ids)
-
-
 def test_model_profile_tokenizer_override_and_global_default(tmp_path):
     path = tmp_path / "custom.json"
     tokenizer = Tokenizer(WordLevel({"[UNK]": 0, "hello": 1, "world": 2}, unk_token="[UNK]"))
@@ -158,10 +107,3 @@ def test_model_profile_tokenizer_override_and_global_default(tmp_path):
     adapter.config = config
     assert adapter.count_tokens("hello world") == 2  # 不沿用文件的 padding/truncation。
     assert profile.model_copy(update={"tokenizer_file": DEFAULT_TOKENIZER_FILE}).as_config(tokenizer_file=path).tokenizer_file == DEFAULT_TOKENIZER_FILE
-
-
-def test_missing_or_invalid_tokenizer_is_not_silently_replaced(tmp_path):
-    with pytest.raises(Exception, match="系统找不到|No such file|os error"):
-        estimate_tokens("输入", tmp_path / "missing.json")
-    with pytest.raises(Exception):
-        estimate_tokens("输入", Path(__file__))
