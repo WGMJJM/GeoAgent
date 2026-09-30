@@ -68,6 +68,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     executor = ToolExecutor(registry, store, trace)
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
                                model_input_tokens=128000, tool_result_recent_full=16,
+                               conversation_tool_index_limit=8,
                                tool_result_emergency_fraction=0.5,
                                tool_context_tokens=25600, tool_context_max_cards=8,
                                tool_search_regex_results=2, tool_search_chinese_results=1,
@@ -396,14 +397,18 @@ async def test_fresh_run_reuses_conversation_tool_capability_without_research(tm
 async def test_fresh_run_sees_execution_index_and_reads_one_original_result(tmp_path):
     dataset = Dataset(id="ds_roads", name="roads", kind=DatasetKind.VECTOR, path="roads.gpkg", format="GPKG")
     adapter = SequenceAdapter(
-        ModelResponse(tool_calls=[{"id": "list", "function": {"name": "dataset.list", "arguments": "{}"}}]),
+        ModelResponse(tool_calls=[
+            {"id": f"list_{index}", "function": {"name": "dataset.list", "arguments": "{}"}}
+            for index in range(10)
+        ]),
         ModelResponse(content="已经读取数据列表。"),
     )
     store, loop = _loop(tmp_path, adapter, [dataset])
+    loop.settings.max_tool_calls = 10
     conversation = store.create_conversation("跨运行结果", user_id="test-user")
     first_request = AgentRequest(conversation_id=conversation.id, user_id="test-user", user_input="列出数据")
     first = await loop.run(first_request, prepared=await loop.prepare_request(first_request))
-    source_call_id = f"{first.trace_id}:list"
+    source_call_id = f"{first.trace_id}:list_9"
     adapter.responses.extend(
         [
             ModelResponse(
@@ -433,6 +438,11 @@ async def test_fresh_run_sees_execution_index_and_reads_one_original_result(tmp_
     assert '"tool_name":"dataset.list"' in execution_context
     assert '"result_body_available":true' in execution_context
     assert "roads" not in execution_context
+    execution_index = json.loads(execution_context.split("\n", 1)[1])["recent_tool_executions"]
+    assert [item["tool_call_id"] for item in execution_index] == [
+        f"{first.trace_id}:list_{index}" for index in range(2, 10)
+    ]
+    assert store.get_tool_call_record(f"{first.trace_id}:list_0") is not None
     observation = next(
         json.loads(item["content"])
         for item in adapter.requests[3].messages

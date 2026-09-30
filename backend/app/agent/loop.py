@@ -143,7 +143,7 @@ class AgentLoop:
             store,
             profile_service=context_services.get("profile"),
             conversation_memory=context_services["conversation_memory"],
-            recent_tool_results=settings.tool_result_recent_full,
+            recent_tool_results=settings.conversation_tool_index_limit,
         )
         self.model_adapter: ModelAdapter | None = None
         self.model_adapters: dict[str, ModelAdapter] = {}

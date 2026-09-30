@@ -10,6 +10,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from app.config import DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT
 from app.core.models import AgentRequest, ConversationMemory, Run
 from app.core.tokens import estimate_tokens
 from app.memory import ConversationMemoryService
@@ -45,7 +46,7 @@ class ContextBuilder:
         conversation_memory: ConversationMemoryService,
         profile_service=None,
         recent_message_limit: int = 24,
-        recent_tool_results: int = 16,
+        recent_tool_results: int = DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT,
     ) -> None:
         self.store = store
         self.profile_service = profile_service
