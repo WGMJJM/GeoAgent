@@ -8,8 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:run": "vitest run"
+    "test": "node --import ./test-environment.mjs ./node_modules/vitest/vitest.mjs run",
+    "test:run": "node --import ./test-environment.mjs ./node_modules/vitest/vitest.mjs run"
   },
   "engines": {
     "node": ">=20.19.0"
