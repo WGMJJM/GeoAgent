@@ -60,6 +60,8 @@ export const EVENT_LABELS: Record<string, string> = {
   DecisionMade: "已确定下一步动作",
   TokenUsageUpdated: "Token 用量更新",
   ModelResponseStarted: "模型正在生成回复",
+  SkillReading: "正在读取技能",
+  SkillRead: "技能读取完成",
   ToolPreparing: "正在准备工具",
   SubTaskCreated: "已创建子任务",
   SubAgentSpawned: "已启动子智能体",

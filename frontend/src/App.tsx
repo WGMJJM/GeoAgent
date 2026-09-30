@@ -946,9 +946,10 @@ export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage, str
   return <RunProgress events={events} durationMs={durationMs} live phase={phase} tokenUsage={tokenUsage} streaming={streaming} smoothTokenUsage={smoothTokenUsage} />;
 }
 
-const ACTIVE_PROGRESS_EVENTS = new Set(["ToolPreparing", "ToolStarted", "SubAgentSpawned", "VerificationStarted", "RetryStarted", "ReplanStarted", "ResumeStarted"]);
+const ACTIVE_PROGRESS_EVENTS = new Set(["SkillReading", "ToolPreparing", "ToolStarted", "SubAgentSpawned", "VerificationStarted", "RetryStarted", "ReplanStarted", "ResumeStarted"]);
 
 function liveProgressText(event: Event): string {
+  if (event.event_type === "SkillReading" || event.event_type === "SkillRead") return displayEventMessage(event.message);
   const tool = typeof event.payload.tool === "string" ? displayEventMessage(event.payload.tool) : "";
   if (event.event_type === "ToolPreparing") {
     const tools = Array.isArray(event.payload.tools) ? event.payload.tools.filter((item): item is string => typeof item === "string") : [];

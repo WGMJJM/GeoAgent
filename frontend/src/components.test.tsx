@@ -26,6 +26,18 @@ describe("运行累计 Token 用量", () => {
     expect(container.querySelector(".run-summary-current .run-token-usage")?.getAttribute("title")).toContain("输入 1,200 tokens");
   });
 
+  it("技能读取独立显示过程，不作为业务工具调用", () => {
+    const reading: Event = { id: "skill", run_id: "run-1", event_type: "SkillReading", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "正在读取技能：result-reporting", payload: { skill: "result-reporting" } };
+    const { container, rerender } = render(<LiveExecutionStatus phase="running" events={[reading]} durationMs={1000} />);
+    expect(screen.getByText("正在读取技能：result-reporting")).toBeTruthy();
+    expect(container.querySelector(".run-progress-spinner")).toBeTruthy();
+    expect(screen.queryByText(/正在执行/)).toBeNull();
+    const completed: Event = { ...reading, id: "skill-read", sequence: 2, event_type: "SkillRead", message: "技能读取完成", payload: { status: "SUCCESS" } };
+    rerender(<LiveExecutionStatus phase="running" events={[reading, completed]} durationMs={1100} />);
+    expect(screen.getByText("技能读取完成")).toBeTruthy();
+    expect(container.querySelector(".run-progress-spinner")).toBeNull();
+  });
+
   it("实时更新使用累计快照，重复事件不重复累加，也不覆盖当前执行状态", () => {
     const progress: Event = { id: "progress", run_id: "run-1", event_type: "ToolStarted", sequence: 1, timestamp: "2026-01-01T10:00:00Z", message: "检查栅格", payload: {} };
     const measured: Event = { ...progress, id: "usage", event_type: "TokenUsageUpdated", sequence: 2, payload: { token_usage: usage } };
