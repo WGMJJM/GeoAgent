@@ -14,6 +14,7 @@ from app.agent.context import (
     prepare_model_messages,
 )
 from app.agent.loop import AgentLoop
+from app.agent.skills import SKILL_CONTENT_PREFIX, SkillCatalog, skill_messages
 from app.core.models import (
     AgentRequest,
     AgentResultStatus,
@@ -55,7 +56,7 @@ class DatasetView:
         return next((row for row in self.rows if identifier in {row.id, row.name}), None)
 
 
-def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None = None):
+def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None = None, *, skills=None):
     store = StateStore(tmp_path / "state.sqlite3")
     store.initialize()
     registry = ToolRegistry()
@@ -86,7 +87,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
             "workspace": object(),
             "user_id": user_id,
         },
-        context_services={"conversation_memory": ConversationMemoryService(store)},
+        context_services={"conversation_memory": ConversationMemoryService(store), "skills": skills},
     )
     return store, loop
 
@@ -113,6 +114,158 @@ async def _run(loop: AgentLoop, store: StateStore, text: str, on_model_delta=Non
     store.save_message(Message(conversation_id=conversation.id, role="user", content=text))
     prepared = await loop.prepare_request(request)
     return request, await loop.run(request, prepared=prepared, on_model_delta=on_model_delta)
+
+
+def _skills(tmp_path):
+    directory = tmp_path / "skills" / "report"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text("---\nname: report\ndescription: 需要时组织结果证据\n---\n区分实际结果与推断", encoding="utf-8")
+    (directory / "reference.md").write_text("参考内容", encoding="utf-8")
+    return SkillCatalog(directory.parent)
+
+
+@pytest.mark.asyncio
+async def test_skill_reads_are_hidden_internal_actions_and_reuse_context(tmp_path):
+    class StreamingSkills(SequenceAdapter):
+        async def stream(self, request):
+            response = await self.complete(request)
+            for character in response.content:
+                yield ModelStreamChunk(content=character)
+            yield ModelStreamChunk(done=True, input_tokens=100, output_tokens=20)
+
+    adapter = StreamingSkills(
+        ModelResponse(content='{"action":"read_skill","name":"report"}'),
+        ModelResponse(content='{"action":"read_skill","name":"report","path":"reference.md"}'),
+        ModelResponse(content='{"action":"read_skill","name":"report"}'),
+        ModelResponse(content='{"answer":"已整理结果"}'),
+    )
+    catalog = _skills(tmp_path)
+    store, loop = _loop(tmp_path, adapter, skills=catalog)
+    fragments, usages = [], []
+
+    async def capture(content, usage):
+        fragments.append(content)
+        usages.append(usage)
+
+    request, result = await _run(loop, store, "需要技能指导时再读取", capture)
+    assert result.status is AgentResultStatus.SUCCESS
+    assert "".join(fragments) == result.summary == '{"answer":"已整理结果"}'
+    assert usages[-1].model_calls == 4
+    assert usages[-1].reported_output_tokens == 80
+    assert not skill_messages(adapter.requests[0].messages)
+    assert "区分实际结果与推断" not in str(adapter.requests[0].messages)
+    assert len(skill_messages(adapter.requests[1].messages)) == 1
+    assert len(skill_messages(adapter.requests[3].messages)) == 2
+    assert all(not any(item["function"]["name"].startswith("skill") for item in sent.tools) for sent in adapter.requests)
+    assert not any(name.startswith("skill") for name in loop.registry.names())
+    assert store.get_run(result.trace_id).tool_call_count == 0
+    checkpoint = store.latest_checkpoint(result.trace_id)
+    assert len(checkpoint.state["skill_messages"]) == 2
+    assert all("read_skill" not in item.get("content", "") for item in checkpoint.state["protocol_messages"])
+    assert store.get_conversation_tool_state(request.conversation_id, user_id=request.user_id) == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_optional_skills_do_not_load_for_direct_tool_use(tmp_path, monkeypatch):
+    catalog = _skills(tmp_path)
+
+    def unexpected_read(*_args):
+        raise AssertionError("有技能目录不代表需要读取")
+
+    monkeypatch.setattr(catalog, "read", unexpected_read)
+    adapter = SequenceAdapter(
+        ModelResponse(tool_calls=[{"id": "list", "function": {"name": "dataset.list", "arguments": "{}"}}]),
+        ModelResponse(content="没有数据。"),
+    )
+    store, loop = _loop(tmp_path, adapter, skills=catalog)
+    _, result = await _run(loop, store, "查看数据列表")
+    assert result.status is AgentResultStatus.SUCCESS
+    assert store.get_run(result.trace_id).tool_call_count == 1
+    assert all(not skill_messages(sent.messages) for sent in adapter.requests)
+
+
+@pytest.mark.asyncio
+async def test_skill_snapshot_survives_resume_but_does_not_auto_load_in_next_run(tmp_path, monkeypatch):
+    catalog = _skills(tmp_path)
+    reads = []
+    original = catalog.read
+
+    def counted_read(name, path):
+        reads.append((name, path))
+        return original(name, path)
+
+    monkeypatch.setattr(catalog, "read", counted_read)
+    adapter = SequenceAdapter(
+        ModelResponse(content='{"action":"read_skill","name":"report"}'),
+        ModelResponse(tool_calls=[{"id": "pause", "function": {"name": "agent.ask_user", "arguments": '{"question":"继续吗？"}'}}]),
+        ModelResponse(content="按照已读指导完成。"),
+        ModelResponse(content="你好。"),
+    )
+    store, loop = _loop(tmp_path, adapter, skills=catalog)
+    request, waiting = await _run(loop, store, "整理报告")
+    assert waiting.error == "WAITING_USER"
+    snapshot = store.latest_checkpoint(waiting.trace_id)
+    assert len(snapshot.state["skill_messages"]) == 1
+    catalog.entries["report"].location.write_text("文件修改后不能替换恢复快照", encoding="utf-8")
+    result = await loop.run(request, prepared=loop.prepare_resume(request, store.get_run(waiting.trace_id)),
+                            resume_from=snapshot, continuation={"type": "user_input", "content": "继续"})
+    assert result.status is AgentResultStatus.SUCCESS
+    assert reads == [("report", "SKILL.md")]
+    assert "区分实际结果与推断" in skill_messages(adapter.requests[2].messages)[0]["content"]
+    next_request = AgentRequest(conversation_id=request.conversation_id, user_id=request.user_id, user_input="你好")
+    store.save_message(Message(conversation_id=request.conversation_id, role="user", content="你好"))
+    await loop.run(next_request, prepared=await loop.prepare_request(next_request))
+    assert not skill_messages(adapter.requests[3].messages)
+    assert reads == [("report", "SKILL.md")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,tools,protocol_error", [
+    ('{"action":"read_skill","name":"unknown"}', [], False),
+    ('{"action":"read_skill","name":"report","path":"../../private.txt"}', [], False),
+    ('{"action":"read_skill","name":true}', [], True),
+    ('{"action":"read_skill","name":"report"', [], True),
+    ('{"action":"read_skill","name":"report"}', [{"id":"mixed", "function":{"name":"dataset.list", "arguments":"{}"}}], True),
+])
+async def test_invalid_skill_requests_never_execute_tools_or_leak_control_json(tmp_path, content, tools, protocol_error):
+    adapter = SequenceAdapter(ModelResponse(content=content, tool_calls=tools), ModelResponse(content="读取不可用，没有执行业务操作。"))
+    store, loop = _loop(tmp_path, adapter, skills=_skills(tmp_path))
+    fragments = []
+
+    async def capture(text, _usage):
+        fragments.append(text)
+
+    _, result = await _run(loop, store, "按需读取", capture)
+    assert store.get_run(result.trace_id).tool_call_count == 0
+    assert "read_skill" not in "".join(fragments)
+    if protocol_error:
+        assert result.error == "MODEL_PROTOCOL_ERROR"
+        assert len(adapter.requests) == 1
+    else:
+        assert result.status is AgentResultStatus.SUCCESS
+        returned = json.loads(skill_messages(adapter.requests[1].messages)[0]["content"].removeprefix(SKILL_CONTENT_PREFIX))
+        assert "error" in returned and "content" not in returned
+
+
+@pytest.mark.asyncio
+async def test_skill_body_counts_toward_input_budget_and_is_not_a_tool_result(tmp_path, monkeypatch):
+    adapter = SequenceAdapter(ModelResponse(content='{"action":"read_skill","name":"report"}'))
+    store, loop = _loop(tmp_path, adapter, skills=_skills(tmp_path))
+    original = adapter.complete
+
+    async def complete(request):
+        response = await original(request)
+        loop.settings.model_input_tokens = model_input_tokens(request.messages, request.tools, adapter.count_tokens) + 1
+        return response
+
+    monkeypatch.setattr(adapter, "complete", complete)
+    _, result = await _run(loop, store, "当前请求不能丢失")
+    assert result.error == "BUDGET_EXCEEDED"
+    assert len(adapter.requests) == 1
+    assert store.get_run(result.trace_id).tool_call_count == 0
+    snapshot = store.latest_checkpoint(result.trace_id)
+    assert "区分实际结果与推断" in snapshot.state["skill_messages"][0]["content"]
+    assert snapshot.state["request"]["user_input"] == "当前请求不能丢失"
 
 
 @pytest.mark.asyncio

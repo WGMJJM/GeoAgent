@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.agent.delegation import DelegationCoordinator
 from app.agent.loop import AgentLoop
+from app.agent.skills import SkillCatalog
 from app.auth import ApprovalService, AuthService, PermissionPolicy
 from app.config import Settings
 from app.core.models import AgentRequest, AgentResult, AgentResultStatus, ReasoningEffort, new_id
@@ -45,6 +46,7 @@ from app.tools.runtime import register_runtime_tools
 class Application:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
+        self.skills = SkillCatalog(self.settings.skills_path)
         self.store = StateStore(self.settings.database_path)
         self.auth = AuthService(self.store, self.settings)
         self.approvals = ApprovalService(self.store)
@@ -122,6 +124,7 @@ class Application:
             context_services={
                 "profile": self.profile,
                 "conversation_memory": self.conversation_memory,
+                "skills": self.skills,
             },
             tool_providers=(self.arcpy,) if self.arcpy is not None else (),
             metrics=self.metrics,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import aclosing
@@ -50,6 +51,7 @@ from .context import (
     tool_visibility_message,
 )
 from .delegation import DELEGATE_TOOL
+from .skills import SkillStreamBuffer, add_skill_content, parse_skill_request, skill_messages
 
 ASK_USER_TOOL = {
     "type": "function",
@@ -144,6 +146,7 @@ class AgentLoop:
             profile_service=context_services.get("profile"),
             conversation_memory=context_services["conversation_memory"],
             recent_tool_results=settings.conversation_tool_index_limit,
+            skills=context_services.get("skills"),
         )
         self.model_adapter: ModelAdapter | None = None
         self.model_adapters: dict[str, ModelAdapter] = {}
@@ -295,6 +298,7 @@ class AgentLoop:
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
             response = None
+            skill_stream = SkillStreamBuffer() if self.context.skills is not None and self.context.skills.entries else None
             try:
                 if not resume_pending:
                     model_messages = prepare_model_messages(messages, model_tools, model_cards)
@@ -397,7 +401,8 @@ class AgentLoop:
                                     content_parts.append(chunk.content)
                                     live_output_tokens += model.count_tokens(chunk.content)
                                     if on_model_delta is not None and not chunk.tool_calls:
-                                        await on_model_delta(chunk.content, live_usage())
+                                        visible = skill_stream.feed(chunk.content) if skill_stream else chunk.content
+                                        await on_model_delta(visible, live_usage())
                                 response = ModelResponse(
                                     content="".join(content_parts), tool_calls=chunk.tool_calls,
                                     input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
@@ -408,7 +413,8 @@ class AgentLoop:
                                 content_parts.append(chunk.content)
                                 live_output_tokens += model.count_tokens(chunk.content)
                                 if on_model_delta is not None:
-                                    await on_model_delta(chunk.content, live_usage())
+                                    visible = skill_stream.feed(chunk.content) if skill_stream else chunk.content
+                                    await on_model_delta(visible, live_usage())
                     if response is None:
                         raise ValueError("模型流未返回结束片段。")
             except Exception:
@@ -444,6 +450,43 @@ class AgentLoop:
                         agent_id=measured_run.agent_id,
                         payload={"token_usage": measured_run.token_usage.model_dump(mode="json")},
                     )
+
+            if response is not None and skill_stream is not None:
+                try:
+                    skill_request = parse_skill_request(response.content)
+                    if skill_request is not None and response.tool_calls:
+                        raise ValueError("技能读取请求不能与业务工具调用混在同一条消息中。")
+                except ValueError as exc:
+                    return await self._finish(current, request=request, result=AgentResult(
+                        agent_id=current.agent_id, status=AgentResultStatus.FAILED,
+                        summary=f"模型返回了无效的技能控制请求：{exc}",
+                        error="MODEL_PROTOCOL_ERROR", trace_id=current.id,
+                    ))
+                if skill_request is not None:
+                    await self.trace.emit(
+                        current.id, EventType.SKILL_READING, f"正在读取技能：{skill_request.name}",
+                        agent_id=current.agent_id, payload={"skill": skill_request.name, "path": skill_request.path},
+                    )
+                    try:
+                        payload = await asyncio.to_thread(self.context.skills.read, skill_request.name, skill_request.path)
+                        status = "SUCCESS"
+                    except (KeyError, OSError, UnicodeError, ValueError) as exc:
+                        payload = {"name": skill_request.name, "path": skill_request.path, "error": str(exc)}
+                        status = "FAILED"
+                    add_skill_content(messages, payload)
+                    self._save_checkpoint(
+                        request, current, messages, cursor_id, "skill_read", activated_names,
+                        pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                    )
+                    await self.trace.emit(
+                        current.id, EventType.SKILL_READ,
+                        "技能读取完成" if status == "SUCCESS" else "技能读取失败，原因已返回模型",
+                        agent_id=current.agent_id,
+                        payload={"skill": skill_request.name, "path": skill_request.path, "status": status},
+                    )
+                    continue
+                if on_model_delta is not None and not response.tool_calls and skill_stream.pending:
+                    await on_model_delta(skill_stream.flush(), current.token_usage)
 
             if response is None or response.tool_calls:
                 restoring_batch = bool(resume_pending)
@@ -1053,6 +1096,7 @@ class AgentLoop:
         if not protocol:
             return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
         built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
+        built.extend(skill_messages(state.get("skill_messages", [])))
         return built, cursor_id
 
     def _refresh_conversation_prefix(
@@ -1076,7 +1120,7 @@ class AgentLoop:
         history = [{"role": item.role, "content": item.content} for item in persisted[:start]]
         prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
-        return prefix + protocol[history_count:], len(history)
+        return prefix + protocol[history_count:] + skill_messages(messages), len(history)
 
     def _save_checkpoint(
         self,
@@ -1113,6 +1157,7 @@ class AgentLoop:
                     "schema_version": 1,
                     "request": request.model_dump(mode="json"),
                     "protocol_messages": protocol_messages,
+                    "skill_messages": skill_messages(messages),
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
                     "discovered_tool_names": resolved_discovered,

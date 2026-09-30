@@ -14,6 +14,8 @@ class EventType(StrEnum):
     DECISION_MADE = "DecisionMade"
     TOKEN_USAGE_UPDATED = "TokenUsageUpdated"
     MODEL_RESPONSE_STARTED = "ModelResponseStarted"
+    SKILL_READING = "SkillReading"
+    SKILL_READ = "SkillRead"
     TOOL_PREPARING = "ToolPreparing"
     SUBTASK_CREATED = "SubTaskCreated"
     SUBAGENT_SPAWNED = "SubAgentSpawned"
