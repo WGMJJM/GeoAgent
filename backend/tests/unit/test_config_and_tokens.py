@@ -8,6 +8,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 
+from app.agent.skills import SkillCatalog, SkillStreamBuffer, parse_skill_request
 from app.application import Application
 from app.config import Settings
 from app.core.tokens import DEFAULT_TOKENIZER_FILE
@@ -40,6 +41,7 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     example = Path(__file__).resolve().parents[2] / ".env.example"
     settings = Settings(_env_file=example)
     assert settings.workspace == Path("../workspace")
+    assert settings.skills_directory == Path("backend/skills")
     assert settings.max_agent_turns == 20
     assert settings.max_tool_calls == 40
     assert settings.max_subagents == 5
@@ -107,3 +109,57 @@ def test_model_profile_tokenizer_override_and_global_default(tmp_path):
     adapter.config = config
     assert adapter.count_tokens("hello world") == 2  # 不沿用文件的 padding/truncation。
     assert profile.model_copy(update={"tokenizer_file": DEFAULT_TOKENIZER_FILE}).as_config(tokenizer_file=path).tokenizer_file == DEFAULT_TOKENIZER_FILE
+
+
+def test_skill_catalog_discovers_metadata_and_reads_only_approved_files(tmp_path):
+    directory = tmp_path / "skills"
+    skill = directory / "report"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text('---\nname: report\ndescription: >\n  按需组织分析证据\n---\n正文不提前加载', encoding="utf-8")
+    (skill / "reference.md").write_text("参考资料", encoding="utf-8")
+    outside = tmp_path / "private.txt"
+    outside.write_text("目录外内容", encoding="utf-8")
+    catalog = SkillCatalog(directory)
+    assert "正文不提前加载" not in catalog.prompt_message()["content"]
+    assert catalog.read("report")["content"].endswith("正文不提前加载")
+    assert catalog.read("report", "reference.md")["content"] == "参考资料"
+    for path in ("../../private.txt", str(outside)):
+        with pytest.raises(ValueError, match="相对文件路径"):
+            catalog.read("report", path)
+    with pytest.raises(KeyError):
+        catalog.read("unknown")
+    assert SkillCatalog(tmp_path / "empty").prompt_message() is None
+
+
+def test_skill_symlink_cannot_escape_approved_directory(tmp_path):
+    directory = tmp_path / "skills" / "report"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text("---\nname: report\ndescription: 结果指导\n---\n正文", encoding="utf-8")
+    outside = tmp_path / "private.txt"
+    outside.write_text("目录外内容", encoding="utf-8")
+    try:
+        (directory / "escape.md").symlink_to(outside)
+    except OSError as exc:
+        if exc.winerror == 1314:
+            pytest.skip("当前 Windows 账户没有创建符号链接的权限")
+        raise
+    with pytest.raises(ValueError):
+        SkillCatalog(directory.parent).read("report", "escape.md")
+
+
+def test_skill_control_request_and_streaming_do_not_capture_normal_answers():
+    content = '{"action":"read_skill","name":"report"}'
+    buffer = SkillStreamBuffer()
+    assert all(buffer.feed(character) == "" for character in content)
+    assert parse_skill_request(content).name == "report"
+    for value in ('{"action":"read_skill","name":false}', '{"action":"read_skill"', '{"action":"read_skill","name":"report","code":"x"}'):
+        with pytest.raises(ValueError):
+            parse_skill_request(value)
+    assert parse_skill_request('{"answer":"普通 JSON"}') is None
+    assert parse_skill_request("普通回答") is None
+    text = SkillStreamBuffer()
+    assert text.feed("你好") == "你好"
+    assert text.feed("，可以直接回答。") == "，可以直接回答。"
+    ordinary = SkillStreamBuffer()
+    assert ordinary.feed('{"answer":"普通 JSON"}') == ""
+    assert ordinary.flush() == '{"answer":"普通 JSON"}'

@@ -22,6 +22,7 @@ dependencies = [
     "pypdf>=6.19,<7",
     "python-docx>=1.2,<2",
     "Pillow>=12.3,<13",
+    "PyYAML>=6,<7",
 ]
 
 [project.optional-dependencies]

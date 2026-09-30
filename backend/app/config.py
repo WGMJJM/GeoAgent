@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     root: Path = Field(default=PROJECT_ROOT)
     database: Path = Field(default=Path("state/geoagent.sqlite3"))
     workspace: Path = Field(default=Path("workspace"))
+    skills_directory: Path = Field(default=Path("backend/skills"))
     default_crs: str = "EPSG:3857"
     max_agent_turns: int = Field(default=20, ge=1)
     max_tool_calls: int = Field(default=40, ge=1)
@@ -73,6 +74,10 @@ class Settings(BaseSettings):
     @property
     def workspace_path(self) -> Path:
         return self._absolute(self.workspace)
+
+    @property
+    def skills_path(self) -> Path:
+        return self._absolute(self.skills_directory)
 
     @property
     def arcpy_cache_path(self) -> Path:
