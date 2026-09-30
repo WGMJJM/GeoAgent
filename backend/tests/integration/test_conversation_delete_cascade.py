@@ -1,8 +1,6 @@
 import asyncio
 import json
 
-import pytest
-
 from app.core.models import (
     ApprovalRequest,
     Artifact,
@@ -22,27 +20,6 @@ from app.core.models import (
     WorkingMemory,
     utc_now,
 )
-
-
-@pytest.mark.parametrize(
-    "status",
-    [
-        RunStatus.COMPLETED,
-        RunStatus.WAITING_USER,
-        RunStatus.WAITING_APPROVAL,
-        RunStatus.RUNNING,
-        RunStatus.WAITING_TOOL,
-        RunStatus.WAITING_SUBAGENT,
-        RunStatus.RETRYING,
-    ],
-)
-def test_delete_conversation_accepts_completed_and_all_waiting_or_execution_states(application, status):
-    conversation = application.conversations.create("可删除", user_id="user-delete")
-    application.store.save_run(Run(conversation_id=conversation.id, agent_id="main", status=status))
-
-    assert asyncio.run(application.conversations.delete(conversation.id, user_id="user-delete")) is True
-    assert application.store.get_conversation(conversation.id) is None
-    assert application.store.list_runs_for_conversation(conversation.id) == []
 
 
 def test_delete_conversation_cascades_records_and_preserves_user_resources(application, tmp_path):

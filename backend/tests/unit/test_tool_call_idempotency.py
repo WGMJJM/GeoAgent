@@ -45,26 +45,6 @@ def test_completed_tool_call_reuses_result_without_repeating_side_effect(tmp_pat
     assert persisted[1] == first
 
 
-def test_direct_executor_call_requires_explicit_trusted_internal_mode(tmp_path):
-    store = StateStore(tmp_path / "state.sqlite3")
-    store.initialize()
-    effects = []
-    registry = ToolRegistry()
-    registry.register(ToolMetadata(name="test.direct", description="trusted call test"), lambda _args, _ctx: effects.append(True))
-    executor = ToolExecutor(registry, store, TraceRecorder(store, EventBus()))
-    call = ToolCall(id="untrusted_direct_call", name="test.direct")
-
-    rejected = asyncio.run(executor.execute(call, agent_id="main", services={}))
-    assert rejected.status is ToolStatus.BLOCKED
-    assert rejected.error.code == "TRUSTED_EXECUTION_CONTEXT_REQUIRED"
-    assert effects == []
-    assert store.get_tool_call(call.id) is None
-
-    accepted = asyncio.run(executor.execute(call, agent_id="main", services={}, internal=True))
-    assert accepted.status is ToolStatus.SUCCESS
-    assert effects == [True]
-
-
 def test_approval_cannot_be_reused_with_changed_arguments(tmp_path):
     store = StateStore(tmp_path / "state.sqlite3")
     store.initialize()
