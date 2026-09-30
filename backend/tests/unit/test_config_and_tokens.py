@@ -54,7 +54,7 @@ def test_example_environment_loads_without_local_overrides(monkeypatch):
     assert settings.emergency_recent_messages == 8
     assert settings.tool_result_recent_full == 16
     assert settings.tool_result_emergency_fraction == 0.5
-    assert settings.tool_context_tokens == Settings.model_fields["tool_context_tokens"].default == 12800
+    assert settings.tool_context_tokens == Settings.model_fields["tool_context_tokens"].default == 25600
     assert settings.tool_context_max_cards == 8
     assert settings.tool_search_regex_results == 2
     assert settings.tool_search_chinese_results == 1

@@ -69,7 +69,7 @@ def _loop(tmp_path, adapter: ModelAdapter | None, datasets: list[Dataset] | None
     settings = SimpleNamespace(max_agent_turns=6, max_tool_calls=8, max_tokens=256,
                                model_input_tokens=128000, tool_result_recent_full=16,
                                tool_result_emergency_fraction=0.5,
-                               tool_context_tokens=12800, tool_context_max_cards=8,
+                               tool_context_tokens=25600, tool_context_max_cards=8,
                                tool_search_regex_results=2, tool_search_chinese_results=1,
                                tool_search_english_results=3,
                                emergency_recent_messages=8)
@@ -938,7 +938,6 @@ def test_tool_schema_budget_boundary_uses_cards_without_truncating_schema(tmp_pa
 
 def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
     _, loop = _loop(tmp_path, None)
-    loop.settings.tool_context_tokens //= 2
     names = [f"test.detailed_{index}" for index in range(18)]
     for name in names:
         loop.registry.register(ToolMetadata(name=name, description="Detailed operation", input_schema={
@@ -946,14 +945,17 @@ def test_cards_and_schemas_share_one_budget_and_permission_filter(tmp_path):
         }), lambda *_: {}, deferred=True)
     loop.registry.register(ToolMetadata(name="test.forbidden", description="Unavailable", required_scopes=["system.admin"]), lambda *_: {}, deferred=True)
     context = loop._discovery_context(AgentRequest(conversation_id="test", user_id="test-user", user_input="test"), loop.services_factory("test-user"))
+    visible_limit = loop.settings.tool_context_max_cards
+    full_definitions = loop._tool_definitions(context, set(names[-visible_limit:]))
+    loop.settings.tool_context_tokens = loop._tool_context_tokens(full_definitions, []) // 2
     definitions, cards, active = loop._tool_context(context, [*names, "test.forbidden"], set(names) | {"test.forbidden"})
     assert cards and active
     visible = active | {item["name"] for item in cards}
-    assert len(visible) <= 16
+    assert len(visible) <= visible_limit
     assert not (active & {item["name"] for item in cards})
     assert "test.forbidden" not in visible
     assert loop._tool_context_tokens(definitions, cards) <= loop.settings.tool_context_tokens
-    assert visible <= set(names[-16:])
+    assert visible <= set(names[-visible_limit:])
     messages = prepare_model_messages([{"role": "system", "content": "original"}], definitions, cards)
     visibility = _assert_tool_visibility(loop, ModelRequest(messages=messages, tools=definitions))
     assert "test.forbidden" not in visibility["callable"]
