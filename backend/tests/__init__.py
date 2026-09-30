@@ -1,2 +1,0 @@
-"""GeoAgent tests."""
-

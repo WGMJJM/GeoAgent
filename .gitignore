@@ -36,3 +36,19 @@ docs/
 
 # The project design README stays local until the project is complete.
 README.md
+
+# Tests and evaluations stay local, including their dedicated configuration.
+test/
+tests/
+evaluation/
+evaluations/
+*.test.*
+*.spec.*
+test_*.py
+*_test.py
+/frontend/test-environment.mjs
+/frontend/vitest.config.*
+coverage/
+htmlcov/
+.coverage
+.coverage.*
