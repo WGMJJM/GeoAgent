@@ -36,6 +36,7 @@ dev = [
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"
+cache_dir = "../../Temp_Test/GeoAgent/pytest-cache"
 
 [tool.ruff]
 target-version = "py312"

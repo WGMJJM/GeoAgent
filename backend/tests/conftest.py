@@ -1,4 +1,7 @@
+import os
+import tempfile
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -6,6 +9,14 @@ from fastapi.testclient import TestClient
 from app.api import create_app
 from app.application import Application
 from app.config import Settings
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    temporary_root = Path(__file__).resolve().parents[3] / "Temp_Test" / "GeoAgent" / "python"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    for variable in ("TEMP", "TMP", "TMPDIR"):
+        os.environ[variable] = str(temporary_root)
+    tempfile.tempdir = str(temporary_root)
 
 
 @pytest.fixture
