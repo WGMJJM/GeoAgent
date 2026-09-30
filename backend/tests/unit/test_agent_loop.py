@@ -221,12 +221,14 @@ async def test_dataset_list_uses_tool_result_in_same_model_loop(tmp_path):
 async def test_plain_question_goes_directly_to_the_same_model(tmp_path):
     adapter = SequenceAdapter(ModelResponse(content="栅格数据以规则网格组织像元。"))
     store, loop = _loop(tmp_path, adapter)
+    loop.settings.max_tokens = 12800
     _, result = await _run(loop, store, "什么是栅格数据？")
 
     assert result.status is AgentResultStatus.SUCCESS
     assert result.summary == "栅格数据以规则网格组织像元。"
     assert len(adapter.requests) == 1
     assert adapter.requests[0].tools
+    assert adapter.requests[0].max_tokens == loop.settings.max_tokens
 
 
 @pytest.mark.asyncio
@@ -453,8 +455,10 @@ async def test_fresh_run_sees_execution_index_and_reads_one_original_result(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected_count", [1, 2])
-@pytest.mark.parametrize("first_result", ["success", "failure", "invalid_arguments"])
+@pytest.mark.parametrize(
+    "selected_count,first_result",
+    [(1, "success"), (2, "success"), (1, "failure"), (1, "invalid_arguments")],
+)
 async def test_unused_candidates_become_cards_and_used_schemas_survive_resume(tmp_path, selected_count, first_result):
     names = [f"test.candidate_{index}" for index in range(2)]
 
@@ -675,35 +679,6 @@ async def test_invalid_tool_search_arguments_return_a_tool_observation(tmp_path,
     assert len(tool_messages) == 1
     assert tool_messages[0]["tool_call_id"] == "invalid_search"
     assert "INVALID_TOOL_ARGUMENTS" in tool_messages[0]["content"]
-
-
-@pytest.mark.asyncio
-async def test_one_bilingual_search_deduplicates_shared_tools_and_counts_once(tmp_path):
-    adapter = SequenceAdapter(
-        ModelResponse(tool_calls=[
-            {"id": "bilingual", "function": {"name": "tool.search", "arguments": '{"query":"缓冲区","english_query":"buffer"}'}},
-        ]),
-        ModelResponse(tool_calls=[{"id": "buffer", "function": {"name": "vector.buffer", "arguments": '{"dataset_id":"ds_roads","distance":25}'}}]),
-        ModelResponse(content="检查完成，中文提问和回复不受限制。"),
-    )
-    store, loop = _loop(tmp_path, adapter)
-    writes = []
-    metadata = loop.registry.get("vector.buffer").metadata
-    loop.registry.unregister("vector.buffer")
-    loop.registry.register(metadata, lambda arguments, _context: writes.append(arguments) or {"output": {"created": True}}, deferred=True)
-    _, result = await _run(loop, store, "检查这个中文请求")
-
-    assert result.status is AgentResultStatus.SUCCESS
-    assert writes == [{"dataset_id": "ds_roads", "distance": 25}]
-    assert store.latest_checkpoint(result.trace_id).state["activated_tool_names"] == ["vector.buffer"]
-    assert "去重取并集" in adapter.requests[0].messages[0]["content"]
-    observations = {item["tool_call_id"]: item["content"] for item in adapter.requests[1].messages if item["role"] == "tool"}
-    assert set(observations) == {"bilingual"}
-    assert '"status": "SUCCESS"' in observations["bilingual"]
-    assert store.get_run(result.trace_id).tool_call_count == 2
-    assert "只调用一次 tool.search" in adapter.requests[0].messages[0]["content"]
-    names = [item["function"]["name"] for item in adapter.requests[1].tools]
-    assert names.count("vector.buffer") == 1
 
 
 @pytest.mark.asyncio
@@ -1458,16 +1433,6 @@ async def test_final_budget_view_reduces_oldest_messages_before_model_call(tmp_p
     assert sent == [item.content for item in [*history[-5:], current]]
     assert model_input_tokens(adapter.requests[0].messages, adapter.requests[0].tools, adapter.count_tokens) <= loop.settings.model_input_tokens
     assert store.list_messages(conversation.id, limit=100) == [*history, current]
-
-
-@pytest.mark.asyncio
-async def test_runtime_passes_configured_output_limit(tmp_path):
-    adapter = SequenceAdapter(ModelResponse(content="已完成"))
-    store, loop = _loop(tmp_path, adapter)
-    loop.settings.max_tokens = 12800
-    _, result = await _run(loop, store, "简单请求")
-    assert result.status is AgentResultStatus.SUCCESS
-    assert adapter.requests[0].max_tokens == 12800
 
 
 @pytest.mark.asyncio

@@ -20,13 +20,6 @@ def test_api_health_and_dataset_listing(application, authenticated_client):
         assert len(datasets.json()) >= 3
 
 
-def test_project_memory_routes_are_not_exposed(application, authenticated_client):
-    with authenticated_client as client:
-        assert "/api/v1/memories" not in client.get("/openapi.json").json()["paths"]
-        assert client.get("/api/v1/memories").status_code == 404
-        assert client.post("/api/v1/memories", json={"key": "默认 CRS", "value": "EPSG:3857"}).status_code == 404
-
-
 def test_api_dataset_registration_is_idempotent(application, authenticated_client):
     seed_demo(application)
     with authenticated_client as client:

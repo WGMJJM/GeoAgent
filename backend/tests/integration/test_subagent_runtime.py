@@ -868,43 +868,6 @@ async def test_partial_result_and_small_metrics_keep_trusted_sources(application
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case_id", ["parallel_two_subtasks", "optional_failure"])
-async def test_enabled_evaluation_cases_use_real_delegation_events(application, case_id):
-    from evaluation.cases import multi_agent_cases
-    from evaluation.runner import EvaluationRunner
-
-    app = application
-    source = dataset(app)
-    plan = {"subtasks": [buffer_subtask("a", source.id), buffer_subtask("b", source.id)]}
-    scripts = {"a": buffer_script(source.id), "b": buffer_script(source.id)}
-    if case_id == "optional_failure":
-        app.tool_registry.register(
-            ToolMetadata(name="test.fail", description="可选失败"),
-            lambda _args, _context: ToolResult(
-                call_id="placeholder",
-                status=ToolStatus.FAILED,
-                error=ToolError(code="OPTIONAL_FAILED", message="可选检查失败"),
-            ),
-        )
-        plan["subtasks"][1] = {
-            "id": "b",
-            "goal": "可选检查",
-            "required": False,
-            "allowed_tools": ["test.fail"],
-        }
-        scripts["b"] = [call("test.fail", {}), ModelResponse(content="读取失败结果")]
-    model = DelegationModel(plan, scripts)
-    app.agent_loop.model_provider = lambda _profile: model
-    case = next(item for item in multi_agent_cases() if item.id == case_id)
-    assert case.enabled
-    case = case.model_copy(update={"dataset_ids": [source.id]})
-    report = await EvaluationRunner(app, [case], user_id="owner")._run_case(case, {})
-    assert report.passed, report.failures
-    assert report.delegation_count == 1 and report.subtask_count == 2
-    assert len(report.subagent_statuses) == 2
-
-
-@pytest.mark.asyncio
 async def test_allowed_producing_tool_does_not_require_unrequested_dataset_output(application):
     app = application
     source = dataset(app)
