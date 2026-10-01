@@ -949,6 +949,7 @@ export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage, str
 const ACTIVE_PROGRESS_EVENTS = new Set(["SkillReading", "ToolPreparing", "ToolStarted", "SubAgentSpawned", "VerificationStarted", "RetryStarted", "ReplanStarted", "ResumeStarted"]);
 
 function liveProgressText(event: Event): string {
+  if (event.payload.scope === "completion_review") return displayEventMessage(event.message);
   if (event.event_type === "SkillReading" || event.event_type === "SkillRead") return displayEventMessage(event.message);
   const tool = typeof event.payload.tool === "string" ? displayEventMessage(event.payload.tool) : "";
   if (event.event_type === "ToolPreparing") {
@@ -973,7 +974,7 @@ export function RunProgress({ events, durationMs, status, live = false, phase = 
   const connecting = live && phase === "connecting";
   const thinking = live && currentEvent?.event_type === "ModelResponseStarted" && !streaming;
   const generating = live && currentEvent?.event_type === "ModelResponseStarted" && streaming;
-  const activeProgress = live && currentEvent ? ACTIVE_PROGRESS_EVENTS.has(currentEvent.event_type) : false;
+  const activeProgress = live && currentEvent ? ACTIVE_PROGRESS_EVENTS.has(currentEvent.event_type) || (currentEvent.event_type === "VerificationFailed" && currentEvent.payload.scope === "completion_review") : false;
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
   return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在接入 Agent Loop…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <>{activeProgress ? <span className="run-progress-spinner" /> : <span className="run-progress-marker"><Icon name="check" size={11} /></span>}<span className="run-progress-text">{liveProgressText(currentEvent)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} animated={smoothTokenUsage} /></div></div>;
 }
