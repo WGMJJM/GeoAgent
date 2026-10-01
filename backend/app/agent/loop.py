@@ -17,6 +17,7 @@ from app.core.models import (
     AgentResult,
     AgentResultStatus,
     Checkpoint,
+    CompletionReview,
     Run,
     RunStatus,
     TokenUsage,
@@ -41,6 +42,7 @@ from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
 from app.state import StateStore
 
+from .completion_review import FEEDBACK_PREFIX, CompletionReviewer
 from .context import (
     ContextBuilder,
     compact_model_input,
@@ -152,6 +154,7 @@ class AgentLoop:
         self.model_adapters: dict[str, ModelAdapter] = {}
         self.default_model_profile: str | None = None
         self.delegation = None
+        self.completion_reviewer = CompletionReviewer(store, settings)
 
     async def prepare_request(
         self,
@@ -289,6 +292,9 @@ class AgentLoop:
 
         remaining_turns = max(0, self.settings.max_agent_turns - run.turn_count)
         for turn in range(remaining_turns + bool(resume_pending)):
+            current = self.store.get_run(run.id) or run
+            if not resume_pending and current.turn_count >= self.settings.max_agent_turns:
+                break
             services = self._execution_services(request, run)
             runtime_context = self._discovery_context(request, services, run)
             tools, cards, activated_names = self._tool_context(runtime_context, discovered_names, activated_names, count_tokens=model.count_tokens)
@@ -434,22 +440,7 @@ class AgentLoop:
                 local_output_tokens = model.count_tokens(response.content)
                 if response.tool_calls:
                     local_output_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
-                reported = response.input_tokens is not None and response.output_tokens is not None
-                updates = self.store.add_run_token_usage(current.id, TokenUsage(
-                    local_input_tokens=local_input_tokens,
-                    local_output_tokens=local_output_tokens,
-                    reported_input_tokens=response.input_tokens if reported else 0,
-                    reported_output_tokens=response.output_tokens if reported else 0,
-                    model_calls=1,
-                    reported_calls=int(reported),
-                ))
-                current = updates[0]
-                for measured_run in updates:
-                    await self.trace.emit(
-                        measured_run.id, EventType.TOKEN_USAGE_UPDATED, "模型累计用量已更新",
-                        agent_id=measured_run.agent_id,
-                        payload={"token_usage": measured_run.token_usage.model_dump(mode="json")},
-                    )
+                current = await self._record_model_usage(current, response, local_input_tokens, local_output_tokens)
 
             if response is not None and skill_stream is not None:
                 try:
@@ -845,6 +836,56 @@ class AgentLoop:
                         trace_id=current.id,
                     ),
                 )
+            review = None
+            if self.settings.completion_review_enabled:
+                messages.append({"role": "assistant", "content": answer})
+                self._save_checkpoint(
+                    request, current, messages, cursor_id, "completion_review", activated_names,
+                    pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                )
+                try:
+                    review = await self._review_answer(request, current, model, model_messages, answer, on_model_delta)
+                except Exception as exc:
+                    current = self.store.get_run(current.id) or current
+                    await self.trace.emit(
+                        current.id, EventType.VERIFICATION_FAILED, "完整性检查未完成，当前结果不标记为全部完成",
+                        agent_id=current.agent_id,
+                        payload={"scope": "completion_review", "error": type(exc).__name__},
+                    )
+                    return await self._finish(current, request=request, result=AgentResult(
+                        agent_id=current.agent_id, status=AgentResultStatus.PARTIAL,
+                        summary=answer + "\n\n完整性检查未完成；以上是当前结果，尚未确认本轮要求已全部满足。",
+                        warnings=["完整性检查未完成，不能确认全部事项已完成。"],
+                        error="COMPLETION_REVIEW_UNAVAILABLE", trace_id=current.id,
+                    ))
+                current = self.store.get_run(current.id) or current
+                current = current.model_copy(update={"metadata": {**current.metadata, "completion_review": review.model_dump(mode="json")}})
+                self.store.save_run(current)
+                messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(FEEDBACK_PREFIX)]
+                if review.decision != "accept":
+                    messages.append({"role": "system", "content": FEEDBACK_PREFIX + review.model_dump_json()})
+                self._save_checkpoint(
+                    request, current, messages, cursor_id, "completion_reviewed", activated_names,
+                    pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                )
+                await self.trace.emit(
+                    current.id, EventType.DECISION_MADE if review.decision == "accept" else EventType.VERIFICATION_FAILED,
+                    "完整性核对通过" if review.decision == "accept" else "发现未完成事项，继续补充" if review.decision == "continue" else review.feedback,
+                    agent_id=current.agent_id,
+                    payload={"scope": "completion_review", "review": review.model_dump(mode="json")},
+                )
+                if review.decision == "continue":
+                    continue
+                if review.decision == "need_user":
+                    return await self._finish(current, request=request, result=AgentResult(
+                        agent_id=current.agent_id, status=AgentResultStatus.BLOCKED,
+                        summary=review.feedback, error="WAITING_USER",
+                        needs_input={"question": review.feedback}, trace_id=current.id,
+                    ))
+                if review.decision == "partial":
+                    return await self._finish(current, request=request, result=self._review_partial(current, review))
+            references = [reference.model_dump(mode="json") for item in review.items for reference in item.evidence_refs
+                          if reference.kind != "context"] if review else []
             return await self._finish(
                 current,
                 request=request,
@@ -852,11 +893,19 @@ class AgentLoop:
                     agent_id=current.agent_id,
                     status=AgentResultStatus.SUCCESS,
                     summary=answer,
+                    datasets=list(dict.fromkeys(ref["id"] for ref in references if ref["kind"] == "dataset")),
+                    artifacts=list(dict.fromkeys(ref["id"] for ref in references if ref["kind"] == "artifact")),
+                    evidence=references,
                     trace_id=current.id,
                 ),
             )
 
         current = self.store.get_run(run.id) or run
+        report = current.metadata.get("completion_review")
+        if report and report["decision"] == "continue":
+            return await self._finish(current, request=request, result=self._review_partial(
+                current, CompletionReview.model_validate(report), budget_exceeded=True,
+            ))
         return await self._finish(
             current,
             request=request,
@@ -867,6 +916,89 @@ class AgentLoop:
                 error="BUDGET_EXCEEDED",
                 trace_id=current.id,
             ),
+        )
+
+    async def _record_model_usage(self, run: Run, response: ModelResponse, input_tokens: int, output_tokens: int) -> Run:
+        reported = response.input_tokens is not None and response.output_tokens is not None
+        updates = self.store.add_run_token_usage(run.id, TokenUsage(
+            local_input_tokens=input_tokens, local_output_tokens=output_tokens,
+            reported_input_tokens=response.input_tokens if reported else 0,
+            reported_output_tokens=response.output_tokens if reported else 0,
+            model_calls=1, reported_calls=int(reported),
+        ))
+        for measured_run in updates:
+            await self.trace.emit(
+                measured_run.id, EventType.TOKEN_USAGE_UPDATED, "模型累计用量已更新",
+                agent_id=measured_run.agent_id,
+                payload={"token_usage": measured_run.token_usage.model_dump(mode="json")},
+            )
+        return updates[0]
+
+    async def _review_answer(self, request, run, model, messages, answer, on_model_delta) -> CompletionReview:
+        prepared = self.completion_reviewer.prepare(request, run, model, messages, answer)
+        input_tokens = model_input_tokens(prepared.messages, [], model.count_tokens)
+        if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns:
+            raise ValueError("没有足够预算执行完整性检查，未发送模型请求。")
+        run = run.model_copy(update={"turn_count": run.turn_count + 1})
+        self.store.save_run(run)
+        await self.trace.emit(run.id, EventType.VERIFICATION_STARTED, "正在核对完成情况",
+                              agent_id=run.agent_id, payload={"scope": "completion_review"})
+        persisted = run.token_usage or TokenUsage()
+        usage = persisted.model_copy(update={
+            "local_input_tokens": persisted.local_input_tokens + input_tokens,
+            "model_calls": persisted.model_calls + 1,
+        })
+        if on_model_delta is not None:
+            await on_model_delta("", usage)
+        parts = []
+        output_tokens = 0
+        response = None
+        try:
+            async with aclosing(model.stream(prepared)) as stream:
+                async for chunk in stream:
+                    if chunk.content:
+                        parts.append(chunk.content)
+                        output_tokens += model.count_tokens(chunk.content)
+                    if on_model_delta is not None:
+                        await on_model_delta("", usage.model_copy(update={
+                            "local_output_tokens": persisted.local_output_tokens + output_tokens,
+                        }))
+                    if chunk.done:
+                        response = ModelResponse(
+                            content="".join(parts), tool_calls=chunk.tool_calls,
+                            input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
+                            finish_reason=chunk.finish_reason, model=chunk.model,
+                        )
+                        break
+        finally:
+            measured = response or ModelResponse(content="".join(parts))
+            measured_tokens = model.count_tokens(measured.content)
+            if measured.tool_calls:
+                measured_tokens += model.count_tokens(json.dumps(measured.tool_calls, ensure_ascii=False, separators=(",", ":")))
+            current = await self._record_model_usage(run, measured, input_tokens, measured_tokens)
+        if response is None:
+            raise ValueError("完整性检查没有返回结束片段。")
+        return self.completion_reviewer.inspect(response, prepared, request, current)
+
+    @staticmethod
+    def _review_partial(run: Run, review: CompletionReview, *, budget_exceeded: bool = False) -> AgentResult:
+        completed = [item.requirement + "：" + item.detail for item in review.items if item.status == "satisfied"]
+        references = [reference.model_dump(mode="json") for item in review.items if item.status == "satisfied"
+                      for reference in item.evidence_refs if reference.kind != "context"]
+        sections = ["本轮尚未全部完成。", review.feedback]
+        if completed:
+            sections.append("已完成：" + "；".join(completed))
+        sections.append("未完成或待确认：" + "；".join(review.unfinished))
+        if budget_exceeded:
+            sections.append("已达到本次运行的决策预算，停止补做。")
+        return AgentResult(
+            agent_id=run.agent_id, status=AgentResultStatus.PARTIAL, summary="\n\n".join(sections),
+            findings=[item.model_dump(mode="json") for item in review.items],
+            datasets=list(dict.fromkeys(ref["id"] for ref in references if ref["kind"] == "dataset")),
+            artifacts=list(dict.fromkeys(ref["id"] for ref in references if ref["kind"] == "artifact")),
+            evidence=references,
+            warnings=review.unfinished, error="BUDGET_EXCEEDED" if budget_exceeded else "INCOMPLETE_REQUEST",
+            trace_id=run.id,
         )
 
     def _tool_context(self, context: ToolDiscoveryContext, discovered_names: list[str], schema_names: set[str] | frozenset[str], *, count_tokens=estimate_tokens):
@@ -1170,6 +1302,7 @@ class AgentLoop:
                     "batch_activated_names": sorted(batch_activated_names if batch_activated_names is not None else activated_names),
                     "batch_next_activations": sorted(batch_next_activations) if batch_next_activations is not None else None,
                     "tool_call_count": run.tool_call_count,
+                    "completion_review": run.metadata.get("completion_review"),
                 },
             )
         )
@@ -1209,7 +1342,7 @@ class AgentLoop:
         self.store.save_checkpoint(Checkpoint(run_id=current.id, phase=phase, state=state))
         event_type = (
             EventType.RUN_COMPLETED
-            if result.status is AgentResultStatus.SUCCESS
+            if result.status in {AgentResultStatus.SUCCESS, AgentResultStatus.PARTIAL}
             else EventType.RUN_WAITING_USER
             if result.error == "WAITING_USER"
             else EventType.RUN_WAITING_APPROVAL
