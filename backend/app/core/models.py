@@ -342,6 +342,30 @@ class ToolResult(StrictModel):
     duration_ms: float = Field(default=0.0, ge=0.0)
 
 
+class CompletionEvidenceReference(StrictModel):
+    kind: Literal["context", "tool_call", "dataset", "artifact", "run"]
+    id: str = Field(min_length=1)
+
+
+class CompletionReviewItem(StrictModel):
+    requirement: str = Field(min_length=1)
+    status: Literal["satisfied", "missing", "blocked", "unknown", "waived"]
+    evidence_refs: list[CompletionEvidenceReference] = Field(default_factory=list)
+    detail: str
+
+
+class CompletionReview(StrictModel):
+    """本轮回答的完整性核对，不代表独立证明所有专业结论正确。"""
+
+    decision: Literal["accept", "continue", "need_user", "partial"]
+    items: list[CompletionReviewItem] = Field(min_length=1)
+    feedback: str = Field(min_length=1)
+
+    @property
+    def unfinished(self) -> list[str]:
+        return [item.requirement for item in self.items if item.status not in {"satisfied", "waived"}]
+
+
 class AgentResult(StrictModel):
     agent_id: str
     task_id: str | None = None

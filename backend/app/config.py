@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     max_preview_fields: int = Field(default=32, ge=1, le=128)
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
     max_tokens: int = Field(default=12800, ge=1)
+    completion_review_enabled: bool = True
+    completion_review_max_tokens: int = Field(default=3200, ge=1)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     model_input_tokens: int = Field(default=128000, ge=1)
     summary_recent_messages: int = Field(default=DEFAULT_SUMMARY_RECENT_MESSAGES, ge=1)
