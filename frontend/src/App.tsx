@@ -6,7 +6,7 @@ import { Icon, IconName } from "./components/Icon";
 import { LineagePanel } from "./components/LineagePanel";
 import { MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
-import { displayEventMessage, eventLabel, formatLabel, kindLabel, statusLabel } from "./labels";
+import { formatLabel, kindLabel, statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[] };
@@ -49,14 +49,6 @@ function assistantText(value: string): string {
     .replace(/__(.*?)__/gs, "$1")
     .replace(/^\s*[*-]\s+/gm, "• ")
     .replace(/\*\*/g, "");
-}
-
-function settledReply(streamed: string, completed: string): string {
-  const visible = streamed.trim();
-  const final = completed.trim();
-  if (!visible) return completed;
-  if (!final || visible.endsWith(final)) return visible;
-  return `${visible}\n\n${final}`;
 }
 
 function errorMessage(error: unknown): string {
@@ -474,7 +466,6 @@ export function App() {
     setExecution(targetConversationId, { requestId, runId: null, phase: "connecting", startedAt, progressAt: startedAt, streamingReply: "", tokenUsage: null, events: [] });
     let receivedEvents: Event[] = [];
     let streamedReply = "";
-    let separateNextReply = false;
     const stream = api.streamMessage(
       prompt,
       targetDatasetIds,
@@ -485,7 +476,6 @@ export function App() {
       },
       (event) => {
         receivedEvents = [...receivedEvents, event];
-        if (event.event_type === "ModelResponseStarted") separateNextReply = Boolean(streamedReply.trim());
         setExecution(targetConversationId, (current) => current ? {
           ...current,
           events: [...current.events, event],
@@ -493,8 +483,7 @@ export function App() {
       },
       (content, tokenUsage) => {
         if (content) {
-          streamedReply += `${separateNextReply ? "\n\n" : ""}${content}`;
-          separateNextReply = false;
+          streamedReply += content;
         }
         setExecution(targetConversationId, (current) => current ? { ...current, streamingReply: streamedReply, tokenUsage: tokenUsage ?? current.tokenUsage } : current);
       },
@@ -512,7 +501,7 @@ export function App() {
       if (response.result && response.run) {
         const messageId = `local-assistant-${response.result.trace_id}`;
         setRuns((current) => [response.run!, ...current.filter((item) => item.id !== response.run!.id)]);
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: settledReply(streamedReply, response.result!.summary), kind: "execution", runId: response.run!.id }]);
+        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: response.result!.summary, kind: "execution", runId: response.run!.id }]);
         if (activeConversationRef.current === targetConversationId) {
           setResult(response.result);
           setEvents(receivedEvents);
@@ -525,7 +514,7 @@ export function App() {
           await Promise.allSettled(refreshes);
         })(), targetConversationId);
       } else {
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-assistant-${response.request_id}`, role: "assistant", content: settledReply(streamedReply, response.message), kind: "text" }]);
+        setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-assistant-${response.request_id}`, role: "assistant", content: response.message, kind: "text" }]);
         background(refreshConversations(), targetConversationId);
       }
       // 先让完成消息能从 runs 缓存派生摘要，再移除 live state；React 会在同一轮提交中
@@ -949,18 +938,15 @@ export function LiveExecutionStatus({ events, durationMs, phase, tokenUsage, str
 const ACTIVE_PROGRESS_EVENTS = new Set(["SkillReading", "ToolPreparing", "ToolStarted", "SubAgentSpawned", "VerificationStarted", "RetryStarted", "ReplanStarted", "ResumeStarted"]);
 
 function liveProgressText(event: Event): string {
-  if (event.payload.scope === "completion_review") return displayEventMessage(event.message);
-  if (event.event_type === "SkillReading" || event.event_type === "SkillRead") return displayEventMessage(event.message);
-  const tool = typeof event.payload.tool === "string" ? displayEventMessage(event.payload.tool) : "";
-  if (event.event_type === "ToolPreparing") {
-    const tools = Array.isArray(event.payload.tools) ? event.payload.tools.filter((item): item is string => typeof item === "string") : [];
-    if (tools.length === 1) return `正在准备：${displayEventMessage(tools[0])}`;
-    return `正在准备 ${Number(event.payload.tool_count) || tools.length} 个工具`;
-  }
-  if (event.event_type === "ToolStarted") return `正在执行：${tool || displayEventMessage(event.message)}`;
-  if (event.event_type === "ToolCompleted") return `执行完成：${tool || displayEventMessage(event.message)}`;
-  if (event.event_type === "ToolFailed") return `执行失败：${tool || displayEventMessage(event.message)}`;
-  return `${eventLabel(event.event_type)}：${displayEventMessage(event.message)}`;
+  if (event.event_type === "ToolPreparing" || event.event_type === "SkillReading") return "正在准备";
+  if (event.event_type === "ToolCompleted" || event.event_type === "SkillRead") return "正在处理";
+  if (event.event_type === "ToolFailed" || event.event_type === "RetryStarted") return "正在调整";
+  if (event.event_type === "RunWaitingUser") return "等待补充信息";
+  if (event.event_type === "RunWaitingApproval") return "等待确认";
+  if (event.event_type === "RunCancelled") return "已取消";
+  if (event.event_type === "RunFailed") return "本次处理未完成";
+  if (event.event_type === "RunCompleted") return "处理完成";
+  return "正在处理";
 }
 
 export function RunProgress({ events, durationMs, status, live = false, phase = "running", tokenUsage, streaming = false, smoothTokenUsage = false }: { events: Event[]; durationMs: number; status?: string; live?: boolean; phase?: ExecutionPhase; tokenUsage?: TokenUsage | null; streaming?: boolean; smoothTokenUsage?: boolean }) {
@@ -976,7 +962,7 @@ export function RunProgress({ events, durationMs, status, live = false, phase = 
   const generating = live && currentEvent?.event_type === "ModelResponseStarted" && streaming;
   const activeProgress = live && currentEvent ? ACTIVE_PROGRESS_EVENTS.has(currentEvent.event_type) || (currentEvent.event_type === "VerificationFailed" && currentEvent.payload.scope === "completion_review") : false;
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
-  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在接入 Agent Loop…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <>{activeProgress ? <span className="run-progress-spinner" /> : <span className="run-progress-marker"><Icon name="check" size={11} /></span>}<span className="run-progress-text">{liveProgressText(currentEvent)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} animated={smoothTokenUsage} /></div></div>;
+  return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在准备…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <>{activeProgress ? <span className="run-progress-spinner" /> : <span className="run-progress-marker"><Icon name="check" size={11} /></span>}<span className="run-progress-text">{liveProgressText(currentEvent)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} animated={smoothTokenUsage} /></div></div>;
 }
 
 function DatasetPanel({ datasets, selectedDatasetIds, onToggleRequestDataset, onRegister, busy }: { datasets: Dataset[]; selectedDatasetIds: string[]; onToggleRequestDataset: (id: string) => void; onRegister: (path: string, name: string) => Promise<void>; busy: boolean }) {
