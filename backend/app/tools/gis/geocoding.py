@@ -16,7 +16,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         metadata(
             "location.geocode",
-            "查询地名、城市或邮编的候选经纬度与行政区；结合上下文选择，无法确定时询问用户，不能默认选第一项；仅返回代表点，不含区域边界 / Geocode place names, cities or postal codes to WGS84 coordinates with administrative areas. Returns candidates, not region boundaries.",
+            "中文地名先转换为英文标准名，无通用英文名则使用无声调拼音，直接查询候选经纬度与行政区，不先用中文试查；结合上下文选择，无法确定时询问用户，不能默认选第一项；仅返回代表点，不含区域边界 / Geocode English place names or postal codes to WGS84 coordinates. Returns candidates, not region boundaries.",
             tags=["gis", "location", "geocoding", "remote"],
             required_scopes=["location.read"],
             input_schema={
@@ -25,7 +25,7 @@ def register(registry: ToolRegistry) -> None:
                     "name": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "地点名称或邮编，可在逗号后附国家或一级行政区以缩小范围。保留用户明确的地名，不猜测坐标。",
+                        "description": "查询用的英文标准地名或邮编。用户提供中文地名时，在生成本次参数时转换为英文标准名，无通用英文名则使用无声调拼音；保留原地点含义，避免逐字直译行政区后缀。直接提交英文查询词，不先用中文试查，不猜测坐标。可在逗号后附英文国家或一级行政区以缩小范围；转换无法确定时先询问用户。",
                     },
                     "count": {
                         "type": "integer",
