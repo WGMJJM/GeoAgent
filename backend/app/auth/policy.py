@@ -74,7 +74,7 @@ class PermissionPolicy:
         """根据可信认证结果和实际注入服务构造目录上下文。"""
 
         scopes = (
-            frozenset({"dataset.read", "dataset.write", "workspace.read", "workspace.write", "artifact.create"})
+            frozenset({"dataset.read", "dataset.write", "workspace.read", "workspace.write", "artifact.create", "location.read"})
             if authenticated_user
             else frozenset()
         )

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     arcpy_executable: Path | None = None
     arcpy_cache: Path = Field(default=Path("state/arcpy"))
     mcp_config: Path | None = None
+    geocoding_url: str = "https://geocoding-api.open-meteo.com/v1/search"
     model_profiles: str | None = None
     additional_model_profiles: str | None = None
     model_reasoning_config: str | None = None

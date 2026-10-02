@@ -11,7 +11,7 @@ from app.execution.tools import ToolRegistry
 def register_gis_tools(registry: ToolRegistry) -> None:
     """把 GIS 领域操作注册到通用 Tool Registry。"""
 
-    for module in (dataset, crs, vector, raster, spatial, analysis, visualization):
+    for module in (dataset, crs, vector, raster, spatial, analysis, visualization, geocoding):
         module.register(registry)
 
 
@@ -120,6 +120,15 @@ _SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
-from . import analysis, crs, dataset, raster, spatial, vector, visualization  # noqa: E402
+from . import (  # noqa: E402
+    analysis,
+    crs,
+    dataset,
+    geocoding,
+    raster,
+    spatial,
+    vector,
+    visualization,
+)
 
 __all__ = ["register_gis_tools"]
