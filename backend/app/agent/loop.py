@@ -138,6 +138,7 @@ class AgentLoop:
             english_bm25_results=settings.tool_search_english_results,
         )
         self.policy = executor.policy
+        self.mcp = context_services.get("mcp")
         self.trace = trace
         self.settings = settings
         self.model_provider = model_provider
@@ -300,6 +301,7 @@ class AgentLoop:
             tools, cards, activated_names = self._tool_context(runtime_context, discovered_names, activated_names, count_tokens=model.count_tokens)
             model_tools = tools if tool_call_count < self.settings.max_tool_calls else []
             model_cards = cards if tool_call_count < self.settings.max_tool_calls else []
+            capabilities = self.mcp.capabilities(runtime_context) if self.mcp is not None and model_tools else []
             current = self.store.get_run(run.id) or run
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
@@ -307,7 +309,7 @@ class AgentLoop:
             skill_stream = SkillStreamBuffer() if self.context.skills is not None and self.context.skills.entries else None
             try:
                 if not resume_pending:
-                    model_messages = prepare_model_messages(messages, model_tools, model_cards)
+                    model_messages = prepare_model_messages(messages, model_tools, model_cards, capabilities)
                     previous_compacted_ids = set(compacted_ids)
                     previous_summarized_ids = set(summarized_ids)
                     history_changed = False
@@ -321,7 +323,7 @@ class AgentLoop:
                     )
                     if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
                         model_messages = compact_model_input(
-                            prepare_model_messages(messages, model_tools, model_cards),
+                            prepare_model_messages(messages, model_tools, model_cards, capabilities),
                             run_id=current.id,
                             compacted_ids=compacted_ids,
                             summarized_ids=summarized_ids,
@@ -342,7 +344,7 @@ class AgentLoop:
                                 })
                                 self.store.save_run(current)
                                 model_messages = compact_model_input(
-                                    prepare_model_messages(messages, model_tools, model_cards),
+                                    prepare_model_messages(messages, model_tools, model_cards, capabilities),
                                     run_id=current.id,
                                     compacted_ids=compacted_ids,
                                     summarized_ids=summarized_ids,
@@ -1005,26 +1007,27 @@ class AgentLoop:
         """新候选和已调用工具可提供 Schema，其他发现记录仅提供卡片。"""
         definitions = self._tool_definitions(context)
         cards = []
-        if self._tool_context_tokens(definitions, cards, count_tokens) > self.settings.tool_context_tokens:
+        capabilities = self.mcp.capabilities(context) if self.mcp is not None else []
+        if self._tool_context_tokens(definitions, cards, count_tokens, capabilities) > self.settings.tool_context_tokens:
             raise ValueError("工具上下文预算不足以容纳常驻工具定义。")
         available = self._available_activations(set(discovered_names), context)
         candidates = [name for name in reversed(discovered_names) if name in available][:self.settings.tool_context_max_cards]
         for name in candidates:
             metadata = self.registry.get(name).metadata
             definition = _tool_definition(name, metadata.description, metadata.input_schema)
-            if name in schema_names and self._tool_context_tokens([*definitions, definition], cards, count_tokens) <= self.settings.tool_context_tokens:
+            if name in schema_names and self._tool_context_tokens([*definitions, definition], cards, count_tokens, capabilities) <= self.settings.tool_context_tokens:
                 definitions.append(definition)
             else:
                 card = self.catalog.card(name).public()
-                if self._tool_context_tokens(definitions, [*cards, card], count_tokens) <= self.settings.tool_context_tokens:
+                if self._tool_context_tokens(definitions, [*cards, card], count_tokens, capabilities) <= self.settings.tool_context_tokens:
                     cards.append(card)
         activated = {item["function"]["name"] for item in definitions if self.registry.is_deferred(item["function"]["name"])}
         return definitions, cards, activated
 
     @staticmethod
-    def _tool_context_tokens(definitions, cards, count_tokens=estimate_tokens) -> int:
+    def _tool_context_tokens(definitions, cards, count_tokens=estimate_tokens, capabilities=()) -> int:
         tokens = count_tokens(json.dumps(definitions, ensure_ascii=False, separators=(",", ":")))
-        tokens += count_tokens(tool_visibility_message(definitions, cards)["content"])
+        tokens += count_tokens(tool_visibility_message(definitions, cards, capabilities)["content"])
         return tokens
 
     def _tool_definitions(
