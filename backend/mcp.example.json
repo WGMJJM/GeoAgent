@@ -1,0 +1,34 @@
+{
+  "servers": [
+    {
+      "id": "markitdown",
+      "enabled": false,
+      "description": "将文档、表格等文件转换为 Markdown 以便读取内容；不是报告导出或 GIS 分析服务。",
+      "transport": "stdio",
+      "command": "markitdown-mcp",
+      "args": [],
+      "allowed_users": [],
+      "risk_level": "EXTERNAL"
+    },
+    {
+      "id": "duckdb",
+      "enabled": false,
+      "description": "查询本地 DuckDB 数据库的表、字段并执行 SQL 统计分析；不自动注册 GeoAgent 数据集。",
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-motherduck", "--db-path", "填写本地 DuckDB 数据库路径"],
+      "allowed_users": [],
+      "risk_level": "EXTERNAL"
+    },
+    {
+      "id": "remote_example",
+      "enabled": false,
+      "description": "替换为实际服务的能力说明；此项仅演示网络连接，不是可用服务。",
+      "transport": "streamable_http",
+      "url": "https://example.com/mcp",
+      "header_refs": {"Authorization": "MCP_REMOTE_AUTHORIZATION"},
+      "allowed_users": [],
+      "risk_level": "EXTERNAL"
+    }
+  ]
+}

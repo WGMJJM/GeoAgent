@@ -99,5 +99,10 @@ class PermissionPolicy:
         arcpy = services.get("arcpy")
         if arcpy is not None and getattr(arcpy, "available", False):
             environments.add("gis.arcpy")
+        mcp = services.get("mcp")
+        if mcp is not None:
+            if authenticated_user:
+                scopes |= mcp.granted_scopes(services.get("user_id"))
+            environments.update(mcp.available_envs())
         return ToolDiscoveryContext(scopes, frozenset(environments))
 

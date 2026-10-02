@@ -17,6 +17,7 @@ from app.config import Settings
 from app.core.models import AgentRequest, AgentResult, AgentResultStatus, ReasoningEffort, new_id
 from app.entry import AttachmentService, ConversationService, MessageGateway
 from app.execution.arcpy import ArcPyProvider, discover_arcpy_executable
+from app.execution.mcp import MCPManager, load_mcp_config
 from app.execution.python import PythonExecutor
 from app.execution.sandbox import WorkspaceManager
 from app.execution.shell import ShellExecutor
@@ -96,6 +97,11 @@ class Application:
                     self.settings.arcpy_cache_path,
                     timeout_seconds=self.settings.tool_timeout_seconds,
                 )
+        self.mcp = MCPManager(
+            load_mcp_config(self.settings.mcp_config_path),
+            self.tool_registry,
+            timeout_seconds=self.settings.tool_timeout_seconds,
+        )
         self.tool_executor = ToolExecutor(self.tool_registry, self.store, self.trace, PermissionPolicy(), timeout_seconds=self.settings.tool_timeout_seconds, metrics=self.metrics, approval_service=self.approvals)
         self.tool_executor.services = {
             "settings": self.settings,
@@ -110,6 +116,7 @@ class Application:
             "python": self.python_executor,
             "shell": self.shell_executor,
             "arcpy": self.arcpy,
+            "mcp": self.mcp,
             "allow_unsafe_python": self.settings.enable_unsafe_python,
             "system_owned": True,
         }
@@ -125,8 +132,9 @@ class Application:
                 "profile": self.profile,
                 "conversation_memory": self.conversation_memory,
                 "skills": self.skills,
+                "mcp": self.mcp,
             },
-            tool_providers=(self.arcpy,) if self.arcpy is not None else (),
+            tool_providers=((self.arcpy,) if self.arcpy is not None else ()) + self.mcp.providers,
             metrics=self.metrics,
         )
         self.run_manager = RunManager(
@@ -213,6 +221,7 @@ class Application:
     async def close(self) -> None:
         await self.run_manager.close()
         await self.conversation_memory.close()
+        await self.mcp.close()
         if self.arcpy is not None:
             self.arcpy.close()
         adapters = list(self.model_adapters.values())
@@ -267,6 +276,7 @@ class Application:
         return self.agent_loop.model_adapter if hasattr(self, "agent_loop") else None
 
     async def ask(self, user_input: str | AgentRequest, *, conversation_id: str | None = None, dataset_ids: list[str] | None = None, model_profile: str | None = None, reasoning_effort: ReasoningEffort | None = None):
+        await self.mcp.start()
         request = user_input if isinstance(user_input, AgentRequest) else AgentRequest(
             user_input=user_input,
             conversation_id=conversation_id or new_id("conv"),

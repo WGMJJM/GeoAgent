@@ -121,8 +121,11 @@ def create_app(application: Application | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         geoagent.start()
-        yield
-        await geoagent.close()
+        try:
+            await geoagent.mcp.start()
+            yield
+        finally:
+            await geoagent.close()
 
     api = FastAPI(title="GeoAgent API", version="0.1.0", lifespan=lifespan)
     api.state.geoagent = geoagent

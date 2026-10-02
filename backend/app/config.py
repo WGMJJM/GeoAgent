@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     enable_arcpy: bool = True
     arcpy_executable: Path | None = None
     arcpy_cache: Path = Field(default=Path("state/arcpy"))
+    mcp_config: Path | None = None
     model_profiles: str | None = None
     additional_model_profiles: str | None = None
     model_reasoning_config: str | None = None
@@ -84,6 +85,10 @@ class Settings(BaseSettings):
     @property
     def arcpy_cache_path(self) -> Path:
         return self._absolute(self.arcpy_cache)
+
+    @property
+    def mcp_config_path(self) -> Path | None:
+        return self._absolute(self.mcp_config) if self.mcp_config is not None else None
 
     def _absolute(self, value: Path) -> Path:
         return value if value.is_absolute() else (self.root / value).resolve()
