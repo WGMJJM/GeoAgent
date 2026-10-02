@@ -18,7 +18,7 @@ from app.run.predicates import is_execution_inflight, is_waiting_for_human
 from app.state import StateStore
 
 from .context import STATE_CONTEXT_PREFIX, SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX
-from .skills import SKILL_CONTENT_PREFIX, SKILL_PROMPT
+from .skills import SKILL_PROMPT
 
 REVIEW_PROMPT = """你是 GeoAgent 的只读完成检查器，不执行操作，不代替主 Agent 选择工具。
 任务是减少提前结束、漏答和漏做，不是找出所有错误。只输出一个 JSON 对象。
@@ -93,7 +93,7 @@ class CompletionReviewer:
                 continue
             if message.get("role") == "assistant" and index > request_index >= 0:
                 continue  # 当前 Run 的草稿不能成为审核另一份草稿的证据。
-            if content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, SKILL_CONTENT_PREFIX, FEEDBACK_PREFIX)):
+            if content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX)):
                 continue
             if content.startswith(STATE_CONTEXT_PREFIX):
                 state = json.loads(content.removeprefix(STATE_CONTEXT_PREFIX))
