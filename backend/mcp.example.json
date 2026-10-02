@@ -1,6 +1,15 @@
 {
   "servers": [
     {
+      "id": "eris_weather",
+      "enabled": false,
+      "description": "Eris 免费公共天气服务：按经纬度或用户提供的 IP 地址查询当前天气、温度、湿度和风速；无需密钥，不提供历史气象或预报，不自动获取用户 IP。",
+      "transport": "streamable_http",
+      "url": "https://weather-api.madadipouya.com/mcp",
+      "allowed_users": [],
+      "risk_level": "READ"
+    },
+    {
       "id": "arcgis_location",
       "enabled": false,
       "description": "Esri 官方远程位置服务：地理编码、逆地理编码、路线规划、高程查询和静态地图；以实际工具目录及账号权限为准，不替代本地 GIS 文件分析，服务用量适用 Esri 的免费额度与计费规则。",
