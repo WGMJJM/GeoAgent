@@ -95,6 +95,8 @@ class ToolCatalog:
         self.chinese_bm25_results = _positive_limit("chinese_bm25_results", chinese_bm25_results)
         self.english_bm25_results = _positive_limit("english_bm25_results", english_bm25_results)
         self._provider_lock = RLock()
+        self._index_key: tuple[tuple[str, str], ...] = ()
+        self._index: tuple[list[str], bm25s.BM25] | None = None
 
     def card(self, name: str) -> ToolCard:
         metadata = self.registry.get(name).metadata
@@ -193,15 +195,21 @@ class ToolCatalog:
         ranked.sort(key=lambda item: (tuple(-part for part in item[0]), item[1]))
         return [name for _, name in ranked[:limit]]
 
-    @staticmethod
-    def _bm25_index(entries: dict[str, _CatalogEntry]) -> tuple[list[str], bm25s.BM25] | None:
-        if not entries:
-            return None
-        names = list(entries)
-        corpus = [list(_metadata_terms(entries[name].metadata)) for name in names]
-        retriever = bm25s.BM25(method="lucene")
-        retriever.index(corpus, show_progress=False)
-        return names, retriever
+    def _bm25_index(self, entries: dict[str, _CatalogEntry]) -> tuple[list[str], bm25s.BM25] | None:
+        # 只缓存当前可见目录，权限范围或检索文本变化时自然失效；不累积用户级缓存。
+        key = tuple((name, _metadata_text(entry.metadata)) for name, entry in entries.items())
+        with self._provider_lock:
+            if key != self._index_key:
+                self._index_key = key
+                if not key:
+                    self._index = None
+                else:
+                    names = [name for name, _ in key]
+                    corpus = [list(_tokenize(text)) for _, text in key]
+                    retriever = bm25s.BM25(method="lucene")
+                    retriever.index(corpus, show_progress=False)
+                    self._index = names, retriever
+            return self._index
 
     @staticmethod
     def _bm25_matches(
@@ -283,7 +291,7 @@ def _regex_rank(query: str, metadata: ToolMetadata) -> tuple[int, int, int, int,
     )
 
 
-def _metadata_terms(metadata: ToolMetadata) -> tuple[str, ...]:
+def _metadata_text(metadata: ToolMetadata) -> str:
     parts = [metadata.name, metadata.description, *metadata.tags]
     properties = metadata.input_schema.get("properties", {})
     if isinstance(properties, dict):
@@ -291,7 +299,7 @@ def _metadata_terms(metadata: ToolMetadata) -> tuple[str, ...]:
             parts.append(str(key))
             if isinstance(value, dict):
                 parts.append(str(value.get("description", "")))
-    return _tokenize(" ".join(parts))
+    return " ".join(parts)
 
 
 def _tokenize(text: str) -> tuple[str, ...]:
