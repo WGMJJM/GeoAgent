@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from app.auth.policy import ToolDiscoveryContext
 from app.config import Settings
 from app.core.models import (
@@ -18,6 +20,7 @@ from app.core.models import (
     AgentResultStatus,
     Checkpoint,
     CompletionReview,
+    FinalReply,
     Run,
     RunStatus,
     TokenUsage,
@@ -25,6 +28,7 @@ from app.core.models import (
     ToolError,
     ToolResult,
     ToolStatus,
+    UserQuestion,
     new_id,
 )
 from app.core.tokens import estimate_tokens
@@ -42,8 +46,9 @@ from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
 from app.state import StateStore
 
-from .completion_review import FEEDBACK_PREFIX, CompletionReviewer
+from .completion_review import FEEDBACK_PREFIX, CompletionReviewer, CompletionReviewError
 from .context import (
+    REPLY_FEEDBACK_PREFIX,
     ContextBuilder,
     compact_model_input,
     model_input_tokens,
@@ -55,6 +60,8 @@ from .context import (
 from .delegation import DELEGATE_TOOL
 from .skills import add_skill_content, parse_skill_request, skill_messages
 
+_REPLY_ADAPTER = TypeAdapter(FinalReply | UserQuestion)
+
 ASK_USER_TOOL = {
     "type": "function",
     "function": {
@@ -62,7 +69,7 @@ ASK_USER_TOOL = {
         "description": "在关键参数或资源无法安全确认时，向用户提出一个具体问题。",
         "parameters": {
             "type": "object",
-            "properties": {"question": {"type": "string", "minLength": 1}},
+            "properties": {"question": {"type": "string", "minLength": 1, "pattern": "\\S"}},
             "required": ["question"],
             "additionalProperties": False,
         },
@@ -792,18 +799,7 @@ class AgentLoop:
                         summary="工具清理未完成，副作用无法确认；运行已停止，需要人工处理。",
                         error="SIDE_EFFECT_UNCERTAIN", trace_id=current.id))
                 if ask_question:
-                    return await self._finish(
-                        current,
-                        request=request,
-                        result=AgentResult(
-                            agent_id=current.agent_id,
-                            status=AgentResultStatus.BLOCKED,
-                            summary=ask_question,
-                            error="WAITING_USER",
-                            needs_input={"question": ask_question},
-                            trace_id=current.id,
-                        ),
-                    )
+                    return await self._wait_for_user(current, request, ask_question)
                 if pending_approvals:
                     first = pending_approvals[0]
                     return await self._finish(
@@ -820,19 +816,30 @@ class AgentLoop:
                     )
                 continue
 
-            answer = response.content.strip()
-            if not answer:
-                return await self._finish(
-                    current,
-                    request=request,
-                    result=AgentResult(
-                        agent_id=current.agent_id,
-                        status=AgentResultStatus.FAILED,
-                        summary="模型返回了空内容，无法确认本轮结果。",
-                        error="MODEL_PROTOCOL_ERROR",
-                        trace_id=current.id,
-                    ),
+            try:
+                reply = _REPLY_ADAPTER.validate_json(response.content)
+            except ValidationError as exc:
+                detail = json.dumps(exc.errors(include_input=False, include_context=False, include_url=False), ensure_ascii=False)
+                messages.append({"role": "assistant", "content": response.content})
+                messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(REPLY_FEEDBACK_PREFIX)]
+                messages.append({"role": "system", "content": REPLY_FEEDBACK_PREFIX + detail})
+                self._save_checkpoint(
+                    request, current, messages, cursor_id, "model_protocol_invalid", activated_names,
+                    pending_approvals, discovered_names=discovered_names, used_names=used_names,
                 )
+                await self.trace.emit(current.id, EventType.DECISION_MADE, "回复协议待修正，尚未发布答复",
+                                      agent_id=current.agent_id,
+                                      payload={"scope": "model_protocol", "error": "REPLY_FORMAT_INVALID", "detail": detail})
+                continue
+            messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(REPLY_FEEDBACK_PREFIX)]
+            if isinstance(reply, UserQuestion):
+                messages.append({"role": "assistant", "content": reply.question})
+                self._save_checkpoint(
+                    request, current, messages, cursor_id, "waiting_user", activated_names,
+                    pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                )
+                return await self._wait_for_user(current, request, reply.question)
+            answer = reply.answer
             review = None
             if self.settings.completion_review_enabled:
                 messages.append({"role": "assistant", "content": answer})
@@ -843,6 +850,23 @@ class AgentLoop:
                 try:
                     async with asyncio.timeout(self.settings.completion_review_timeout_seconds):
                         review = await self._review_answer(request, current, model, model_messages, answer, on_model_delta)
+                except CompletionReviewError as exc:
+                    current = self.store.get_run(current.id) or current
+                    await self.trace.emit(
+                        current.id, EventType.VERIFICATION_FAILED, "完整性检查报告待修正，尚未发布答复",
+                        agent_id=current.agent_id,
+                        payload={"scope": "completion_review", "error": exc.code, "detail": str(exc), "report": exc.report},
+                    )
+                    messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(FEEDBACK_PREFIX)]
+                    messages.append({"role": "system", "content": FEEDBACK_PREFIX + json.dumps({
+                        "error": exc.code, "detail": str(exc),
+                        "instruction": "检查报告无效，不代表已完成。根据原目标和已有证据继续；需要用户补充时返回 need_user，否则修正 final 答复并重新检查。不要重做已经完成的工具操作。",
+                    }, ensure_ascii=False)})
+                    self._save_checkpoint(
+                        request, current, messages, cursor_id, "completion_review_invalid", activated_names,
+                        pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                    )
+                    continue
                 except Exception as exc:
                     current = self.store.get_run(current.id) or current
                     await self.trace.emit(
@@ -874,11 +898,7 @@ class AgentLoop:
                 if review.decision == "continue":
                     continue
                 if review.decision == "need_user":
-                    return await self._finish(current, request=request, result=AgentResult(
-                        agent_id=current.agent_id, status=AgentResultStatus.BLOCKED,
-                        summary=review.feedback, error="WAITING_USER",
-                        needs_input={"question": review.feedback}, trace_id=current.id,
-                    ))
+                    return await self._wait_for_user(current, request, review.feedback)
                 if review.decision == "partial":
                     return await self._finish(current, request=request, result=self._review_partial(current, review))
             references = [reference.model_dump(mode="json") for item in review.items for reference in item.evidence_refs
@@ -916,6 +936,12 @@ class AgentLoop:
                 trace_id=current.id,
             ),
         )
+
+    async def _wait_for_user(self, run: Run, request: AgentRequest, question: str) -> AgentResult:
+        return await self._finish(run, request=request, result=AgentResult(
+            agent_id=run.agent_id, status=AgentResultStatus.BLOCKED,
+            summary=question, error="WAITING_USER", needs_input={"question": question}, trace_id=run.id,
+        ))
 
     async def _record_model_usage(self, run: Run, response: ModelResponse, input_tokens: int, output_tokens: int) -> Run:
         reported = response.input_tokens is not None and response.output_tokens is not None
@@ -1229,6 +1255,7 @@ class AgentLoop:
             return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
         built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
         built.extend(skill_messages(state.get("skill_messages", [])))
+        built.extend(state.get("protocol_feedback", []))
         return built, cursor_id
 
     def _refresh_conversation_prefix(
@@ -1252,7 +1279,9 @@ class AgentLoop:
         history = [{"role": item.role, "content": item.content} for item in persisted[:start]]
         prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
-        return prefix + protocol[history_count:] + skill_messages(messages), len(history)
+        feedback = [item for item in messages if item.get("role") == "system"
+                    and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, REPLY_FEEDBACK_PREFIX))]
+        return prefix + protocol[history_count:] + skill_messages(messages) + feedback, len(history)
 
     def _save_checkpoint(
         self,
@@ -1290,6 +1319,8 @@ class AgentLoop:
                     "request": request.model_dump(mode="json"),
                     "protocol_messages": protocol_messages,
                     "skill_messages": skill_messages(messages),
+                    "protocol_feedback": [item for item in messages if item.get("role") == "system"
+                                          and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, REPLY_FEEDBACK_PREFIX))],
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
                     "discovered_tool_names": resolved_discovered,

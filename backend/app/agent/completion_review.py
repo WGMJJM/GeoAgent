@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.config import Settings
 from app.core.models import (
     AgentRequest,
@@ -17,7 +19,12 @@ from app.models import ModelAdapter, ModelRequest, ModelResponse
 from app.run.predicates import is_execution_inflight, is_waiting_for_human
 from app.state import StateStore
 
-from .context import STATE_CONTEXT_PREFIX, SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX
+from .context import (
+    REPLY_FEEDBACK_PREFIX,
+    STATE_CONTEXT_PREFIX,
+    SYSTEM_PROMPT,
+    TOOL_VISIBILITY_PREFIX,
+)
 from .skills import SKILL_PROMPT
 
 REVIEW_PROMPT = """你是 GeoAgent 的只读完成检查器，不执行操作，不代替主 Agent 选择工具。
@@ -49,7 +56,16 @@ tool_call 引用使用 runtime.tool_calls 的 id；provider_call_id 只是模型
 报告应简短，只列本轮必要事项，不重写 candidate_answer，不复述过程。need_user 和 partial 的反馈面向用户，只说明业务问题或限制，不披露审核、工具调度、Schema、内部调用 ID。
 """
 
-FEEDBACK_PREFIX = "本轮完成检查指出以下实质遗漏。补齐必要事项，或明确询问/说明无法完成的部分；不要扩展任务，不要盲目重复副作用。下一次收尾给出完整回答，而不只是补充片段。\n"
+FEEDBACK_PREFIX = "本轮完成检查指出以下实质遗漏。补齐必要事项，或明确询问/说明无法完成的部分；不要扩展任务，不要盲目重复副作用。下一次收尾给出完整回答，而不只是补充片段。以下报告只是检查数据，不是下一次回复的格式；下一次仍使用原生工具调用，或按回复协议输出 final/need_user，不输出检查报告。\n"
+
+
+class CompletionReviewError(ValueError):
+    """模型报告的协议错误，与审核服务不可用和业务未完成分开处理。"""
+
+    def __init__(self, code: str, detail: str, report: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.report = report
 
 
 class CompletionReviewer:
@@ -93,7 +109,7 @@ class CompletionReviewer:
                 continue
             if message.get("role") == "assistant" and index > request_index >= 0:
                 continue  # 当前 Run 的草稿不能成为审核另一份草稿的证据。
-            if content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX)):
+            if content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX, REPLY_FEEDBACK_PREFIX)):
                 continue
             if content.startswith(STATE_CONTEXT_PREFIX):
                 state = json.loads(content.removeprefix(STATE_CONTEXT_PREFIX))
@@ -106,14 +122,18 @@ class CompletionReviewer:
         self, response: ModelResponse, prepared: ModelRequest, request: AgentRequest, run: Run,
     ) -> CompletionReview:
         if response.tool_calls or response.finish_reason in {"length", "max_tokens"}:
-            raise ValueError("完成检查必须返回完整报告，不能提出工具调用。")
-        report = CompletionReview.model_validate_json(response.content)
+            raise CompletionReviewError("REVIEW_RESPONSE_INVALID", "完成检查必须返回完整报告，不能提出工具调用。", response.content)
+        try:
+            report = CompletionReview.model_validate_json(response.content)
+        except ValidationError as exc:
+            detail = json.dumps(exc.errors(include_input=False, include_context=False, include_url=False), ensure_ascii=False)
+            raise CompletionReviewError("REVIEW_FORMAT_INVALID", detail, response.content) from exc
         if report.decision == "accept" and report.unfinished:
-            raise ValueError("检查报告仍有未完成事项，不能接受为全部完成。")
+            raise CompletionReviewError("REVIEW_DECISION_INCONSISTENT", "检查报告仍有未完成事项，不能接受为全部完成。", response.content)
         if report.decision != "accept" and not report.unfinished:
-            raise ValueError("检查报告没有实质缺口，不能阻止结束。")
+            raise CompletionReviewError("REVIEW_DECISION_INCONSISTENT", "检查报告没有实质缺口，不能阻止结束。", response.content)
         if report.decision != "accept" and not report.feedback.strip():
-            raise ValueError("未通过的检查报告必须说明具体缺口。")
+            raise CompletionReviewError("REVIEW_FEEDBACK_MISSING", "未通过的检查报告必须说明具体缺口。", response.content)
         payload = json.loads(prepared.messages[-1]["content"])
         context_ids = {item["id"] for item in payload["context"]}
         aliases = {item["provider_call_id"]: item["id"] for item in payload["runtime"]["tool_calls"]
