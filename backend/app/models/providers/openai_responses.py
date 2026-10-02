@@ -10,7 +10,12 @@ from openai import AsyncOpenAI
 from app.core.tokens import estimate_tokens
 from app.models.adapter import ModelAdapter, ModelRequest, ModelResponse, ModelStreamChunk
 from app.models.config import ModelConfig
-from app.models.providers.openai_compatible import _capability, _provider_tool_name, _reasoning_effort, _restore_tool_names
+from app.models.providers.openai_compatible import (
+    _capability,
+    _provider_tool_name,
+    _reasoning_effort,
+    _restore_tool_names,
+)
 
 
 class OpenAIResponsesAdapter(ModelAdapter):
@@ -22,6 +27,8 @@ class OpenAIResponsesAdapter(ModelAdapter):
         self.config = config
         self.count_tokens("")
         self.timeout_seconds = config.timeout_seconds
+        self.minimum_reasoning_effort = config.minimum_reasoning_effort
+        self.completion_review_extra_body = config.completion_review_extra_body
         self.supports_stream = config.supports_stream
         self.supports_tools = config.supports_tools
         self.supports_json_object = config.supports_json_object
@@ -108,6 +115,8 @@ def _response_request(adapter: OpenAIResponsesAdapter, request: ModelRequest) ->
         "input": _response_input(request.messages, name_to_alias),
         "max_output_tokens": request.max_tokens,
     }
+    if request.extra_body is not None:
+        kwargs["extra_body"] = request.extra_body
     if tools and _capability(adapter, "supports_tools", True):
         kwargs["tools"] = tools
     if request.response_format and (

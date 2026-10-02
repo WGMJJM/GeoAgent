@@ -359,7 +359,7 @@ class CompletionReview(StrictModel):
 
     decision: Literal["accept", "continue", "need_user", "partial"]
     items: list[CompletionReviewItem] = Field(min_length=1)
-    feedback: str = Field(min_length=1)
+    feedback: str = ""
 
     @property
     def unfinished(self) -> list[str]:

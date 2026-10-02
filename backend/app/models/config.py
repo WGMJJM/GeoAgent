@@ -1,7 +1,7 @@
 """模型配置。"""
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,6 +24,11 @@ class ModelConfig(BaseModel):
     supports_json_schema: bool = False
     reasoning_efforts: list[ReasoningEffort] = Field(default_factory=list)
     default_reasoning_effort: ReasoningEffort | None = None
+    completion_review_extra_body: dict | None = None
+
+    @property
+    def minimum_reasoning_effort(self) -> ReasoningEffort | None:
+        return next((effort for effort in get_args(ReasoningEffort) if effort in self.reasoning_efforts), None)
 
 
 class ModelProfile(BaseModel):
@@ -45,6 +50,7 @@ class ModelProfile(BaseModel):
     supports_json_schema: bool = False
     reasoning_efforts: list[ReasoningEffort] = Field(default_factory=list)
     default_reasoning_effort: ReasoningEffort | None = None
+    completion_review_extra_body: dict | None = None
     default: bool = False
 
     @model_validator(mode="after")
@@ -69,4 +75,5 @@ class ModelProfile(BaseModel):
             supports_json_schema=self.supports_json_schema,
             reasoning_efforts=self.reasoning_efforts,
             default_reasoning_effort=self.default_reasoning_effort,
+            completion_review_extra_body=self.completion_review_extra_body,
         )

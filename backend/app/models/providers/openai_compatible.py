@@ -22,6 +22,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self.config = config
         self.count_tokens("")  # 启动时校验本地词表；配置错误不降级成另一种计数。
         self.timeout_seconds = config.timeout_seconds
+        self.minimum_reasoning_effort = config.minimum_reasoning_effort
+        self.completion_review_extra_body = config.completion_review_extra_body
         self.supports_stream = config.supports_stream
         self.supports_tools = config.supports_tools
         self.supports_json_object = config.supports_json_object
@@ -47,6 +49,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 response_format=request.response_format if _capability(self, "supports_json_object", True) or _capability(self, "supports_json_schema", False) else None,
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
+                extra_body=request.extra_body,
                 **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             )
         message = response.choices[0].message
@@ -81,6 +84,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 response_format=request.response_format if _capability(self, "supports_json_object", True) or _capability(self, "supports_json_schema", False) else None,
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
+                extra_body=request.extra_body,
                 stream=True,
                 stream_options={"include_usage": True},
                 **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),

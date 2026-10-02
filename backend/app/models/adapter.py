@@ -21,6 +21,7 @@ class ModelRequest(BaseModel):
     max_tokens: int = 12800
     response_format: dict[str, Any] | None = None
     reasoning_effort: ReasoningEffort | None = None
+    extra_body: dict[str, Any] | None = None
 
 
 class ModelResponse(BaseModel):
@@ -48,6 +49,8 @@ class ModelAdapter(ABC):
     supports_json_object = False
     supports_structured_output = False
     supports_json_schema = False
+    minimum_reasoning_effort: ReasoningEffort | None = None
+    completion_review_extra_body: dict[str, Any] | None = None
 
     def count_tokens(self, value: str) -> int:
         """本地预算分词；适配器可配置对应模型的词表，不进行网络请求。"""
