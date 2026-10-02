@@ -103,27 +103,6 @@ def parse_skill_request(content: str) -> SkillReadRequest | None:
     return SkillReadRequest(name=name, path=path)
 
 
-class SkillStreamBuffer:
-    """普通文字立即放行；JSON 先留在内部，完成后区分控制请求与回答。"""
-    def __init__(self) -> None:
-        self.pending = ""
-        self.streaming = False
-
-    def feed(self, content: str) -> str:
-        if self.streaming:
-            return content
-        self.pending += content
-        start = self.pending.lstrip()
-        if start and not start.startswith("{"):
-            self.streaming = True
-            return self.flush()
-        return ""
-
-    def flush(self) -> str:
-        content, self.pending = self.pending, ""
-        return content
-
-
 def skill_messages(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
     return [item for item in messages if item.get("role") == "system" and item.get("content", "").startswith(SKILL_CONTENT_PREFIX)]
 

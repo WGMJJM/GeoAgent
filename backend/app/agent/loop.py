@@ -53,7 +53,7 @@ from .context import (
     tool_visibility_message,
 )
 from .delegation import DELEGATE_TOOL
-from .skills import SkillStreamBuffer, add_skill_content, parse_skill_request, skill_messages
+from .skills import add_skill_content, parse_skill_request, skill_messages
 
 ASK_USER_TOOL = {
     "type": "function",
@@ -306,7 +306,6 @@ class AgentLoop:
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
             response = None
-            skill_stream = SkillStreamBuffer() if self.context.skills is not None and self.context.skills.entries else None
             try:
                 if not resume_pending:
                     model_messages = prepare_model_messages(messages, model_tools, model_cards, capabilities)
@@ -408,9 +407,8 @@ class AgentLoop:
                                 if chunk.content:
                                     content_parts.append(chunk.content)
                                     live_output_tokens += model.count_tokens(chunk.content)
-                                    if on_model_delta is not None and not chunk.tool_calls:
-                                        visible = skill_stream.feed(chunk.content) if skill_stream else chunk.content
-                                        await on_model_delta(visible, live_usage())
+                                    if on_model_delta is not None:
+                                        await on_model_delta("", live_usage())
                                 response = ModelResponse(
                                     content="".join(content_parts), tool_calls=chunk.tool_calls,
                                     input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
@@ -421,8 +419,7 @@ class AgentLoop:
                                 content_parts.append(chunk.content)
                                 live_output_tokens += model.count_tokens(chunk.content)
                                 if on_model_delta is not None:
-                                    visible = skill_stream.feed(chunk.content) if skill_stream else chunk.content
-                                    await on_model_delta(visible, live_usage())
+                                    await on_model_delta("", live_usage())
                     if response is None:
                         raise ValueError("模型流未返回结束片段。")
             except Exception:
@@ -444,7 +441,7 @@ class AgentLoop:
                     local_output_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
                 current = await self._record_model_usage(current, response, local_input_tokens, local_output_tokens)
 
-            if response is not None and skill_stream is not None:
+            if response is not None and self.context.skills is not None and self.context.skills.entries:
                 try:
                     skill_request = parse_skill_request(response.content)
                     if skill_request is not None and response.tool_calls:
@@ -478,8 +475,6 @@ class AgentLoop:
                         payload={"skill": skill_request.name, "path": skill_request.path, "status": status},
                     )
                     continue
-                if on_model_delta is not None and not response.tool_calls and skill_stream.pending:
-                    await on_model_delta(skill_stream.flush(), current.token_usage)
 
             if response is None or response.tool_calls:
                 restoring_batch = bool(resume_pending)
@@ -846,7 +841,8 @@ class AgentLoop:
                     pending_approvals, discovered_names=discovered_names, used_names=used_names,
                 )
                 try:
-                    review = await self._review_answer(request, current, model, model_messages, answer, on_model_delta)
+                    async with asyncio.timeout(self.settings.completion_review_timeout_seconds):
+                        review = await self._review_answer(request, current, model, model_messages, answer, on_model_delta)
                 except Exception as exc:
                     current = self.store.get_run(current.id) or current
                     await self.trace.emit(
@@ -855,9 +851,8 @@ class AgentLoop:
                         payload={"scope": "completion_review", "error": type(exc).__name__},
                     )
                     return await self._finish(current, request=request, result=AgentResult(
-                        agent_id=current.agent_id, status=AgentResultStatus.PARTIAL,
-                        summary=answer + "\n\n完整性检查未完成；以上是当前结果，尚未确认本轮要求已全部满足。",
-                        warnings=["完整性检查未完成，不能确认全部事项已完成。"],
+                        agent_id=current.agent_id, status=AgentResultStatus.FAILED,
+                        summary="暂时无法提供已确认的完整答复，请稍后重试。已执行的操作不会自动重复。",
                         error="COMPLETION_REVIEW_UNAVAILABLE", trace_id=current.id,
                     ))
                 current = self.store.get_run(current.id) or current
@@ -888,6 +883,8 @@ class AgentLoop:
                     return await self._finish(current, request=request, result=self._review_partial(current, review))
             references = [reference.model_dump(mode="json") for item in review.items for reference in item.evidence_refs
                           if reference.kind != "context"] if review else []
+            if on_model_delta is not None:
+                await on_model_delta(answer, current.token_usage or TokenUsage())
             return await self._finish(
                 current,
                 request=request,
@@ -1428,6 +1425,7 @@ def _replace_tool_observation(messages: list[dict[str, Any]], provider_call_id: 
 
 def _tool_observation(result: ToolResult) -> str:
     payload = {
+        "call_id": result.call_id,
         "status": result.status.value,
         "output": result.output,
         "datasets": result.datasets,
