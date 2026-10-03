@@ -87,7 +87,7 @@ class Application:
         self._load_model_profiles()
         self.tool_registry = ToolRegistry()
         register_gis_tools(self.tool_registry)
-        register_runtime_tools(self.tool_registry)
+        register_runtime_tools(self.tool_registry, python_environment=self.python_executor.environment())
         self.arcpy = None
         if self.settings.enable_arcpy:
             executable = discover_arcpy_executable(self.settings.arcpy_executable)

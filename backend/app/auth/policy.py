@@ -90,10 +90,12 @@ class PermissionPolicy:
         ):
             if services.get(service) is not None:
                 environments.add(environment)
-        # 普通 Python/Shell 执行器不等于隔离环境；只有宿主明确注入经过验证的
-        # 隔离运行时标记时才允许目录发现这两类工具。
-        if services.get("isolated_python") is True:
-            environments.add("isolated_python")
+        # Python 是宿主显式开启的受信任本地执行，不冒充已验证沙箱。
+        if services.get("python") is not None:
+            environments.add("runtime.python.local")
+            if authenticated_user and services.get("allow_unsafe_python") is True:
+                scopes |= frozenset({"runtime.python.execute"})
+        # Shell 仍未开放；其隔离环境和执行权限不能由 Python 开关授予。
         if services.get("isolated_shell") is True:
             environments.add("isolated_shell")
         arcpy = services.get("arcpy")
