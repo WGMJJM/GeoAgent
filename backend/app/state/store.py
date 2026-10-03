@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -42,6 +43,7 @@ from app.core.models import (
 )
 
 T = TypeVar("T")
+CHECKPOINT_COMPRESSION_LEVEL = 6
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -1310,10 +1312,13 @@ class StateStore:
             db.commit()
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> None:
+        payload = zlib.compress(
+            checkpoint.model_dump_json().encode("utf-8"), level=CHECKPOINT_COMPRESSION_LEVEL
+        )
         with self._connect() as db:
             db.execute(
                 "INSERT OR REPLACE INTO checkpoints(id,run_id,phase,payload_json,created_at) VALUES(?,?,?,?,?)",
-                (checkpoint.id, checkpoint.run_id, checkpoint.phase, checkpoint.model_dump_json(), checkpoint.created_at.isoformat()),
+                (checkpoint.id, checkpoint.run_id, checkpoint.phase, payload, checkpoint.created_at.isoformat()),
             )
             db.commit()
 
@@ -1322,7 +1327,13 @@ class StateStore:
             row = db.execute(
                 "SELECT payload_json FROM checkpoints WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)
             ).fetchone()
-        return self._model(Checkpoint, row[0]) if row else None
+        if row is None:
+            return None
+        # SQLite 保留实际存储类型：旧快照为 TEXT，新快照为 zlib BLOB。
+        payload = row[0]
+        if isinstance(payload, bytes):
+            payload = zlib.decompress(payload)
+        return Checkpoint.model_validate_json(payload)
 
     def save_dataset(self, dataset: Dataset) -> None:
         with self._connect() as db:
