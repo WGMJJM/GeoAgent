@@ -255,7 +255,7 @@ class StateStore:
 
     @staticmethod
     def _migrate_schema(db: sqlite3.Connection) -> None:
-        """为已有本地 SQLite 增加字段，不删除旧业务数据。"""
+        """兼容已有 SQLite；检查点仅保留每个 Run 的最新完整快照。"""
 
         conversation_columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)").fetchall()}
         if "user_id" not in conversation_columns:
@@ -294,6 +294,17 @@ class StateStore:
         StateStore._add_columns(db, "tool_calls", {"status": "TEXT", "updated_at": "TEXT"})
         StateStore._add_columns(db, "datasets", {"owner_user_id": "TEXT", "created_by_run_id": "TEXT"})
         StateStore._add_columns(db, "artifacts", {"owner_user_id": "TEXT", "run_id": "TEXT"})
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_checkpoints_run'").fetchone() is None:
+            db.execute(
+                """DELETE FROM checkpoints WHERE rowid NOT IN (
+                    SELECT rowid FROM (
+                        SELECT rowid, ROW_NUMBER() OVER (
+                            PARTITION BY run_id ORDER BY created_at DESC, rowid DESC
+                        ) AS position FROM checkpoints
+                    ) WHERE position=1
+                )"""
+            )
+            db.execute("CREATE UNIQUE INDEX idx_checkpoints_run ON checkpoints(run_id)")
         StateStore._backfill_core_columns(db)
         db.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at)")
         db.execute("CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash)")
@@ -1311,26 +1322,39 @@ class StateStore:
             db.execute("UPDATE tool_calls SET status=?, result_json=?, updated_at=? WHERE id=?", (status.value, result.model_dump_json(), utc_now().isoformat(), call_id))
             db.commit()
 
-    def save_checkpoint(self, checkpoint: Checkpoint) -> None:
-        payload = zlib.compress(
-            checkpoint.model_dump_json().encode("utf-8"), level=CHECKPOINT_COMPRESSION_LEVEL
-        )
+    def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute(
+                "SELECT id,created_at,payload_json FROM checkpoints WHERE run_id=?", (checkpoint.run_id,)
+            ).fetchone()
+            if previous is not None:
+                # 保持原有“最新快照”语义，晚到的旧快照不能使恢复位置倒退。
+                if checkpoint.created_at.isoformat() < previous["created_at"]:
+                    return self._decode_checkpoint(previous["payload_json"])
+                checkpoint = checkpoint.model_copy(update={"id": previous["id"]})
+            payload = zlib.compress(
+                checkpoint.model_dump_json().encode("utf-8"), level=CHECKPOINT_COMPRESSION_LEVEL
+            )
             db.execute(
-                "INSERT OR REPLACE INTO checkpoints(id,run_id,phase,payload_json,created_at) VALUES(?,?,?,?,?)",
+                """INSERT INTO checkpoints(id,run_id,phase,payload_json,created_at) VALUES(?,?,?,?,?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    phase=excluded.phase, payload_json=excluded.payload_json, created_at=excluded.created_at""",
                 (checkpoint.id, checkpoint.run_id, checkpoint.phase, payload, checkpoint.created_at.isoformat()),
             )
             db.commit()
+        return checkpoint
 
     def latest_checkpoint(self, run_id: str) -> Checkpoint | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT payload_json FROM checkpoints WHERE run_id=? ORDER BY created_at DESC LIMIT 1", (run_id,)
+                "SELECT payload_json FROM checkpoints WHERE run_id=?", (run_id,)
             ).fetchone()
-        if row is None:
-            return None
+        return self._decode_checkpoint(row[0]) if row else None
+
+    @staticmethod
+    def _decode_checkpoint(payload: str | bytes) -> Checkpoint:
         # SQLite 保留实际存储类型：旧快照为 TEXT，新快照为 zlib BLOB。
-        payload = row[0]
         if isinstance(payload, bytes):
             payload = zlib.decompress(payload)
         return Checkpoint.model_validate_json(payload)

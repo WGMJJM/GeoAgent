@@ -13,8 +13,7 @@ class CheckpointStore:
         self.store = store
 
     def save(self, checkpoint: Checkpoint) -> Checkpoint:
-        self.store.save_checkpoint(checkpoint)
-        return checkpoint
+        return self.store.save_checkpoint(checkpoint)
 
     def latest(self, run_id: str) -> Checkpoint | None:
         return self.store.latest_checkpoint(run_id)
