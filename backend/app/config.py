@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     skills_directory: Path = Field(default=Path("backend/skills"))
     default_crs: str = "EPSG:3857"
     max_agent_turns: int = Field(default=20, ge=1)
+    max_empty_response_retries: int = Field(default=1, ge=0)
     max_tool_calls: int = Field(default=40, ge=1)
     max_subagents: int = Field(default=5, ge=1, le=20)
     max_parallel_agents: int = Field(default=3, ge=1, le=20)
