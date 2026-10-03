@@ -18,8 +18,9 @@ def run_process(
     cwd,
     timeout_seconds: int,
     cancel_event: Event | None = None,
+    encoding: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(arguments, cwd=cwd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    process = subprocess.Popen(arguments, cwd=cwd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding=encoding)
     started = time.monotonic()
     while True:
         if cancel_event and cancel_event.is_set():
