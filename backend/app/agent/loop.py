@@ -49,6 +49,7 @@ from .completion_review import (
     review_feedback_message,
 )
 from .context import (
+    ANSWER_PREFIX,
     LEGACY_REPLY_FEEDBACK_PREFIX,
     ContextBuilder,
     compact_model_input,
@@ -313,6 +314,8 @@ class AgentLoop:
             current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
             self.store.save_run(current)
             response = None
+            streamed_answer = False
+            answer_declared = False
             try:
                 if not resume_pending:
                     model_messages = prepare_model_messages(messages, model_tools, model_cards, capabilities)
@@ -408,25 +411,39 @@ class AgentLoop:
                     if on_model_delta is not None:
                         await on_model_delta("", live_usage())
                     content_parts = []
+                    can_stream_answer = not self.settings.completion_review_enabled or current.tool_call_count == 0
+                    answer_started = False
+                    prefix_pending = True
+                    reply_prefix = ""
                     async with aclosing(model.stream(model_request)) as stream:
                         async for chunk in stream:
+                            if chunk.content:
+                                content_parts.append(chunk.content)
+                                live_output_tokens += model.count_tokens(chunk.content)
+                                published = ""
+                                if can_stream_answer and not chunk.tool_calls:
+                                    if answer_started:
+                                        published = chunk.content
+                                    elif prefix_pending:
+                                        reply_prefix += chunk.content
+                                        if reply_prefix.startswith(ANSWER_PREFIX):
+                                            answer_started = True
+                                            prefix_pending = False
+                                            published = reply_prefix.removeprefix(ANSWER_PREFIX)
+                                            reply_prefix = ""
+                                        elif not ANSWER_PREFIX.startswith(reply_prefix):
+                                            prefix_pending = False
+                                            reply_prefix = ""
+                                if on_model_delta is not None:
+                                    await on_model_delta(published, live_usage())
+                                    streamed_answer = streamed_answer or bool(published)
                             if chunk.done:
-                                if chunk.content:
-                                    content_parts.append(chunk.content)
-                                    live_output_tokens += model.count_tokens(chunk.content)
-                                    if on_model_delta is not None:
-                                        await on_model_delta("", live_usage())
                                 response = ModelResponse(
                                     content="".join(content_parts), tool_calls=chunk.tool_calls,
                                     input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
                                     model=chunk.model, finish_reason=chunk.finish_reason,
                                 )
                                 break
-                            if chunk.content:
-                                content_parts.append(chunk.content)
-                                live_output_tokens += model.count_tokens(chunk.content)
-                                if on_model_delta is not None:
-                                    await on_model_delta("", live_usage())
                     if response is None:
                         raise ValueError("模型流未返回结束片段。")
             except Exception:
@@ -447,8 +464,16 @@ class AgentLoop:
                 if response.tool_calls:
                     local_output_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
                 current = await self._record_model_usage(current, response, local_input_tokens, local_output_tokens)
+                answer_declared = response.content.startswith(ANSWER_PREFIX)
+                if answer_declared and response.tool_calls:
+                    return await self._finish(current, request=request, result=AgentResult(
+                        agent_id=current.agent_id, status=AgentResultStatus.FAILED,
+                        summary="模型在声明回答后又提出工具调用，本轮已停止；这些工具没有执行。",
+                        error="MODEL_PROTOCOL_ERROR", trace_id=current.id,
+                    ))
+                response = response.model_copy(update={"content": response.content.removeprefix(ANSWER_PREFIX)})
 
-            if response is not None and self.context.skills is not None and self.context.skills.entries:
+            if response is not None and not answer_declared and self.context.skills is not None and self.context.skills.entries:
                 try:
                     skill_request = parse_skill_request(response.content)
                     if skill_request is not None and response.tool_calls:
@@ -903,7 +928,7 @@ class AgentLoop:
             references = [reference.model_dump(mode="json") for item in review.items for reference in item.evidence_refs
                           if reference.kind != "context"] if review else []
             if on_model_delta is not None:
-                await on_model_delta(answer, current.token_usage or TokenUsage())
+                await on_model_delta("" if streamed_answer else answer, current.token_usage or TokenUsage())
             return await self._finish(
                 current,
                 request=request,
