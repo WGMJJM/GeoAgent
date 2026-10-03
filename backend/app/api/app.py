@@ -430,6 +430,21 @@ def create_app(application: Application | None = None) -> FastAPI:
         result = await geoagent.conversations.wait(run.id, force_assistant=True)
         return {"approval": item.model_dump(mode="json"), "run": run.model_dump(mode="json"), "result": result.model_dump(mode="json")}
 
+    @api.post("/api/v1/runs/{run_id}/retry")
+    async def retry(run_id: str, current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+        previous = geoagent.store.get_run(run_id)
+        if previous is None or not geoagent.store.run_belongs_to_user(run_id, current_user.id):
+            raise HTTPException(status_code=404, detail="run not found")
+        try:
+            run = await geoagent.run_manager.retry_run(run_id, user_id=current_user.id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        result = await geoagent.conversations.wait(run.id)
+        current = geoagent.store.get_run(run.id)
+        return {"retry_of": run_id, "run_id": run.id, "run": current.model_dump(mode="json"), "result": result.model_dump(mode="json")}
+
     @api.post("/api/v1/runs/{run_id}/resume")
     async def resume(run_id: str, current_user: User = Depends(get_current_user)) -> dict[str, Any]:
         previous = geoagent.store.get_run(run_id)

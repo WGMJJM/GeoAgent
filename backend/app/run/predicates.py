@@ -30,6 +30,12 @@ def is_resumable_run(run: Run, *, has_checkpoint: bool) -> bool:
     return has_checkpoint and run.status in TECHNICAL_RESUMABLE_STATUSES
 
 
+def is_retryable_failed_run(run: Run) -> bool:
+    """人工重试只针对失败的主 Run；副作用未确认不能重新发起。"""
+
+    return run.status is RunStatus.FAILED and run.parent_run_id is None and run.error != "SIDE_EFFECT_UNCERTAIN"
+
+
 __all__ = [
     "EXECUTION_INFLIGHT_STATUSES",
     "HUMAN_WAITING_STATUSES",
@@ -37,5 +43,6 @@ __all__ = [
     "is_cancellable_run",
     "is_execution_inflight",
     "is_resumable_run",
+    "is_retryable_failed_run",
     "is_waiting_for_human",
 ]

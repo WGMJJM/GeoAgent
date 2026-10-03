@@ -6,12 +6,28 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
-from app.core.models import AgentRequest, AgentResult, AgentResultStatus, Checkpoint, ReasoningEffort, Run, RunStatus, TokenUsage
+from app.core.models import (
+    AgentRequest,
+    AgentResult,
+    AgentResultStatus,
+    Checkpoint,
+    ReasoningEffort,
+    Run,
+    RunStatus,
+    TokenUsage,
+    ToolExecutionStatus,
+    new_id,
+)
 from app.observability import EventType
 from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import persist_result, transition
 from app.run.lifecycle import resume as resume_lifecycle
-from app.run.predicates import is_cancellable_run, is_execution_inflight, is_resumable_run
+from app.run.predicates import (
+    is_cancellable_run,
+    is_execution_inflight,
+    is_resumable_run,
+    is_retryable_failed_run,
+)
 
 
 class RunManager:
@@ -22,6 +38,7 @@ class RunManager:
         self.execution_timeout_seconds = execution_timeout_seconds
         self._active: dict[str, asyncio.Task[AgentResult]] = {}
         self._finished: dict[str, AgentResult] = {}
+        self._retry_locks: dict[str, asyncio.Lock] = {}
 
     async def submit(
         self,
@@ -46,6 +63,48 @@ class RunManager:
         if self.metrics:
             self.metrics.increment("runs.submitted")
         return prepared.run
+
+    async def retry_run(self, run_id: str, *, user_id: str) -> Run:
+        """经用户明确操作，重新发起原请求；不复制旧执行游标或消费旧审批。"""
+
+        source = self.store.get_run(run_id)
+        if source is None:
+            raise KeyError(f"运行不存在：{run_id}")
+        if not user_id or not self.store.run_belongs_to_user(run_id, user_id):
+            raise PermissionError("当前用户无权重试该运行")
+        if not is_retryable_failed_run(source) or self.is_active(run_id):
+            raise RuntimeError("仅可重试已失败的主运行；副作用未确认的运行不能重试")
+
+        async with self._retry_locks.setdefault(run_id, asyncio.Lock()):
+            related = [source, *self.store.list_child_runs(run_id)]
+            if any(
+                self.is_active(item.id) or is_execution_inflight(item)
+                or any(status is ToolExecutionStatus.RUNNING for _, status, _ in self.store.list_tool_calls(item.id))
+                for item in related
+            ):
+                raise RuntimeError("原运行或子运行仍有未结束的执行记录，请先确认执行结果")
+            # 重复点击共享仍在运行/等待的新尝试；不启动第二份相同请求。
+            for attempt in self.store.list_runs_for_conversation(source.conversation_id):
+                if attempt.metadata.get("retry_of") == run_id and is_cancellable_run(attempt):
+                    return attempt
+            checkpoint = self.store.latest_checkpoint(run_id)
+            saved_request = RunCheckpointCodec.request(checkpoint.state) if checkpoint is not None else None
+            if saved_request is None or saved_request.conversation_id != source.conversation_id:
+                raise RuntimeError("失败运行没有有效的原始请求，不能重试")
+            for dataset_id in dict.fromkeys([*saved_request.dataset_ids, *saved_request.attachment_ids]):
+                if self.store.get_dataset_for_user(dataset_id, user_id) is None:
+                    raise PermissionError("原请求中的数据集不存在或当前用户已无权访问")
+            request = saved_request.model_copy(update={
+                "request_id": new_id("req"),
+                "user_id": user_id,
+                "reply_to_run_id": None,
+                "referenced_run_ids": list(dict.fromkeys([*saved_request.referenced_run_ids, run_id])),
+            })
+            return await self.submit(request, metadata={
+                "retry_of": run_id,
+                "retry_mode": "restart_request",
+                "original_request_message_id": source.metadata.get("original_request_message_id"),
+            })
 
     async def continue_run(
         self,
