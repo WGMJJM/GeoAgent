@@ -837,7 +837,7 @@ class AgentLoop:
                 ))
             answer = response.content
             review = None
-            if self.settings.completion_review_enabled:
+            if self.settings.completion_review_enabled and current.tool_call_count > 0:
                 messages.append({"role": "assistant", "content": answer})
                 self._save_checkpoint(
                     request, current, messages, cursor_id, "completion_review", activated_names,
