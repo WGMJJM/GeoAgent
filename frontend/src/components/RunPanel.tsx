@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Artifact, Dataset, Event, Result, Run, api } from "../api";
-import { childRunsOf, eventRuns, groupRunsByTask, isCancellable, isHumanWaiting, isMainRun, isResumable, lineageKind, lineageLabel, lineageSource, runTitle } from "../domain";
+import { childRunsOf, eventRuns, groupRunsByTask, isCancellable, isHumanWaiting, isMainRun, isResumable, isRetryable, lineageKind, lineageLabel, lineageSource, runTitle } from "../domain";
 import { agentLabel, displayEventMessage, eventLabel, findingText, kindLabel, statusLabel } from "../labels";
 import { LineagePanel } from "./LineagePanel";
 import { MapViewer } from "./MapViewer";
@@ -16,14 +16,16 @@ type RunPanelProps = {
   onSelect: (id: string) => Promise<void>;
   onCancel: (id: string) => Promise<void>;
   onResume: (id: string) => Promise<void>;
+  onRetry: (id: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onDeleteMany: (ids: string[]) => Promise<void>;
   busy: boolean;
 };
 
-export function RunPanel({ runs, selectedRunId, events, result = null, datasets = [], artifacts = [], onSelect, onCancel, onResume, onDelete, onDeleteMany, busy }: RunPanelProps) {
+export function RunPanel({ runs, selectedRunId, events, result = null, datasets = [], artifacts = [], onSelect, onCancel, onResume, onRetry, onDelete, onDeleteMany, busy }: RunPanelProps) {
   const visibleEvents = events.filter((event) => event.payload.scope !== "completion_review" && event.payload.scope !== "model_protocol");
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [pendingRetryId, setPendingRetryId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [bulkDeletePending, setBulkDeletePending] = useState(false);
   const deletableIds = runs.filter((run) => !isCancellable(run)).map((run) => run.id);
@@ -57,7 +59,8 @@ export function RunPanel({ runs, selectedRunId, events, result = null, datasets 
     return <div className={`run-row ${nested ? "nested-run" : ""} ${selectedRunId === run.id ? "selected" : ""}`} key={run.id}>
       <label className="run-check" title={cancellable ? "运行中的记录不能删除" : "选择运行记录"}><input type="checkbox" checked={selectedIds.includes(run.id)} disabled={busy || cancellable} onChange={() => toggleRun(run.id)} aria-label={`选择运行记录 ${run.id}`} /></label>
       <button className="run-select" onClick={() => void onSelect(run.id)}><span className={`run-state ${run.status.toLowerCase()}`} /><div><b>{runTitle(run)}</b><small>{run.id} · {agentLabel(run.agent_id)} · {run.tool_call_count} 次工具调用</small>{source && <small className="lineage-note">{lineageLabel(lineageKind(run))}：{source}</small>}{run.parent_run_id && <small className="lineage-note">父运行：{run.parent_run_id}</small>}</div><em>{statusLabel(run.status)}</em></button>
-      <div className="run-actions">{cancellable && <button className="small-action danger" onClick={() => void onCancel(run.id)}>{humanWaiting ? "取消任务" : "取消"}</button>}{isResumable(run) && <button className="small-action" disabled={busy} onClick={() => void onResume(run.id)}>从检查点恢复</button>}{!cancellable && <button className="small-action danger" disabled={busy} onClick={() => setPendingDeleteId((current) => current === run.id ? null : run.id)}>删除</button>}</div>
+      <div className="run-actions">{cancellable && <button className="small-action danger" onClick={() => void onCancel(run.id)}>{humanWaiting ? "取消任务" : "取消"}</button>}{isResumable(run) && <button className="small-action" disabled={busy} onClick={() => void onResume(run.id)}>从检查点恢复</button>}{isRetryable(run) && <button className="small-action" disabled={busy} onClick={() => setPendingRetryId((current) => current === run.id ? null : run.id)}>重试原请求</button>}{!cancellable && <button className="small-action danger" disabled={busy} onClick={() => setPendingDeleteId((current) => current === run.id ? null : run.id)}>删除</button>}</div>
+      {pendingRetryId === run.id && <div className="run-delete-confirm" role="dialog" aria-label={`确认重试运行 ${run.id}`}><span>将重新发起原请求，可能再次执行已完成的操作。旧运行和结果会保留。</span><div><button type="button" className="small-action" disabled={busy} onClick={() => { setPendingRetryId(null); void onRetry(run.id); }}>确认重试</button><button type="button" className="conversation-confirm-cancel" onClick={() => setPendingRetryId(null)}>取消</button></div></div>}
       {pendingDeleteId === run.id && <div className="run-delete-confirm" role="dialog" aria-label={`确认删除运行 ${run.id}`}><span>删除这条运行记录？</span><div><button type="button" className="conversation-confirm-delete" onClick={() => { setPendingDeleteId(null); void onDelete(run.id); }}>删除</button><button type="button" className="conversation-confirm-cancel" onClick={() => setPendingDeleteId(null)}>取消</button></div></div>}
     </div>;
   };

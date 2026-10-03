@@ -46,6 +46,10 @@ export function isResumable(run: Run): boolean {
   return RESUMABLE_RUN_STATUSES.has(run.status);
 }
 
+export function isRetryable(run: Run): boolean {
+  return run.status === "FAILED" && isMainRun(run) && run.error !== "SIDE_EFFECT_UNCERTAIN";
+}
+
 export function runDurationMs(run: Run, now = Date.now()): number {
   if (!run.started_at) return 0;
   const started = Date.parse(run.started_at);

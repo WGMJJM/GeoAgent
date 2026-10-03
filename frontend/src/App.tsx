@@ -626,14 +626,22 @@ export function App() {
     }
   };
 
-  const resumeRun = async (runId: string) => {
+  const performRunAction = async (runId: string, action: "resume" | "retry") => {
+    const targetConversationId = conversationId;
     setResumingRunId(runId);
     setError("");
     try {
-      const resumed = await api.resumeRun(runId);
+      const resumed = action === "retry" ? await api.retryRun(runId) : await api.resumeRun(runId);
+      if (action === "retry" && "run" in resumed && resumed.run.conversation_id) {
+        const targetId = resumed.run.conversation_id;
+        setMessagesForConversation(targetId, (current) => current.some((item) => item.runId === resumed.run_id)
+          ? current : [...current, { id: `retry-${resumed.run_id}`, role: "assistant", content: resumed.result.summary, kind: "execution", runId: resumed.run_id }]);
+        await Promise.all([refreshDatasets(), refreshApprovals()]);
+      }
+      await refreshRuns();
+      if (activeConversationRef.current !== targetConversationId) return;
       setSelectedRunId(resumed.run_id);
       setView("runs");
-      await refreshRuns();
       const details = await fetchRunView(resumed.run_id, runs);
       setResult(details.result ?? resumed.result);
       setEvents(details.events);
@@ -644,6 +652,9 @@ export function App() {
       setResumingRunId(null);
     }
   };
+
+  const resumeRun = (runId: string) => performRunAction(runId, "resume");
+  const retryRun = (runId: string) => performRunAction(runId, "retry");
 
   const registerDataset = async (path: string, name: string) => {
     setError("");
@@ -712,7 +723,7 @@ export function App() {
        {view === "chat" && <ProductChat key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} onReasoningChange={setSelectedReasoningEffort} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
       {view === "datasets" && <DatasetPanel datasets={datasets} selectedDatasetIds={selectedDatasetIds} onToggleRequestDataset={(id) => setSelectedDatasetIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])} onRegister={registerDataset} busy={false} />}
       {view === "agents" && <AgentPanel runs={conversationRuns} />}
-       {view === "runs" && <RunPanel runs={conversationRuns} selectedRunId={selectedRunId} events={events} result={result} datasets={datasets} artifacts={artifacts} onSelect={loadRun} onCancel={cancelRun} onResume={resumeRun} onDelete={deleteRun} onDeleteMany={deleteRunRecords} busy={resumingRunId !== null} />}
+       {view === "runs" && <RunPanel runs={conversationRuns} selectedRunId={selectedRunId} events={events} result={result} datasets={datasets} artifacts={artifacts} onSelect={loadRun} onCancel={cancelRun} onResume={resumeRun} onRetry={retryRun} onDelete={deleteRun} onDeleteMany={deleteRunRecords} busy={resumingRunId !== null} />}
       {view === "settings" && <SettingsPanel currentUser={currentUser} onSaved={setCurrentUser} profile={userProfile} onProfileSaved={setUserProfile} modelStatus={modelStatus} />}
     </main>
   </div>;

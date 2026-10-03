@@ -12,6 +12,7 @@ export type Run = { id: string; parent_run_id?: string | null; conversation_id?:
 export type Event = { id: string; run_id: string; event_type: string; message: string; sequence: number; timestamp: string; payload: Record<string, unknown>; agent_id?: string | null };
 export type Artifact = { id: string; name: string; kind: string; path?: string | null; media_type?: string | null; dataset_id?: string | null; run_id?: string | null; description: string; metadata: Record<string, unknown>; created_at?: string | null };
 export type ResumeResponse = { resumed_from: string; run_id: string; checkpoint: string; result: Result };
+export type RetryResponse = { retry_of: string; run_id: string; run: Run; result: Result };
 export type Conversation = { id: string; title: string; created_at: string; updated_at: string };
 export type User = { id: string; username: string; email?: string | null; display_name: string; is_active: boolean; created_at: string; updated_at: string };
 export type ResponseStyle = "concise" | "balanced" | "detailed";
@@ -41,9 +42,9 @@ const HTTP_TIMEOUT_MS = 15_000;
 const UPLOAD_TIMEOUT_MS = 120_000;
 const STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
 
-async function request<T>(url: string, init?: RequestInit, timeoutMs = HTTP_TIMEOUT_MS): Promise<T> {
+async function request<T>(url: string, init?: RequestInit, timeoutMs: number | null = HTTP_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = timeoutMs === null ? null : window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { credentials: "include", headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) }, ...init, signal: init?.signal ?? controller.signal });
     const body = await response.text();
@@ -57,7 +58,7 @@ async function request<T>(url: string, init?: RequestInit, timeoutMs = HTTP_TIME
     }
     return (body ? JSON.parse(body) : undefined) as T;
   } finally {
-    window.clearTimeout(timeout);
+    if (timeout !== null) window.clearTimeout(timeout);
   }
 }
 
@@ -209,6 +210,8 @@ export const api = {
   streamMessage,
   cancelRun: (runId: string) => request<Run>(`/api/v1/runs/${runId}/cancel`, { method: "POST" }),
   resumeRun: (runId: string) => request<ResumeResponse>(`/api/v1/runs/${runId}/resume`, { method: "POST" }),
+  // 重试等待一次完整 Run，由服务端现有执行截止时间约束，不套用普通查询的短超时。
+  retryRun: (runId: string) => request<RetryResponse>(`/api/v1/runs/${runId}/retry`, { method: "POST" }, null),
   modelStatus: () => request<ModelStatus>("/api/v1/models"),
   approvals: (status?: ApprovalStatus, limit = 50) => request<ApprovalRequest[]>(`/api/v1/approvals?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`),
   approval: (approvalId: string) => request<ApprovalRequest>(`/api/v1/approvals/${encodeURIComponent(approvalId)}`),
