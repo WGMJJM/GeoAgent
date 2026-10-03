@@ -342,22 +342,6 @@ class ToolResult(StrictModel):
     duration_ms: float = Field(default=0.0, ge=0.0)
 
 
-class FinalReply(StrictModel):
-    """主模型明确准备发布的答复，仍需通过完成检查。"""
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-    type: Literal["final"]
-    answer: str = Field(min_length=1)
-
-
-class UserQuestion(StrictModel):
-    """主模型明确提出的补充信息请求，不代表任务完成。"""
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-    type: Literal["need_user"]
-    question: str = Field(min_length=1)
-
-
 class CompletionEvidenceReference(StrictModel):
     kind: Literal["context", "tool_call", "dataset", "artifact", "run"]
     id: str = Field(min_length=1)

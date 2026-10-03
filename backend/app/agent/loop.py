@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import TypeAdapter, ValidationError
-
 from app.auth.policy import ToolDiscoveryContext
 from app.config import Settings
 from app.core.models import (
@@ -20,7 +18,6 @@ from app.core.models import (
     AgentResultStatus,
     Checkpoint,
     CompletionReview,
-    FinalReply,
     Run,
     RunStatus,
     TokenUsage,
@@ -28,7 +25,6 @@ from app.core.models import (
     ToolError,
     ToolResult,
     ToolStatus,
-    UserQuestion,
     new_id,
 )
 from app.core.tokens import estimate_tokens
@@ -46,9 +42,14 @@ from app.observability import EventType, TraceRecorder
 from app.run.lifecycle import persist_result
 from app.state import StateStore
 
-from .completion_review import FEEDBACK_PREFIX, CompletionReviewer, CompletionReviewError
+from .completion_review import (
+    FEEDBACK_PREFIX,
+    CompletionReviewer,
+    CompletionReviewError,
+    review_feedback_message,
+)
 from .context import (
-    REPLY_FEEDBACK_PREFIX,
+    LEGACY_REPLY_FEEDBACK_PREFIX,
     ContextBuilder,
     compact_model_input,
     model_input_tokens,
@@ -59,8 +60,6 @@ from .context import (
 )
 from .delegation import DELEGATE_TOOL
 from .skills import add_skill_content, parse_skill_request, skill_messages
-
-_REPLY_ADAPTER = TypeAdapter(FinalReply | UserQuestion)
 
 ASK_USER_TOOL = {
     "type": "function",
@@ -261,6 +260,7 @@ class AgentLoop:
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
         resume_pending = [tuple(item) for item in saved_pending if isinstance(item, list) and len(item) == 6]
+        empty_response_retries = resume_from.state.get("empty_response_retries", 0) if resume_from else 0
 
         if pending_approvals:
             if isinstance(continuation, dict) and continuation.get("type") == "user_input":
@@ -816,30 +816,26 @@ class AgentLoop:
                     )
                 continue
 
-            try:
-                reply = _REPLY_ADAPTER.validate_json(response.content)
-            except ValidationError as exc:
-                detail = json.dumps(exc.errors(include_input=False, include_context=False, include_url=False), ensure_ascii=False)
-                messages.append({"role": "assistant", "content": response.content})
-                messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(REPLY_FEEDBACK_PREFIX)]
-                messages.append({"role": "system", "content": REPLY_FEEDBACK_PREFIX + detail})
+            if not response.content.strip():
+                empty_response_retries += 1
                 self._save_checkpoint(
-                    request, current, messages, cursor_id, "model_protocol_invalid", activated_names,
+                    request, current, messages, cursor_id, "model_response_empty", activated_names,
                     pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                    empty_response_retries=empty_response_retries,
                 )
-                await self.trace.emit(current.id, EventType.DECISION_MADE, "回复协议待修正，尚未发布答复",
-                                      agent_id=current.agent_id,
-                                      payload={"scope": "model_protocol", "error": "REPLY_FORMAT_INVALID", "detail": detail})
-                continue
-            messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(REPLY_FEEDBACK_PREFIX)]
-            if isinstance(reply, UserQuestion):
-                messages.append({"role": "assistant", "content": reply.question})
-                self._save_checkpoint(
-                    request, current, messages, cursor_id, "waiting_user", activated_names,
-                    pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                await self.trace.emit(
+                    current.id, EventType.DECISION_MADE, "正在生成回复",
+                    agent_id=current.agent_id,
+                    payload={"scope": "model_response", "error": "MODEL_EMPTY_RESPONSE", "attempt": empty_response_retries},
                 )
-                return await self._wait_for_user(current, request, reply.question)
-            answer = reply.answer
+                if empty_response_retries <= self.settings.max_empty_response_retries:
+                    continue
+                return await self._finish(current, request=request, result=AgentResult(
+                    agent_id=current.agent_id, status=AgentResultStatus.FAILED,
+                    summary="模型未返回有效回复，本轮已停止；已完成的操作不会自动重复。",
+                    error="MODEL_EMPTY_RESPONSE", trace_id=current.id,
+                ))
+            answer = response.content
             review = None
             if self.settings.completion_review_enabled:
                 messages.append({"role": "assistant", "content": answer})
@@ -857,11 +853,12 @@ class AgentLoop:
                         agent_id=current.agent_id,
                         payload={"scope": "completion_review", "error": exc.code, "detail": str(exc), "report": exc.report},
                     )
-                    messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(FEEDBACK_PREFIX)]
-                    messages.append({"role": "system", "content": FEEDBACK_PREFIX + json.dumps({
+                    messages[:] = [item for item in messages if not (
+                        item.get("role") == "system" and str(item.get("content", "")).startswith(FEEDBACK_PREFIX)
+                    )]
+                    messages.append(review_feedback_message({
                         "error": exc.code, "detail": str(exc),
-                        "instruction": "检查报告无效，不代表已完成。根据原目标和已有证据继续；需要用户补充时返回 need_user，否则修正 final 答复并重新检查。不要重做已经完成的工具操作。",
-                    }, ensure_ascii=False)})
+                    }))
                     self._save_checkpoint(
                         request, current, messages, cursor_id, "completion_review_invalid", activated_names,
                         pending_approvals, discovered_names=discovered_names, used_names=used_names,
@@ -882,9 +879,11 @@ class AgentLoop:
                 current = self.store.get_run(current.id) or current
                 current = current.model_copy(update={"metadata": {**current.metadata, "completion_review": review.model_dump(mode="json")}})
                 self.store.save_run(current)
-                messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(FEEDBACK_PREFIX)]
+                messages[:] = [item for item in messages if not (
+                    item.get("role") == "system" and str(item.get("content", "")).startswith(FEEDBACK_PREFIX)
+                )]
                 if review.decision != "accept":
-                    messages.append({"role": "system", "content": FEEDBACK_PREFIX + review.model_dump_json()})
+                    messages.append(review_feedback_message(review.model_dump(mode="json")))
                 self._save_checkpoint(
                     request, current, messages, cursor_id, "completion_reviewed", activated_names,
                     pending_approvals, discovered_names=discovered_names, used_names=used_names,
@@ -1255,7 +1254,13 @@ class AgentLoop:
             return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
         built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
         built.extend(skill_messages(state.get("skill_messages", [])))
-        built.extend(state.get("protocol_feedback", []))
+        for feedback in state.get("protocol_feedback", []):
+            content = feedback["content"]
+            if content.startswith(LEGACY_REPLY_FEEDBACK_PREFIX):
+                continue
+            if content.startswith(FEEDBACK_PREFIX):
+                feedback = review_feedback_message(json.loads(content.split("\n", 1)[1]))
+            built.append(feedback)
         return built, cursor_id
 
     def _refresh_conversation_prefix(
@@ -1280,7 +1285,7 @@ class AgentLoop:
         prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
         feedback = [item for item in messages if item.get("role") == "system"
-                    and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, REPLY_FEEDBACK_PREFIX))]
+                    and str(item.get("content", "")).startswith(FEEDBACK_PREFIX)]
         return prefix + protocol[history_count:] + skill_messages(messages) + feedback, len(history)
 
     def _save_checkpoint(
@@ -1300,6 +1305,7 @@ class AgentLoop:
         used_names=None,
         compacted_ids=None,
         summarized_ids=None,
+        empty_response_retries: int | None = None,
     ) -> None:
         protocol_messages = [
             item
@@ -1320,7 +1326,8 @@ class AgentLoop:
                     "protocol_messages": protocol_messages,
                     "skill_messages": skill_messages(messages),
                     "protocol_feedback": [item for item in messages if item.get("role") == "system"
-                                          and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, REPLY_FEEDBACK_PREFIX))],
+                                          and str(item.get("content", "")).startswith(FEEDBACK_PREFIX)],
+                    "empty_response_retries": empty_response_retries if empty_response_retries is not None else (previous.state.get("empty_response_retries", 0) if previous else 0),
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
                     "discovered_tool_names": resolved_discovered,

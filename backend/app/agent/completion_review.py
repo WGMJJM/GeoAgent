@@ -20,7 +20,6 @@ from app.run.predicates import is_execution_inflight, is_waiting_for_human
 from app.state import StateStore
 
 from .context import (
-    REPLY_FEEDBACK_PREFIX,
     STATE_CONTEXT_PREFIX,
     SYSTEM_PROMPT,
     TOOL_VISIBILITY_PREFIX,
@@ -56,7 +55,19 @@ tool_call 引用使用 runtime.tool_calls 的 id；provider_call_id 只是模型
 报告应简短，只列本轮必要事项，不重写 candidate_answer，不复述过程。need_user 和 partial 的反馈面向用户，只说明业务问题或限制，不披露审核、工具调度、Schema、内部调用 ID。
 """
 
-FEEDBACK_PREFIX = "本轮完成检查指出以下实质遗漏。补齐必要事项，或明确询问/说明无法完成的部分；不要扩展任务，不要盲目重复副作用。下一次收尾给出完整回答，而不只是补充片段。以下报告只是检查数据，不是下一次回复的格式；下一次仍使用原生工具调用，或按回复协议输出 final/need_user，不输出检查报告。\n"
+FEEDBACK_PREFIX = "本轮完成检查指出以下实质遗漏。"
+
+
+def review_feedback_message(report: dict[str, Any]) -> dict[str, str]:
+    """统一补做提示；兼容旧报告时不再承接旧回复格式指令。"""
+
+    return {
+        "role": "system",
+        "content": FEEDBACK_PREFIX + "补齐必要事项，或明确询问/说明无法完成的部分；不要扩展任务，不要盲目重复副作用。"
+        "需要用户补充时调用 agent.ask_user；否则按原目标继续，准备收尾时直接输出完整答复正文。"
+        "以下报告只是检查数据，不是下一次回复的格式；不输出检查报告或内部控制封装。\n"
+        + json.dumps({key: value for key, value in report.items() if key != "instruction"}, ensure_ascii=False),
+    }
 
 
 class CompletionReviewError(ValueError):
@@ -109,7 +120,7 @@ class CompletionReviewer:
                 continue
             if message.get("role") == "assistant" and index > request_index >= 0:
                 continue  # 当前 Run 的草稿不能成为审核另一份草稿的证据。
-            if content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX, REPLY_FEEDBACK_PREFIX)):
+            if message.get("role") == "system" and content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX)):
                 continue
             if content.startswith(STATE_CONTEXT_PREFIX):
                 state = json.loads(content.removeprefix(STATE_CONTEXT_PREFIX))
