@@ -17,6 +17,7 @@ from mcp.shared.exceptions import MCPError
 
 from app.core.models import ErrorCategory, ToolError, ToolMetadata, ToolResult, ToolStatus
 from app.execution.tools import RegisteredTool, ToolContext, ToolRegistry
+from app.run.recovery import retry_after, transient_error
 
 from .config import MCPServerConfig
 
@@ -135,6 +136,7 @@ class MCPProvider:
                 required_scopes=[self.config.scope],
                 required_envs=[self.config.environment],
                 risk_level=self.config.tool_risks.get(tool.name, self.config.risk_level),
+                supports_retry=bool(tool.annotations and (tool.annotations.read_only_hint is True or tool.annotations.idempotent_hint is True)),
                 tags=["mcp", self.config.id],
             )
             for name, tool in tools.items()
@@ -160,6 +162,11 @@ class MCPProvider:
                 return self._failure(context, "MCP_PROTOCOL_ERROR", "MCP 服务拒绝了调用或返回协议错误。")
             except Exception as exc:
                 self.last_error = type(exc).__name__
+                if self._metadata[name].supports_retry and self.available and transient_error(exc):
+                    return ToolResult(call_id=context.call_id or "", status=ToolStatus.FAILED, retryable=True,
+                                      error=ToolError(code="MCP_TRANSIENT_FAILURE", category=ErrorCategory.EXTERNAL,
+                                                      message="MCP 请求临时失败，可按原调用安全重试。", retryable=True,
+                                                      details={"retry_after_seconds": retry_after(exc)}))
                 self._session = None
                 self.close()
                 return self._failure(context, "MCP_CALL_FAILED", "MCP 调用失败；服务已标记为不可用，操作不会自动重试。")

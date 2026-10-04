@@ -9,6 +9,7 @@ import httpx
 from app.core.models import ErrorCategory
 from app.execution.tools import ToolContext, ToolRegistry
 from app.gis.errors import GISFailure
+from app.run.recovery import retry_after, transient_error
 from app.tools.gis import metadata
 
 
@@ -72,6 +73,7 @@ async def geocode(arguments: dict[str, Any], context: ToolContext) -> dict:
         raise GISFailure(
             "GEOCODING_REQUEST_FAILED", "地名查询服务请求失败。",
             category=ErrorCategory.EXTERNAL,
+            retryable=transient_error(exc), details={"retry_after_seconds": retry_after(exc)},
         ) from exc
     data = response.json()
     if data.get("error"):

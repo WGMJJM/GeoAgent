@@ -37,7 +37,7 @@ def metadata(
         required_scopes=required_scopes if required_scopes is not None else (["dataset.read", "dataset.write", "workspace.write"] if write else ["dataset.read"]),
         required_envs=required_envs or [],
         risk_level=RiskLevel.WRITE if write else RiskLevel.READ,
-        supports_retry=name.startswith(("dataset.inspect", "raster.inspect")),
+        supports_retry=not write and not artifact,
         dataset_output_policy=output_policy,
         produces_artifact=artifact,
         tags=tags or ["gis"],

@@ -23,6 +23,7 @@ from app.core.models import (
 from app.execution.process import ProcessCancelled
 from app.gis.errors import as_tool_error
 from app.observability import EventType, TraceRecorder
+from app.run.recovery import retry_after, transient_error
 from app.state import StateStore
 
 from .model import ToolContext
@@ -41,6 +42,7 @@ class ToolExecutor:
         timeout_seconds: int = 120,
         metrics=None,
         approval_service: ApprovalService | None = None,
+        recovery=None,
     ) -> None:
         self.registry = registry
         self.store = store
@@ -49,10 +51,53 @@ class ToolExecutor:
         self.timeout_seconds = timeout_seconds
         self.metrics = metrics
         self.approval_service = approval_service
+        self.recovery = recovery
         self.services: dict[str, Any] = {}
         self._cancel_events: dict[str, set[Event]] = {}
 
     async def execute(
+        self, call: ToolCall, *, agent_id: str, services: dict[str, Any],
+        approval_id: str | None = None, active_tool_names: frozenset[str] | None = None,
+        discovery_context: ToolDiscoveryContext | None = None, internal: bool = False,
+    ) -> ToolResult:
+        options = dict(agent_id=agent_id, services=services, approval_id=approval_id,
+                       active_tool_names=active_tool_names, discovery_context=discovery_context, internal=internal)
+        if self.recovery is None or not call.run_id or self.store.latest_checkpoint(call.run_id) is None:
+            return await self._execute_once(call, **options)
+        existing = self.store.get_tool_call(call.id)
+        state = self.recovery.current(call.run_id)
+        scheduled = state.get("operation_id") == call.id and state.get("status") == "waiting"
+        saved_failure = None
+        if existing is not None:
+            status, result = existing
+            if status is ToolExecutionStatus.RUNNING or result is not None and not scheduled:
+                # 复用持久化结果也必须经过当前身份、工具可见性和参数校验。
+                saved_failure = await self._execute_once(call, retry_failed=False, **options)
+                if status is not ToolExecutionStatus.FAILED or state.get("operation_id") != call.id:
+                    return saved_failure
+        self.recovery.begin(call.run_id, "tool", call.id)
+        while True:
+            await self.recovery.wait(call.run_id)
+            result = saved_failure if saved_failure is not None else await self._execute_once(call, **options)
+            saved_failure = None
+            if result.status in {ToolStatus.SUCCESS, ToolStatus.PARTIAL_SUCCESS}:
+                self.recovery.clear(call.run_id)
+                return result
+            registered = self.registry.get(call.name) if call.name in self.registry.names() else None
+            safe = bool(registered and registered.metadata.supports_retry
+                        and self.policy.authorize(registered.metadata, call.arguments).allowed)
+            retryable = (safe and result.status is ToolStatus.FAILED
+                         and (result.retryable or result.error is not None and result.error.retryable)
+                         and (result.error is None or result.error.code != "SIDE_EFFECT_UNCERTAIN")
+                         and not result.datasets and not result.artifacts)
+            if not await self.recovery.schedule(
+                call.run_id, retryable=retryable,
+                error_code=result.error.code if result.error else result.status.value,
+                server_delay=result.error.details.get("retry_after_seconds") if result.error else None,
+            ):
+                return result
+
+    async def _execute_once(
         self,
         call: ToolCall,
         *,
@@ -62,6 +107,7 @@ class ToolExecutor:
         active_tool_names: frozenset[str] | None = None,
         discovery_context: ToolDiscoveryContext | None = None,
         internal: bool = False,
+        retry_failed: bool = True,
     ) -> ToolResult:
         started = time.perf_counter()
         call = call.model_copy(update={"agent_id": agent_id})
@@ -123,8 +169,7 @@ class ToolExecutor:
         if existing is not None:
             execution_status, stored_result = existing
             completed = execution_status is ToolExecutionStatus.COMPLETED
-            child_result_saved = bound_run is not None and bound_run.parent_run_id and execution_status is not ToolExecutionStatus.RUNNING
-            if (completed or child_result_saved) and stored_result is not None:
+            if stored_result is not None and (completed or not retry_failed):
                 return stored_result.model_copy(update={"call_id": call.id})
             if execution_status is ToolExecutionStatus.RUNNING:
                 return _in_progress_result(call.id)
@@ -252,6 +297,9 @@ class ToolExecutor:
                     message="同步工具在清理期限后仍未退出，副作用无法确认，需要人工处理。"))
         except Exception as exc:
             error = as_tool_error(exc)
+            if transient_error(exc):
+                error = error.model_copy(update={"retryable": True, "category": ErrorCategory.EXTERNAL,
+                                                  "details": {**error.details, "retry_after_seconds": retry_after(exc)}})
             result = ToolResult(call_id=call.id, status=ToolStatus.FAILED, retryable=error.retryable, error=error)
         finally:
             if call.run_id:

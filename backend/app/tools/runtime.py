@@ -61,7 +61,7 @@ def register_runtime_tools(registry: ToolRegistry, *, python_environment: dict[s
                 "additionalProperties": False,
             },
             risk_level="WRITE",
-            supports_retry=True,
+            supports_retry=False,
             dataset_output_policy=DatasetOutputPolicy.OPTIONAL,
             tags=["runtime", "shell", "gis"],
         ),
