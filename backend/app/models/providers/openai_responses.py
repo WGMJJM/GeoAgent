@@ -35,7 +35,7 @@ class OpenAIResponsesAdapter(ModelAdapter):
         self.supports_structured_output = config.supports_json_object
         self.supports_json_schema = config.supports_json_schema
         base_url = config.base_url.strip() if config.base_url and config.base_url.strip() else None
-        self.client = AsyncOpenAI(api_key=config.api_key or "local", base_url=base_url, timeout=config.timeout_seconds)
+        self.client = AsyncOpenAI(api_key=config.api_key or "local", base_url=base_url, timeout=config.timeout_seconds, max_retries=0)
 
     def count_tokens(self, value: str) -> int:
         return estimate_tokens(value, self.config.tokenizer_file)

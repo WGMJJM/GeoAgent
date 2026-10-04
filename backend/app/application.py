@@ -39,6 +39,7 @@ from app.models.providers import OpenAICompatibleAdapter, OpenAIResponsesAdapter
 from app.observability import EventBus, Metrics, TraceRecorder
 from app.run import RunManager
 from app.run.checkpoints import CheckpointStore
+from app.run.recovery import RecoveryController
 from app.state import StateStore
 from app.tools.gis import register_gis_tools
 from app.tools.runtime import register_runtime_tools
@@ -54,6 +55,7 @@ class Application:
         self.bus = EventBus()
         self.metrics = Metrics()
         self.trace = TraceRecorder(self.store, self.bus, self.metrics)
+        self.recovery = RecoveryController(self.store, self.settings, self.trace)
         self.workspace = WorkspaceManager(self.settings.workspace_path)
         self.attachments = AttachmentService(self.workspace)
         self.inspector = DatasetInspector()
@@ -102,7 +104,7 @@ class Application:
             self.tool_registry,
             timeout_seconds=self.settings.tool_timeout_seconds,
         )
-        self.tool_executor = ToolExecutor(self.tool_registry, self.store, self.trace, PermissionPolicy(), timeout_seconds=self.settings.tool_timeout_seconds, metrics=self.metrics, approval_service=self.approvals)
+        self.tool_executor = ToolExecutor(self.tool_registry, self.store, self.trace, PermissionPolicy(), timeout_seconds=self.settings.tool_timeout_seconds, metrics=self.metrics, approval_service=self.approvals, recovery=self.recovery)
         self.tool_executor.services = {
             "settings": self.settings,
             "store": self.store,
@@ -136,6 +138,7 @@ class Application:
             },
             tool_providers=((self.arcpy,) if self.arcpy is not None else ()) + self.mcp.providers,
             metrics=self.metrics,
+            recovery=self.recovery,
         )
         self.run_manager = RunManager(
             self.agent_loop,
@@ -277,6 +280,7 @@ class Application:
 
     async def ask(self, user_input: str | AgentRequest, *, conversation_id: str | None = None, dataset_ids: list[str] | None = None, model_profile: str | None = None, reasoning_effort: ReasoningEffort | None = None):
         await self.mcp.start()
+        await self.run_manager.recover_interrupted_runs(on_result=self.conversations.record_result)
         request = user_input if isinstance(user_input, AgentRequest) else AgentRequest(
             user_input=user_input,
             conversation_id=conversation_id or new_id("conv"),

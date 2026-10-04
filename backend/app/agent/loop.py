@@ -39,7 +39,9 @@ from app.execution.tools import (
 )
 from app.models import ModelAdapter, ModelRequest, ModelResponse
 from app.observability import EventType, TraceRecorder
+from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import persist_result
+from app.run.recovery import retry_after, transient_error
 from app.state import StateStore
 
 from .completion_review import (
@@ -132,6 +134,7 @@ class AgentLoop:
         context_services: dict[str, Any],
         tool_providers: tuple[DynamicToolProvider, ...] = (),
         metrics=None,
+        recovery=None,
     ) -> None:
         self.store = store
         self.registry = registry
@@ -151,6 +154,7 @@ class AgentLoop:
         self.model_provider = model_provider
         self.services_factory = services_factory
         self.metrics = metrics
+        self.recovery = recovery
         self.context = ContextBuilder(
             store,
             profile_service=context_services.get("profile"),
@@ -208,7 +212,8 @@ class AgentLoop:
         continuation: dict[str, object] | None = None,
         on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
     ) -> AgentResult:
-        run = prepared.run
+        # 调度器已写入本段执行期限；不能用 prepare 时的旧对象覆盖它。
+        run = self.store.get_run(prepared.run.id) or prepared.run
         model = self.model_provider(request.model_profile)
         if model is None:
             return await self._finish(
@@ -261,6 +266,11 @@ class AgentLoop:
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
         resume_pending = [tuple(item) for item in saved_pending if isinstance(item, list) and len(item) == 6]
+        resume_answer = resume_from.state.get("pending_answer") if resume_from else None
+        saved_recovery = resume_from.state.get("recovery") or {} if resume_from else {}
+        resume_model = bool(resume_from and (resume_from.phase == "model_pending" or
+                            saved_recovery.get("scope") == "model" and
+                            str(saved_recovery.get("operation_id", "")).startswith("model:")))
         empty_response_retries = resume_from.state.get("empty_response_retries", 0) if resume_from else 0
 
         if pending_approvals:
@@ -300,9 +310,9 @@ class AgentLoop:
                 return resumed
 
         remaining_turns = max(0, self.settings.max_agent_turns - run.turn_count)
-        for turn in range(remaining_turns + bool(resume_pending)):
+        for turn in range(remaining_turns + bool(resume_pending or resume_answer or resume_model)):
             current = self.store.get_run(run.id) or run
-            if not resume_pending and current.turn_count >= self.settings.max_agent_turns:
+            if not resume_pending and not resume_answer and not resume_model and current.turn_count >= self.settings.max_agent_turns:
                 break
             services = self._execution_services(request, run)
             runtime_context = self._discovery_context(request, services, run)
@@ -311,14 +321,15 @@ class AgentLoop:
             model_cards = cards if tool_call_count < self.settings.max_tool_calls else []
             capabilities = self.mcp.capabilities(runtime_context) if self.mcp is not None and model_tools else []
             current = self.store.get_run(run.id) or run
-            current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending)})
+            current = current.model_copy(update={"status": RunStatus.RUNNING, "turn_count": current.turn_count + (not resume_pending and not resume_answer and not resume_model)})
             self.store.save_run(current)
-            response = None
+            restoring_answer = resume_answer is not None
+            response = ModelResponse(content=resume_answer) if restoring_answer else None
             streamed_answer = False
             answer_declared = False
+            model_messages = prepare_model_messages(messages, model_tools, model_cards, capabilities)
             try:
-                if not resume_pending:
-                    model_messages = prepare_model_messages(messages, model_tools, model_cards, capabilities)
+                if not resume_pending and not restoring_answer:
                     previous_compacted_ids = set(compacted_ids)
                     previous_summarized_ids = set(summarized_ids)
                     history_changed = False
@@ -395,57 +406,13 @@ class AgentLoop:
                     )
                     await self.trace.emit(current.id, EventType.MODEL_RESPONSE_STARTED, "正在思考",
                                           agent_id=current.agent_id, payload={"turn": current.turn_count})
-                    persisted_usage = (self.store.get_run(current.id) or current).token_usage or TokenUsage()
-                    live_output_tokens = 0
-
-                    def live_usage() -> TokenUsage:
-                        return TokenUsage(
-                            local_input_tokens=persisted_usage.local_input_tokens + local_input_tokens,
-                            local_output_tokens=persisted_usage.local_output_tokens + live_output_tokens,
-                            reported_input_tokens=persisted_usage.reported_input_tokens,
-                            reported_output_tokens=persisted_usage.reported_output_tokens,
-                            model_calls=persisted_usage.model_calls + 1,
-                            reported_calls=persisted_usage.reported_calls,
-                        )
-
-                    if on_model_delta is not None:
-                        await on_model_delta("", live_usage())
-                    content_parts = []
-                    can_stream_answer = not self.settings.completion_review_enabled or current.tool_call_count == 0
-                    answer_started = False
-                    prefix_pending = True
-                    reply_prefix = ""
-                    async with aclosing(model.stream(model_request)) as stream:
-                        async for chunk in stream:
-                            if chunk.content:
-                                content_parts.append(chunk.content)
-                                live_output_tokens += model.count_tokens(chunk.content)
-                                published = ""
-                                if can_stream_answer and not chunk.tool_calls:
-                                    if answer_started:
-                                        published = chunk.content
-                                    elif prefix_pending:
-                                        reply_prefix += chunk.content
-                                        if reply_prefix.startswith(ANSWER_PREFIX):
-                                            answer_started = True
-                                            prefix_pending = False
-                                            published = reply_prefix.removeprefix(ANSWER_PREFIX)
-                                            reply_prefix = ""
-                                        elif not ANSWER_PREFIX.startswith(reply_prefix):
-                                            prefix_pending = False
-                                            reply_prefix = ""
-                                if on_model_delta is not None:
-                                    await on_model_delta(published, live_usage())
-                                    streamed_answer = streamed_answer or bool(published)
-                            if chunk.done:
-                                response = ModelResponse(
-                                    content="".join(content_parts), tool_calls=chunk.tool_calls,
-                                    input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
-                                    model=chunk.model, finish_reason=chunk.finish_reason,
-                                )
-                                break
-                    if response is None:
-                        raise ValueError("模型流未返回结束片段。")
+                    self._save_checkpoint(request, current, messages, cursor_id, "model_pending", activated_names,
+                                          pending_approvals, discovered_names=discovered_names, used_names=used_names)
+                    response, streamed_answer = await self._request_model(
+                        current, model, model_request, local_input_tokens, on_model_delta,
+                        can_stream_answer=not self.settings.completion_review_enabled or current.tool_call_count == 0,
+                    )
+                    resume_model = False
             except Exception:
                 return await self._finish(
                     current,
@@ -463,7 +430,9 @@ class AgentLoop:
                 local_output_tokens = model.count_tokens(response.content)
                 if response.tool_calls:
                     local_output_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
-                current = await self._record_model_usage(current, response, local_input_tokens, local_output_tokens)
+                if not restoring_answer:
+                    current = await self._record_model_usage(current, response, local_input_tokens, local_output_tokens)
+                resume_answer = None
                 answer_declared = response.content.startswith(ANSWER_PREFIX)
                 if answer_declared and response.tool_calls:
                     return await self._finish(current, request=request, result=AgentResult(
@@ -763,6 +732,8 @@ class AgentLoop:
                                         active_tool_names=allowed_now,
                                         discovery_context=execution_context,
                                     )
+                                    current = self.store.get_run(current.id) or current
+                                    tool_call_count = current.tool_call_count
                                     if result.error and result.error.code == "APPROVAL_REQUIRED":
                                         approval_id = result.error.details.get("approval_id")
                                         if approval_id:
@@ -863,10 +834,11 @@ class AgentLoop:
             answer = response.content
             review = None
             if self.settings.completion_review_enabled and current.tool_call_count > 0:
-                messages.append({"role": "assistant", "content": answer})
+                if not restoring_answer:
+                    messages.append({"role": "assistant", "content": answer})
                 self._save_checkpoint(
                     request, current, messages, cursor_id, "completion_review", activated_names,
-                    pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                    pending_approvals, discovered_names=discovered_names, used_names=used_names, pending_answer=answer,
                 )
                 try:
                     async with asyncio.timeout(self.settings.completion_review_timeout_seconds):
@@ -983,50 +955,96 @@ class AgentLoop:
             )
         return updates[0]
 
+    async def _request_model(self, run, model, prepared, input_tokens, on_model_delta,
+                             *, can_stream_answer: bool, operation_id: str | None = None):
+        """只重试本轮请求；已发布正文的流不重放，半截工具调用不执行。"""
+        if self.recovery is not None:
+            state = self.recovery.begin(run.id, "model", operation_id or f"model:{run.turn_count}")
+            if state.get("published_text"):
+                raise RuntimeError("已发布正文的请求不能自动重放")
+            if state.get("status") == "failed" and not await self.recovery.schedule(
+                run.id, retryable=state.get("retryable", False), error_code=state.get("error_code", "MODEL_UNAVAILABLE"),
+            ):
+                raise RuntimeError("本轮模型请求没有剩余恢复额度")
+        while True:
+            if self.recovery is not None:
+                await self.recovery.wait(run.id)
+            persisted = (self.store.get_run(run.id) or run).token_usage or TokenUsage()
+            parts, prefix = [], ""
+            output_tokens = 0
+            answer_started, prefix_pending, streamed = False, True, False
+
+            def live_usage():
+                return persisted.model_copy(update={
+                    "local_input_tokens": persisted.local_input_tokens + input_tokens,
+                    "local_output_tokens": persisted.local_output_tokens + output_tokens,
+                    "model_calls": persisted.model_calls + 1,
+                })
+
+            try:
+                if on_model_delta is not None:
+                    await on_model_delta("", live_usage())
+                async with aclosing(model.stream(prepared)) as stream:
+                    async for chunk in stream:
+                        if chunk.content:
+                            parts.append(chunk.content)
+                            output_tokens += model.count_tokens(chunk.content)
+                            published = ""
+                            if can_stream_answer and not chunk.tool_calls:
+                                if answer_started:
+                                    published = chunk.content
+                                elif prefix_pending:
+                                    prefix += chunk.content
+                                    if prefix.startswith(ANSWER_PREFIX):
+                                        answer_started, prefix_pending = True, False
+                                        published = prefix.removeprefix(ANSWER_PREFIX)
+                                        prefix = ""
+                                    elif not ANSWER_PREFIX.startswith(prefix):
+                                        prefix_pending = False
+                                        prefix = ""
+                            if on_model_delta is not None:
+                                if published and not streamed and self.recovery is not None:
+                                    self.recovery.published(run.id)
+                                await on_model_delta(published, live_usage())
+                                streamed = streamed or bool(published)
+                        if chunk.done:
+                            response = ModelResponse(content="".join(parts), tool_calls=chunk.tool_calls,
+                                                     input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
+                                                     model=chunk.model, finish_reason=chunk.finish_reason)
+                            if self.recovery is not None and not streamed:
+                                self.recovery.clear(run.id)
+                            return response, streamed
+                raise ValueError("模型流未返回结束片段。")
+            except asyncio.CancelledError:
+                await self._record_model_usage(run, ModelResponse(content="".join(parts)), input_tokens,
+                                               model.count_tokens("".join(parts)))
+                raise
+            except Exception as exc:
+                await self._record_model_usage(run, ModelResponse(content="".join(parts)), input_tokens,
+                                               model.count_tokens("".join(parts)))
+                if self.recovery is None or not await self.recovery.schedule(
+                    run.id, retryable=not streamed and transient_error(exc), error_code=type(exc).__name__,
+                    server_delay=retry_after(exc),
+                ):
+                    raise
+
     async def _review_answer(self, request, run, model, messages, answer, on_model_delta) -> CompletionReview:
         prepared = self.completion_reviewer.prepare(request, run, model, messages, answer)
         input_tokens = model_input_tokens(prepared.messages, [], model.count_tokens)
-        if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns:
+        previous = self.recovery.current(run.id) if self.recovery is not None else {}
+        restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith("review:")
+        if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns and not restoring:
             raise ValueError("没有足够预算执行完整性检查，未发送模型请求。")
-        run = run.model_copy(update={"turn_count": run.turn_count + 1})
+        run = run.model_copy(update={"turn_count": run.turn_count + (not restoring)})
         self.store.save_run(run)
         await self.trace.emit(run.id, EventType.VERIFICATION_STARTED, "正在核对完成情况",
                               agent_id=run.agent_id, payload={"scope": "completion_review"})
-        persisted = run.token_usage or TokenUsage()
-        usage = persisted.model_copy(update={
-            "local_input_tokens": persisted.local_input_tokens + input_tokens,
-            "model_calls": persisted.model_calls + 1,
-        })
-        if on_model_delta is not None:
-            await on_model_delta("", usage)
-        parts = []
-        output_tokens = 0
-        response = None
-        try:
-            async with aclosing(model.stream(prepared)) as stream:
-                async for chunk in stream:
-                    if chunk.content:
-                        parts.append(chunk.content)
-                        output_tokens += model.count_tokens(chunk.content)
-                    if on_model_delta is not None:
-                        await on_model_delta("", usage.model_copy(update={
-                            "local_output_tokens": persisted.local_output_tokens + output_tokens,
-                        }))
-                    if chunk.done:
-                        response = ModelResponse(
-                            content="".join(parts), tool_calls=chunk.tool_calls,
-                            input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens,
-                            finish_reason=chunk.finish_reason, model=chunk.model,
-                        )
-                        break
-        finally:
-            measured = response or ModelResponse(content="".join(parts))
-            measured_tokens = model.count_tokens(measured.content)
-            if measured.tool_calls:
-                measured_tokens += model.count_tokens(json.dumps(measured.tool_calls, ensure_ascii=False, separators=(",", ":")))
-            current = await self._record_model_usage(run, measured, input_tokens, measured_tokens)
-        if response is None:
-            raise ValueError("完整性检查没有返回结束片段。")
+        response, _ = await self._request_model(run, model, prepared, input_tokens, on_model_delta,
+                                                can_stream_answer=False, operation_id=f"review:{run.turn_count}")
+        measured_tokens = model.count_tokens(response.content)
+        if response.tool_calls:
+            measured_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
+        current = await self._record_model_usage(run, response, input_tokens, measured_tokens)
         return self.completion_reviewer.inspect(response, prepared, request, current)
 
     @staticmethod
@@ -1331,6 +1349,7 @@ class AgentLoop:
         compacted_ids=None,
         summarized_ids=None,
         empty_response_retries: int | None = None,
+        pending_answer: str | None = None,
     ) -> None:
         protocol_messages = [
             item
@@ -1346,7 +1365,9 @@ class AgentLoop:
                 run_id=run.id,
                 phase=phase,
                 state={
-                    "schema_version": 1,
+                    "schema_version": RunCheckpointCodec.CURRENT_VERSION,
+                    "recovery": previous.state.get("recovery") if previous else None,
+                    "pending_answer": pending_answer,
                     "request": request.model_dump(mode="json"),
                     "protocol_messages": protocol_messages,
                     "skill_messages": skill_messages(messages),
@@ -1400,7 +1421,7 @@ class AgentLoop:
         persist_result(self.store, current, task, result, run_status=status, task_status=None)
         previous = self.store.latest_checkpoint(current.id)
         state = dict(previous.state) if previous is not None else {}
-        state.update({"schema_version": 1, "request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
+        state.update({"schema_version": RunCheckpointCodec.CURRENT_VERSION, "request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
         phase = "waiting_user" if status is RunStatus.WAITING_USER else "waiting_approval" if status is RunStatus.WAITING_APPROVAL else "run_completed"
         self.store.save_checkpoint(Checkpoint(run_id=current.id, phase=phase, state=state))
         event_type = (

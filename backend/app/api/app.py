@@ -123,6 +123,7 @@ def create_app(application: Application | None = None) -> FastAPI:
         geoagent.start()
         try:
             await geoagent.mcp.start()
+            await geoagent.run_manager.recover_interrupted_runs(on_result=geoagent.conversations.record_result)
             yield
         finally:
             await geoagent.close()
@@ -441,7 +442,7 @@ def create_app(application: Application | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except (RuntimeError, ValueError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        result = await geoagent.conversations.wait(run.id)
+        result = await geoagent.conversations.wait(run.id, force_assistant=run.id == run_id)
         current = geoagent.store.get_run(run.id)
         return {"retry_of": run_id, "run_id": run.id, "run": current.model_dump(mode="json"), "result": result.model_dump(mode="json")}
 

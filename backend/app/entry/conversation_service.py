@@ -102,6 +102,11 @@ class ConversationService:
 
     async def wait(self, run_id: str, *, force_assistant: bool = False) -> AgentResult:
         result = await self.run_manager.wait(run_id)
+        await self.record_result(run_id, result, force_assistant=force_assistant)
+        return result
+
+    async def record_result(self, run_id: str, result: AgentResult, *, force_assistant: bool = False) -> None:
+        """普通请求与启动恢复共用同一个助手消息持久化入口。"""
         run = self.store.get_run(run_id)
         if run and run.conversation_id and not run.parent_run_id:
             conversation = self.store.get_conversation(run.conversation_id)
@@ -120,7 +125,6 @@ class ConversationService:
                     user_id=user_id,
                     wait_for_summary=False,
                 )
-        return result
 
     async def _save_user_message(self, request: AgentRequest) -> None:
         self.ensure(request.conversation_id, DEFAULT_CONVERSATION_TITLE, user_id=request.user_id)

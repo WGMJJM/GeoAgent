@@ -33,7 +33,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         # 仍由用户在配置中填写真实密钥。OpenAI SDK 要求传入非空字符串，
         # 因此对无密钥的本地服务使用占位值，不会把它发送为业务凭据。
         base_url = config.base_url.strip() if config.base_url and config.base_url.strip() else None
-        self.client = AsyncOpenAI(api_key=config.api_key or "local", base_url=base_url, timeout=config.timeout_seconds)
+        self.client = AsyncOpenAI(api_key=config.api_key or "local", base_url=base_url, timeout=config.timeout_seconds, max_retries=0)
 
     def count_tokens(self, value: str) -> int:
         return estimate_tokens(value, self.config.tokenizer_file)

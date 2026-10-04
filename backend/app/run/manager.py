@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 
 from app.core.models import (
     AgentRequest,
@@ -39,6 +40,7 @@ class RunManager:
         self._active: dict[str, asyncio.Task[AgentResult]] = {}
         self._finished: dict[str, AgentResult] = {}
         self._retry_locks: dict[str, asyncio.Lock] = {}
+        self._resume_locks: dict[str, asyncio.Lock] = {}
 
     async def submit(
         self,
@@ -65,17 +67,19 @@ class RunManager:
         return prepared.run
 
     async def retry_run(self, run_id: str, *, user_id: str) -> Run:
-        """经用户明确操作，重新发起原请求；不复制旧执行游标或消费旧审批。"""
+        """新快照按失败位置接续；旧快照保留明确的重新发起兼容入口。"""
 
         source = self.store.get_run(run_id)
         if source is None:
             raise KeyError(f"运行不存在：{run_id}")
         if not user_id or not self.store.run_belongs_to_user(run_id, user_id):
             raise PermissionError("当前用户无权重试该运行")
-        if not is_retryable_failed_run(source) or self.is_active(run_id):
-            raise RuntimeError("仅可重试已失败的主运行；副作用未确认的运行不能重试")
-
         async with self._retry_locks.setdefault(run_id, asyncio.Lock()):
+            source = self.store.get_run(run_id)
+            if self.is_active(run_id) and source.metadata.get("last_continuation") == "technical_resume":
+                return source
+            if not is_retryable_failed_run(source) or self.is_active(run_id):
+                raise RuntimeError("仅可重试已失败的主运行；副作用未确认的运行不能重试")
             related = [source, *self.store.list_child_runs(run_id)]
             if any(
                 self.is_active(item.id) or is_execution_inflight(item)
@@ -94,6 +98,10 @@ class RunManager:
             for dataset_id in dict.fromkeys([*saved_request.dataset_ids, *saved_request.attachment_ids]):
                 if self.store.get_dataset_for_user(dataset_id, user_id) is None:
                     raise PermissionError("原请求中的数据集不存在或当前用户已无权访问")
+            if checkpoint.state.get("schema_version", 0) >= RunCheckpointCodec.RECOVERY_VERSION:
+                if not self.agent_loop.recovery.can_resume(source):
+                    raise RuntimeError("该失败位置无法安全接续，或自动重试额度已用尽；不会从头重复执行")
+                return await self.continue_run(run_id, user_id=user_id, technical=True)
             request = saved_request.model_copy(update={
                 "request_id": new_id("req"),
                 "user_id": user_id,
@@ -107,6 +115,12 @@ class RunManager:
             })
 
     async def continue_run(
+        self, run_id: str, **options,
+    ) -> Run:
+        async with self._resume_locks.setdefault(run_id, asyncio.Lock()):
+            return await self._continue_run(run_id, **options)
+
+    async def _continue_run(
         self,
         run_id: str,
         *,
@@ -121,6 +135,7 @@ class RunManager:
         technical: bool = False,
         on_run: Callable[[Run], Awaitable[None]] | None = None,
         on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
+        on_result: Callable[[str, AgentResult], Awaitable[None]] | None = None,
     ) -> Run:
         current = self.store.get_run(run_id)
         if current is None:
@@ -129,13 +144,20 @@ class RunManager:
             raise PermissionError("当前用户无权继续该运行")
         if self.is_active(run_id):
             raise RuntimeError("运行当前仍在执行，不能重复恢复")
+        recovery = self.agent_loop.recovery
         if technical and (user_input is not None or approval_id is not None or approved is not None):
             raise ValueError("技术恢复不能附带用户输入或审批结果")
+        if technical and any(status is ToolExecutionStatus.RUNNING for item in [current, *self.store.list_child_runs(run_id)]
+                             for _, status, _ in self.store.list_tool_calls(item.id)):
+            raise RuntimeError("原调用尚未结束或副作用无法确认，不能重复执行")
+        if technical and recovery is not None and recovery.current(run_id).get("published_text"):
+            raise RuntimeError("已发布正文的请求不能重放，请在对话中提出新的请求")
         if user_input is not None and current.status is not RunStatus.WAITING_USER:
             raise RuntimeError("运行当前不在等待用户输入状态")
         if approved is not None and current.status not in {RunStatus.WAITING_APPROVAL, RunStatus.RUNNING}:
             raise RuntimeError("运行当前不在等待审批状态")
-        if technical and not is_resumable_run(current, has_checkpoint=self.store.latest_checkpoint(run_id) is not None):
+        failed_recovery = recovery is not None and current.status is RunStatus.FAILED and recovery.can_resume(current)
+        if technical and not (failed_recovery or is_resumable_run(current, has_checkpoint=self.store.latest_checkpoint(run_id) is not None)):
             raise RuntimeError("运行当前不支持技术恢复")
         if user_input is None and approved is None and not technical:
             raise ValueError("连续恢复必须提供用户输入或审批结果")
@@ -169,13 +191,19 @@ class RunManager:
         )
         domain_task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
         resumed, _ = resume_lifecycle(self.store, current, domain_task, metadata={"last_continuation": continuation["type"]})
+        if technical and recovery is not None:
+            state = recovery.current(run_id)
+            if state.get("scope") == "model" and state.get("status") == "running":
+                recovery.store.update_recovery(run_id, {**state, "status": "failed", "retryable": True,
+                                                        "error_code": "PROCESS_RESTARTED"})
         prepared = self.agent_loop.prepare_resume(request, resumed)
         if on_run is not None:
             await on_run(resumed)
         execution = asyncio.create_task(
-            self._execute(prepared, checkpoint, continuation=continuation, on_model_delta=on_model_delta)
+            self._execute(prepared, checkpoint, continuation=continuation, on_model_delta=on_model_delta, on_result=on_result)
         )
         self._active[run_id] = execution
+        self._finished.pop(run_id, None)
         if self.metrics:
             self.metrics.increment("runs.continued")
         return resumed
@@ -208,9 +236,11 @@ class RunManager:
         *,
         continuation: dict[str, object] | None = None,
         on_model_delta: Callable[[str, TokenUsage], Awaitable[None]] | None = None,
+        on_result: Callable[[str, AgentResult], Awaitable[None]] | None = None,
     ) -> AgentResult:
         run = prepared.run
         started = time.perf_counter()
+        budget_used = float(run.metadata.get("execution_elapsed_seconds", 0))
         try:
             execute = self.agent_loop.run(
                 prepared.request,
@@ -222,7 +252,22 @@ class RunManager:
             if self.execution_timeout_seconds is None:
                 result = await execute
             else:
-                result = await asyncio.wait_for(execute, timeout=max(0.001, self.execution_timeout_seconds))
+                remaining = max(0, self.execution_timeout_seconds - budget_used)
+                deadline = run.metadata.get("execution_deadline_at")
+                if deadline:
+                    remaining = min(remaining, max(0, (datetime.fromisoformat(deadline) - datetime.now(UTC)).total_seconds()))
+                if run.parent_run_id:
+                    parent = self.store.get_run(run.parent_run_id)
+                    if parent and parent.metadata.get("execution_deadline_at"):
+                        remaining = min(remaining, max(0, (datetime.fromisoformat(parent.metadata["execution_deadline_at"]) - datetime.now(UTC)).total_seconds()))
+                budget_used = max(budget_used, self.execution_timeout_seconds - remaining)
+                latest = self.store.get_run(run.id) or run
+                self.store.save_run(latest.model_copy(update={"metadata": {**latest.metadata,
+                    "execution_deadline_at": (datetime.now(UTC) + timedelta(seconds=remaining)).isoformat()}}))
+                if remaining <= 0:
+                    execute.close()
+                    raise TimeoutError
+                result = await asyncio.wait_for(execute, timeout=max(0.001, remaining))
             self._finished[run.id] = result
             if self.metrics:
                 self.metrics.increment(f"runs.finished.{result.status.value.casefold()}")
@@ -277,9 +322,16 @@ class RunManager:
             self._finished[run.id] = result
             return result
         finally:
+            latest = self.store.get_run(run.id)
+            if latest is not None:
+                metadata = {**latest.metadata, "execution_elapsed_seconds": budget_used + time.perf_counter() - started}
+                metadata.pop("execution_deadline_at", None)
+                self.store.save_run(latest.model_copy(update={"metadata": metadata}))
             if self.metrics:
                 self.metrics.observe("total_run_ms", (time.perf_counter() - started) * 1000)
             self._active.pop(run.id, None)
+            if on_result is not None and run.id in self._finished:
+                await on_result(run.id, self._finished[run.id])
 
     async def wait(self, run_id: str) -> AgentResult:
         task = self._active.get(run_id)
@@ -308,6 +360,30 @@ class RunManager:
                 transition(self.store, run, run_status=RunStatus.INTERRUPTED, error="PROCESS_RESTARTED", result_text="服务重启后等待技术恢复")
                 interrupted.append(run.id)
         return interrupted
+
+    async def recover_interrupted_runs(self, *, on_result=None) -> list[str]:
+        """连接工具服务后恢复有安全游标的主运行；子运行由原委派图接续。"""
+        recovered = []
+        recovery = self.agent_loop.recovery
+        if recovery is None:
+            return recovered
+        for run in self.store.list_runs(limit=10000):
+            if run.status is not RunStatus.INTERRUPTED or run.parent_run_id or self.is_active(run.id):
+                continue
+            related = [run, *self.store.list_child_runs(run.id)]
+            if not recovery.can_resume(run) or any(
+                status is ToolExecutionStatus.RUNNING
+                for item in related for _, status, _ in self.store.list_tool_calls(item.id)
+            ):
+                continue
+            try:
+                await self.continue_run(run.id, user_id=self.store.user_id_for_run(run.id), technical=True, on_result=on_result)
+            except (KeyError, ValueError, RuntimeError, PermissionError) as exc:
+                await self.agent_loop.trace.emit(run.id, "RecoveryBlocked", "中断运行无法自动接续",
+                                                payload={"error_type": type(exc).__name__})
+            else:
+                recovered.append(run.id)
+        return recovered
 
     async def cancel(self, run_id: str) -> bool:
         run = self.store.get_run(run_id)
