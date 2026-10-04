@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     default_crs: str = "EPSG:3857"
     max_agent_turns: int = Field(default=20, ge=1)
     max_empty_response_retries: int = Field(default=1, ge=0)
+    max_tool_retries: int = Field(default=2, ge=0)
+    max_model_retries: int = Field(default=1, ge=0)
+    max_run_retries: int = Field(default=6, ge=0)
+    retry_delay_seconds: float = Field(default=1, ge=0)
+    retry_max_delay_seconds: float = Field(default=8, ge=0)
     max_tool_calls: int = Field(default=40, ge=1)
     max_subagents: int = Field(default=5, ge=1, le=20)
     max_parallel_agents: int = Field(default=3, ge=1, le=20)

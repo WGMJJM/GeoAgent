@@ -20,7 +20,8 @@ class CheckpointStore:
 
 
 class RunCheckpointCodec:
-    CURRENT_VERSION = 1
+    RECOVERY_VERSION = 2
+    CURRENT_VERSION = RECOVERY_VERSION
 
     @classmethod
     def normalize_state(cls, state: dict[str, Any] | None) -> dict[str, Any]:

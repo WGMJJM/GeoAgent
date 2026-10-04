@@ -291,7 +291,7 @@ class StateStore:
                 "metadata_json": "TEXT",
             },
         )
-        StateStore._add_columns(db, "tool_calls", {"status": "TEXT", "updated_at": "TEXT"})
+        StateStore._add_columns(db, "tool_calls", {"status": "TEXT", "updated_at": "TEXT", "attempt": "INTEGER NOT NULL DEFAULT 1"})
         StateStore._add_columns(db, "datasets", {"owner_user_id": "TEXT", "created_by_run_id": "TEXT"})
         StateStore._add_columns(db, "artifacts", {"owner_user_id": "TEXT", "run_id": "TEXT"})
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_checkpoints_run'").fetchone() is None:
@@ -992,7 +992,7 @@ class StateStore:
     def list_tool_calls(self, run_id: str) -> list[tuple[ToolCall, ToolExecutionStatus, ToolResult | None]]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM tool_calls WHERE run_id=? ORDER BY created_at,id", (run_id,)).fetchall()
-        return [(ToolCall(id=row["id"], name=row["name"], arguments=json.loads(row["arguments_json"]), run_id=run_id),
+        return [(ToolCall(id=row["id"], name=row["name"], arguments=json.loads(row["arguments_json"]), run_id=run_id, attempt=row["attempt"]),
                  ToolExecutionStatus(row["status"]), self._model(ToolResult, row["result_json"]) if row["result_json"] else None)
                 for row in rows]
 
@@ -1023,6 +1023,11 @@ class StateStore:
 
     @staticmethod
     def _save_run(db: sqlite3.Connection, run: Run) -> None:
+        previous = db.execute("SELECT metadata_json FROM runs WHERE id=?", (run.id,)).fetchone()
+        if previous is not None:
+            retries = json.loads(previous[0] or "{}").get("automatic_retries", 0)
+            if retries > run.metadata.get("automatic_retries", 0):
+                run = run.model_copy(update={"metadata": {**run.metadata, "automatic_retries": retries}})
         db.execute(
             """INSERT INTO runs
             (id,conversation_id,task_id,parent_run_id,agent_id,status,started_at,finished_at,error,
@@ -1253,12 +1258,12 @@ class StateStore:
     def get_tool_call_record(self, call_id: str) -> tuple[ToolCall, ToolResult | None] | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT id,run_id,name,arguments_json,result_json FROM tool_calls WHERE id=?",
+                "SELECT id,run_id,name,arguments_json,result_json,attempt FROM tool_calls WHERE id=?",
                 (call_id,),
             ).fetchone()
         if row is None:
             return None
-        call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]))
+        call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]), attempt=row[5])
         return call, self._model(ToolResult, row[4]) if row[4] else None
 
     def list_tool_results_for_conversation(
@@ -1270,7 +1275,7 @@ class StateStore:
         exclude_run_id: str | None = None,
     ) -> list[tuple[ToolCall, ToolResult]]:
         query = (
-            "SELECT tc.id,tc.run_id,tc.name,tc.arguments_json,tc.result_json "
+            "SELECT tc.id,tc.run_id,tc.name,tc.arguments_json,tc.result_json,tc.attempt "
             "FROM tool_calls tc JOIN runs r ON r.id=tc.run_id "
             "JOIN conversations c ON c.id=r.conversation_id "
             "WHERE r.conversation_id=? AND tc.result_json IS NOT NULL"
@@ -1288,7 +1293,7 @@ class StateStore:
             rows = db.execute(query, args).fetchall()
         records = []
         for row in rows:
-            call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]))
+            call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]), attempt=row[5])
             records.append((call, self._model(ToolResult, row[4])))
         return records
 
@@ -1351,6 +1356,78 @@ class StateStore:
                 "SELECT payload_json FROM checkpoints WHERE run_id=?", (run_id,)
             ).fetchone()
         return self._decode_checkpoint(row[0]) if row else None
+
+    @staticmethod
+    def _write_checkpoint(db: sqlite3.Connection, checkpoint: Checkpoint) -> None:
+        db.execute(
+            "UPDATE checkpoints SET phase=?,payload_json=?,created_at=? WHERE run_id=?",
+            (checkpoint.phase, zlib.compress(checkpoint.model_dump_json().encode("utf-8"),
+                                            level=CHECKPOINT_COMPRESSION_LEVEL),
+             checkpoint.created_at.isoformat(), checkpoint.run_id),
+        )
+
+    def update_recovery(self, run_id: str, recovery: dict[str, Any] | None) -> None:
+        """只原子更新最新快照的恢复块，不用旧协议快照覆盖其他状态。"""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT payload_json FROM checkpoints WHERE run_id=?", (run_id,)).fetchone()
+            if row is None:
+                raise ValueError("自动恢复需要当前 Run 的 Checkpoint")
+            checkpoint = self._decode_checkpoint(row[0])
+            state = {**checkpoint.state, "recovery": recovery}
+            self._write_checkpoint(db, checkpoint.model_copy(update={"state": state, "created_at": utc_now()}))
+            db.commit()
+
+    def reserve_recovery_retry(
+        self, run_id: str, *, recovery: dict[str, Any], max_retries: int,
+        max_run_retries: int, max_tool_calls: int,
+    ) -> bool:
+        """原子预占尝试次数、根 Run 总额度以及工具实际执行额度。"""
+        from app.run.predicates import is_execution_inflight
+
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            checkpoint_row = db.execute("SELECT payload_json FROM checkpoints WHERE run_id=?", (run_id,)).fetchone()
+            run_row = db.execute("SELECT payload_json FROM runs WHERE id=?", (run_id,)).fetchone()
+            if checkpoint_row is None or run_row is None:
+                return False
+            checkpoint = self._decode_checkpoint(checkpoint_row[0])
+            previous = checkpoint.state.get("recovery") or {}
+            if previous.get("operation_id") != recovery["operation_id"] or previous.get("scope") != recovery["scope"]:
+                return False
+            if previous.get("status") != "failed" or previous.get("retries_used", 0) >= max_retries:
+                return False
+            run = self._model(Run, run_row[0])
+            root = run
+            while root.parent_run_id:
+                row = db.execute("SELECT payload_json FROM runs WHERE id=?", (root.parent_run_id,)).fetchone()
+                if row is None:
+                    return False
+                root = self._model(Run, row[0])
+            if not is_execution_inflight(run) or not is_execution_inflight(root):
+                return False
+            used = root.metadata.get("automatic_retries", 0)
+            if used >= max_run_retries:
+                return False
+            if recovery["scope"] == "tool":
+                if run.tool_call_count >= max_tool_calls:
+                    return False
+                changed = db.execute(
+                    "UPDATE tool_calls SET attempt=attempt+1 WHERE id=? AND run_id=? AND status=?",
+                    (recovery["operation_id"], run_id, ToolExecutionStatus.FAILED.value),
+                )
+                if changed.rowcount != 1:
+                    return False
+                run = run.model_copy(update={"tool_call_count": run.tool_call_count + 1})
+            if root.id == run.id:
+                run = run.model_copy(update={"metadata": {**run.metadata, "automatic_retries": used + 1}})
+            else:
+                self._save_run(db, root.model_copy(update={"metadata": {**root.metadata, "automatic_retries": used + 1}}))
+            self._save_run(db, run)
+            state = {**checkpoint.state, "recovery": recovery}
+            self._write_checkpoint(db, checkpoint.model_copy(update={"state": state, "created_at": utc_now()}))
+            db.commit()
+            return True
 
     @staticmethod
     def _decode_checkpoint(payload: str | bytes) -> Checkpoint:
