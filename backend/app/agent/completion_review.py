@@ -25,11 +25,13 @@ from .context import (
     TOOL_VISIBILITY_PREFIX,
 )
 from .skills import SKILL_PROMPT
+from .tasks import TASK_FEEDBACK_PREFIX
 
 REVIEW_PROMPT = """你是 GeoAgent 的只读完成检查器，不执行操作，不代替主 Agent 选择工具。
 任务是减少提前结束、漏答和漏做，不是找出所有错误。只输出一个 JSON 对象。
 
 从 original_request 和相关上下文中的用户确认提取本轮应回答、应执行的事项，逐项对照 candidate_answer 和实际记录。
+续做任务时 original_request 是原任务目标，current_request 是本次调整要求；检查原目标中仍需完成的交付，不将“继续”本身当作全部任务。历史进度只用于定位已有证据与缺口，不是免核验的完成证明。
 检查所有本轮问题是否得到回应、用户要求的交付是否完成，以及回答是否把仍未完成的事情说成完成。
 只承接本轮相关历史；用户取消、明确放弃的事项标记 waived。普通问候、解释和建议不强制要求工具或文件。
 不把文风、可选优化、额外分析或用户没有要求的工作当成阻断项。工具一次失败不代表最终失败，核对后续是否修复。
@@ -92,8 +94,11 @@ class CompletionReviewer:
         if conversation is None or (request.user_id and conversation.user_id not in {None, request.user_id}):
             raise PermissionError("当前运行不属于可访问的会话。")
         context = self._context(messages, run.metadata.get("original_request", request.user_input))
+        task = self.store.get_task(run.task_id) if run.task_id and not run.parent_run_id else None
+        continuing = run.metadata.get("task_relation") == "continue" and task is not None and task.conversation_id == request.conversation_id
         payload = {
-            "original_request": run.metadata.get("original_request", request.user_input),
+            "original_request": task.goal if continuing else run.metadata.get("original_request", request.user_input),
+            "current_request": request.user_input,
             "candidate_answer": answer,
             "context": context,
             "runtime": self._runtime(request, run, messages),
@@ -120,7 +125,7 @@ class CompletionReviewer:
                 continue
             if message.get("role") == "assistant" and index > request_index >= 0:
                 continue  # 当前 Run 的草稿不能成为审核另一份草稿的证据。
-            if message.get("role") == "system" and content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX)):
+            if message.get("role") == "system" and content.startswith((SYSTEM_PROMPT, TOOL_VISIBILITY_PREFIX, SKILL_PROMPT, FEEDBACK_PREFIX, TASK_FEEDBACK_PREFIX)):
                 continue
             if content.startswith(STATE_CONTEXT_PREFIX):
                 state = json.loads(content.removeprefix(STATE_CONTEXT_PREFIX))
@@ -204,6 +209,31 @@ class CompletionReviewer:
                     # 使用已经按预算组装的模型视图，不重新展开已压缩的大结果或搜索 Schema。
                     "observation": observation if call.name != "tool.search" else None,
                 })
+        # 仅补入本轮上下文已引用的历史证据；不把同一 Task 的所有 Run/Checkpoint 展开。
+        historical_ids = set()
+        for message in messages or []:
+            content = str(message.get("content", ""))
+            if message.get("role") != "system" or not content.startswith(STATE_CONTEXT_PREFIX):
+                continue
+            state = json.loads(content.removeprefix(STATE_CONTEXT_PREFIX))
+            historical_ids.update(item["tool_call_id"] for item in state.get("recent_tool_executions", []))
+            for key in ("current_task", "referenced_task"):
+                historical_ids.update(ref["id"] for item in state.get(key, {}).get("previous_review", {}).get("items", [])
+                                      for ref in item["evidence_refs"] if ref["kind"] == "tool_call")
+        known_ids = {item["id"] for item in calls}
+        for identifier in sorted(historical_ids - known_ids):
+            if not self._visible_reference("tool_call", identifier, set(), request, run):
+                continue
+            call, result = self.store.get_tool_call_record(identifier)
+            status, _ = self.store.get_tool_call(identifier)
+            datasets = [item for item in (result.datasets if result else []) if self._dataset(item, request)]
+            artifacts = [item for item in (result.artifacts if result else []) if self._artifact(item, request)]
+            dataset_ids.update(datasets)
+            artifact_ids.update(artifacts)
+            calls.append({"id": call.id, "run_id": call.run_id, "tool": call.name,
+                          "provider_call_id": call.id.removeprefix(f"{call.run_id}:"),
+                          "execution_status": status.value, "result_status": result.status.value if result else None,
+                          "datasets": datasets, "artifacts": artifacts, "historical": True})
         checkpoint = self.store.latest_checkpoint(run.id)
         return {
             "runs": [{"id": item.id, "status": item.status.value, "error": item.error,

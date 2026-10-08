@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import (
     Depends,
@@ -47,6 +47,8 @@ class AskBody(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list)
     referenced_run_ids: list[str] = Field(default_factory=list)
     reply_to_run_id: str | None = None
+    related_task_id: str | None = None
+    task_relation: Literal["continue", "reference"] | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -298,6 +300,19 @@ def create_app(application: Application | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="conversation not found")
         return [item.model_dump(mode="json") for item in geoagent.conversation_memory.list_messages(conversation_id, user_id=current_user.id, limit=limit)]
 
+    @api.get("/api/v1/conversations/{conversation_id}/tasks")
+    async def conversation_tasks(conversation_id: str, limit: int = 50, current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
+        if geoagent.store.get_conversation_for_user(conversation_id, current_user.id) is None:
+            raise HTTPException(status_code=404, detail="conversation not found")
+        return [task.model_dump(mode="json") for task in geoagent.store.list_tasks(conversation_id, limit=limit)]
+
+    @api.get("/api/v1/tasks/{task_id}")
+    async def task_detail(task_id: str, current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+        task = geoagent.store.get_task(task_id)
+        if task is None or geoagent.store.get_conversation_for_user(task.conversation_id, current_user.id) is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {**task.model_dump(mode="json"), "run_ids": [run.id for run in geoagent.store.list_runs_for_task(task.id) if not run.parent_run_id]}
+
     @api.get("/api/v1/runs")
     async def runs(limit: int = 50, current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
         return [item.model_dump(mode="json") for item in geoagent.store.list_runs(limit, user_id=current_user.id)]
@@ -495,6 +510,8 @@ def create_app(application: Application | None = None) -> FastAPI:
                     attachment_ids=payload.get("attachment_ids", []),
                     referenced_run_ids=payload.get("referenced_run_ids", []),
                     reply_to_run_id=payload.get("reply_to_run_id"),
+                    related_task_id=payload.get("related_task_id"),
+                    task_relation=payload.get("task_relation"),
                     context=payload.get("context", {}),
                 )
                 event_queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
@@ -595,6 +612,8 @@ def _request_from_body(body: AskBody, *, conversation_id: str | None = None, use
         attachment_ids=body.attachment_ids,
         referenced_run_ids=body.referenced_run_ids,
         reply_to_run_id=body.reply_to_run_id,
+        related_task_id=body.related_task_id,
+        task_relation=body.task_relation,
         context=body.context,
     )
 

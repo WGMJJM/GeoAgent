@@ -40,7 +40,7 @@ from app.execution.tools import (
 from app.models import ModelAdapter, ModelRequest, ModelResponse
 from app.observability import EventType, TraceRecorder
 from app.run.checkpoints import RunCheckpointCodec
-from app.run.lifecycle import persist_result
+from app.run.lifecycle import persist_result, run_status_for_result
 from app.run.recovery import retry_after, transient_error
 from app.state import StateStore
 
@@ -63,6 +63,7 @@ from .context import (
 )
 from .delegation import DELEGATE_TOOL
 from .skills import add_skill_content, parse_skill_request, skill_messages
+from .tasks import TASK_FEEDBACK_PREFIX, parse_task_association
 
 ASK_USER_TOOL = {
     "type": "function",
@@ -160,6 +161,7 @@ class AgentLoop:
             profile_service=context_services.get("profile"),
             conversation_memory=context_services["conversation_memory"],
             recent_tool_results=settings.conversation_tool_index_limit,
+            task_context_limit=settings.task_context_limit,
             skills=context_services.get("skills"),
         )
         self.model_adapter: ModelAdapter | None = None
@@ -174,7 +176,7 @@ class AgentLoop:
         *,
         metadata: dict[str, object] | None = None,
     ) -> LoopPreparedRequest:
-        """不经过自然语言 Gate，直接为每条普通消息建立无 Task 的 Run。"""
+        """先建立 Run，主模型明确目标归属后再关联 Task，不增加前置 Gate。"""
 
         run = Run(
             conversation_id=request.conversation_id,
@@ -214,6 +216,19 @@ class AgentLoop:
     ) -> AgentResult:
         # 调度器已写入本段执行期限；不能用 prepare 时的旧对象覆盖它。
         run = self.store.get_run(prepared.run.id) or prepared.run
+        if not run.parent_run_id and not run.task_id and (request.related_task_id or run.metadata.get("retry_of")):
+            try:
+                run = self.store.associate_task(
+                    run.id, relation=request.task_relation or "continue", task_id=request.related_task_id,
+                    source_run_id=None if request.related_task_id else run.metadata["retry_of"], user_id=request.user_id,
+                )
+            except (KeyError, ValueError, PermissionError) as exc:
+                run = run.model_copy(update={"metadata": {**run.metadata, "task_association_error": str(exc)}})
+                self.store.save_run(run)
+                return await self._finish(run, request=request, result=AgentResult(
+                    agent_id=run.agent_id, status=AgentResultStatus.BLOCKED, summary=str(exc),
+                    error="TASK_ASSOCIATION_BLOCKED", trace_id=run.id,
+                ))
         model = self.model_provider(request.model_profile)
         if model is None:
             return await self._finish(
@@ -442,6 +457,36 @@ class AgentLoop:
                     ))
                 response = response.model_copy(update={"content": response.content.removeprefix(ANSWER_PREFIX)})
 
+            if response is not None and not answer_declared:
+                association = None
+                association_error = None
+                try:
+                    association = parse_task_association(response.content)
+                    if association is not None:
+                        if response.tool_calls:
+                            raise ValueError("任务关联必须独占本轮响应，附带工具不会执行")
+                        current = self.store.associate_task(
+                            current.id, relation=association.relation, task_id=association.task_id,
+                            source_run_id=association.source_run_id, user_id=request.user_id,
+                        )
+                        current = current.model_copy(update={"metadata": {key: value for key, value in current.metadata.items() if key != "task_association_error"}})
+                        self.store.save_run(current)
+                        self.context.refresh_state(messages, request, current)
+                except (KeyError, ValueError, PermissionError) as exc:
+                    association_error = str(exc)
+                    current = current.model_copy(update={"metadata": {**current.metadata, "task_association_error": association_error}})
+                    self.store.save_run(current)
+                if association is not None or association_error is not None:
+                    messages[:] = [item for item in messages if not str(item.get("content", "")).startswith(TASK_FEEDBACK_PREFIX)]
+                    messages.append({"role": "system", "content": TASK_FEEDBACK_PREFIX + json.dumps(
+                        {"error": association_error, "task_id": current.task_id,
+                         "instruction": "根据更新后的状态继续；关联被拒绝时先澄清或解释，不新建任务绕过限制。"}, ensure_ascii=False)})
+                    self._save_checkpoint(request, current, messages, cursor_id, "task_associated", activated_names,
+                                          pending_approvals, discovered_names=discovered_names, used_names=used_names)
+                    await self.trace.emit(current.id, EventType.DECISION_MADE, "已更新任务关联" if association_error is None else "任务关联需要澄清",
+                                          agent_id=current.agent_id, payload={"scope": "task_association", "task_id": current.task_id, "error": association_error})
+                    continue
+
             if response is not None and not answer_declared and self.context.skills is not None and self.context.skills.entries:
                 try:
                     skill_request = parse_skill_request(response.content)
@@ -537,6 +582,8 @@ class AgentLoop:
 
                     if not within_budget:
                         pass
+                    elif current.metadata.get("task_association_error") and name not in {"agent.ask_user", "conversation.search_history", "conversation.read_tool_result"}:
+                        result = _blocked_result(persisted_id, "TASK_ASSOCIATION_BLOCKED", "任务关联尚未解决，请先澄清，不能执行新操作。")
                     elif mixed_delegation:
                         result = _failed_result(persisted_id, "DELEGATION_MIXED_BATCH", "agent.delegate 必须独占一个模型工具批次。")
                     elif decode_error:
@@ -551,6 +598,7 @@ class AgentLoop:
                         elif self.delegation is None:
                             result = _failed_result(persisted_id, "DELEGATION_UNAVAILABLE", "委派调度器未配置。")
                         else:
+                            current = self._ensure_task(current, request)
                             result = await self.delegation.execute(arguments, request=request, parent=current,
                                                                    call_id=persisted_id, continuation=continuation)
                             if result.error and result.error.code in {"WAITING_USER", "APPROVAL_REQUIRED"}:
@@ -569,6 +617,7 @@ class AgentLoop:
                             ask_question = str(arguments["question"]).strip()
                             result = ToolResult(call_id=persisted_id, status=ToolStatus.BLOCKED, output={"waiting_for_user": True, "question": ask_question})
                     elif name == "tool.search":
+                        current = self._ensure_task(current, request)
                         await self.trace.emit(
                             current.id,
                             EventType.TOOL_STARTED,
@@ -636,7 +685,9 @@ class AgentLoop:
                             result = ToolResult(
                                 call_id=persisted_id,
                                 status=ToolStatus.SUCCESS,
-                                output=[{"message_id": item.id, "role": item.role, "content": item.content[:3000]} for item in found],
+                                output=[{"message_id": item.id, "role": item.role, "content": item.content[:3000],
+                                         "run_id": source.id if (source := self.store.run_for_message(item)) else None,
+                                         "task_id": source.task_id if source is not None else None} for item in found],
                             )
                         await self.trace.emit(
                             current.id,
@@ -696,6 +747,7 @@ class AgentLoop:
                             agent_id=current.agent_id,
                         )
                     else:
+                        current = self._ensure_task(current, request)
                         try:
                             registered = self.registry.get(name)
                         except KeyError:
@@ -1328,7 +1380,7 @@ class AgentLoop:
         prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
         feedback = [item for item in messages if item.get("role") == "system"
-                    and str(item.get("content", "")).startswith(FEEDBACK_PREFIX)]
+                    and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, TASK_FEEDBACK_PREFIX))]
         return prefix + protocol[history_count:] + skill_messages(messages) + feedback, len(history)
 
     def _save_checkpoint(
@@ -1372,7 +1424,7 @@ class AgentLoop:
                     "protocol_messages": protocol_messages,
                     "skill_messages": skill_messages(messages),
                     "protocol_feedback": [item for item in messages if item.get("role") == "system"
-                                          and str(item.get("content", "")).startswith(FEEDBACK_PREFIX)],
+                                          and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, TASK_FEEDBACK_PREFIX))],
                     "empty_response_retries": empty_response_retries if empty_response_retries is not None else (previous.state.get("empty_response_retries", 0) if previous else 0),
                     "message_cursor_id": cursor_id,
                     "activated_tool_names": sorted(activated_names),
@@ -1400,8 +1452,19 @@ class AgentLoop:
                 used_names=ordered_used,
             )
 
+    def _ensure_task(self, run: Run, request: AgentRequest) -> Run:
+        current = self.store.get_run(run.id) or run
+        if current.task_id or current.parent_run_id or current.metadata.get("task_association_error") or current.status is RunStatus.CANCELLED:
+            return current
+        return self.store.associate_task(current.id, user_id=request.user_id)
+
     async def _finish(self, run: Run, result: AgentResult, *, request: AgentRequest) -> AgentResult:
         current = self.store.get_run(run.id) or run
+        if current.status is RunStatus.CANCELLED:
+            result = AgentResult(agent_id=current.agent_id, status=AgentResultStatus.CANCELLED,
+                                 summary="运行已取消。", error="CANCELLED", trace_id=current.id)
+        elif result.error != "WAITING_USER":
+            current = self._ensure_task(current, request)
         if current.task_id:
             result = result.model_copy(update={"task_id": current.task_id})
         if not current.parent_run_id and result.status is AgentResultStatus.SUCCESS and current.metadata.get("last_delegation_status"):
@@ -1410,20 +1473,14 @@ class AgentLoop:
                                                "error": "DELEGATION_FAILED" if delegated_status is AgentResultStatus.FAILED else "CANCELLED" if delegated_status is AgentResultStatus.CANCELLED else None,
                                                "datasets": current.metadata.get("delegation_dataset_ids", []),
                                                "artifacts": current.metadata.get("delegation_artifact_ids", [])})
-        status = {
-            AgentResultStatus.SUCCESS: RunStatus.COMPLETED,
-            AgentResultStatus.PARTIAL: RunStatus.PARTIAL_COMPLETED,
-            AgentResultStatus.BLOCKED: RunStatus.WAITING_USER if result.error == "WAITING_USER" else RunStatus.WAITING_APPROVAL if result.error == "APPROVAL_REQUIRED" else RunStatus.BUDGET_EXCEEDED if result.error == "BUDGET_EXCEEDED" else RunStatus.FAILED,
-            AgentResultStatus.CANCELLED: RunStatus.CANCELLED,
-            AgentResultStatus.FAILED: RunStatus.FAILED,
-        }[result.status]
+        status = run_status_for_result(result.status, result.error)
         task = self.store.get_task(current.task_id) if current.task_id and not current.parent_run_id else None
-        persist_result(self.store, current, task, result, run_status=status, task_status=None)
         previous = self.store.latest_checkpoint(current.id)
         state = dict(previous.state) if previous is not None else {}
         state.update({"schema_version": RunCheckpointCodec.CURRENT_VERSION, "request": request.model_dump(mode="json"), "result": result.model_dump(mode="json")})
         phase = "waiting_user" if status is RunStatus.WAITING_USER else "waiting_approval" if status is RunStatus.WAITING_APPROVAL else "run_completed"
-        self.store.save_checkpoint(Checkpoint(run_id=current.id, phase=phase, state=state))
+        persist_result(self.store, current, task, result, run_status=status,
+                       checkpoint=Checkpoint(run_id=current.id, phase=phase, state=state))
         event_type = (
             EventType.RUN_COMPLETED
             if result.status in {AgentResultStatus.SUCCESS, AgentResultStatus.PARTIAL}

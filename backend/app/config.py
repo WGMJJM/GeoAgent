@@ -17,6 +17,7 @@ DEFAULT_SUMMARY_TRIGGER_TOKENS = 51200
 DEFAULT_SUMMARY_MESSAGE_MAX_CHARS = 10000
 DEFAULT_EMERGENCY_RECENT_MESSAGES = 8
 DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT = 8
+DEFAULT_TASK_CONTEXT_LIMIT = 8
 
 
 class Settings(BaseSettings):
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     emergency_recent_messages: int = Field(default=DEFAULT_EMERGENCY_RECENT_MESSAGES, ge=1)
     tool_result_recent_full: int = Field(default=16, ge=1)
     conversation_tool_index_limit: int = Field(default=DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT, ge=1)
+    task_context_limit: int = Field(default=DEFAULT_TASK_CONTEXT_LIMIT, ge=1)
     tool_result_emergency_fraction: float = Field(default=0.5, gt=0, le=1)
     tool_context_tokens: int = Field(default=25600, ge=1)
     tool_context_max_cards: int = Field(default=8, ge=1)
