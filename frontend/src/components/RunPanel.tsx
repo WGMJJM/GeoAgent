@@ -23,7 +23,7 @@ type RunPanelProps = {
 };
 
 export function RunPanel({ runs, selectedRunId, events, result = null, datasets = [], artifacts = [], onSelect, onCancel, onResume, onRetry, onDelete, onDeleteMany, busy }: RunPanelProps) {
-  const visibleEvents = events.filter((event) => event.payload.scope !== "completion_review" && event.payload.scope !== "model_protocol");
+  const visibleEvents = events.filter((event) => !["completion_review", "model_protocol", "task_association"].includes(String(event.payload.scope)));
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pendingRetryId, setPendingRetryId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);

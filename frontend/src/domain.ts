@@ -98,7 +98,7 @@ export function lineageLabel(kind: LineageKind | null): string {
 }
 
 export function runTitle(run: Run): string {
-  return String(run.metadata.subtask_goal ?? run.metadata.goal ?? run.agent_id);
+  return String(run.metadata.subtask_goal ?? run.metadata.goal ?? run.metadata.original_request ?? run.agent_id);
 }
 
 export function eventRuns(event: Event, runs: Run[]): Run | undefined {
