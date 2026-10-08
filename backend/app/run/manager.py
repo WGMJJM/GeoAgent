@@ -15,6 +15,7 @@ from app.core.models import (
     ReasoningEffort,
     Run,
     RunStatus,
+    TaskStatus,
     TokenUsage,
     ToolExecutionStatus,
     new_id,
@@ -106,6 +107,8 @@ class RunManager:
                 "request_id": new_id("req"),
                 "user_id": user_id,
                 "reply_to_run_id": None,
+                "related_task_id": None,
+                "task_relation": None,
                 "referenced_run_ids": list(dict.fromkeys([*saved_request.referenced_run_ids, run_id])),
             })
             return await self.submit(request, metadata={
@@ -357,7 +360,9 @@ class RunManager:
         interrupted = []
         for run in self.store.list_runs(limit=10000):
             if is_execution_inflight(run) and not self.is_active(run.id):
-                transition(self.store, run, run_status=RunStatus.INTERRUPTED, error="PROCESS_RESTARTED", result_text="服务重启后等待技术恢复")
+                task = self.store.get_task(run.task_id) if run.task_id and not run.parent_run_id else None
+                transition(self.store, run, task, run_status=RunStatus.INTERRUPTED,
+                           task_status=TaskStatus.BLOCKED, error="PROCESS_RESTARTED")
                 interrupted.append(run.id)
         return interrupted
 

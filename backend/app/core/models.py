@@ -12,7 +12,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
@@ -44,6 +44,8 @@ class DatasetKind(StrEnum):
 
 
 class TaskStatus(StrEnum):
+    """主任务八态；READY 仅保留给既有子任务的依赖调度。"""
+
     PENDING = "PENDING"
     READY = "READY"
     RUNNING = "RUNNING"
@@ -259,6 +261,8 @@ class AgentRequest(StrictModel):
     model_profile: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     reply_to_run_id: str | None = None
+    related_task_id: str | None = None
+    task_relation: Literal["continue", "reference"] | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("user_input")
@@ -269,6 +273,14 @@ class AgentRequest(StrictModel):
             raise ValueError("user_input cannot be empty")
         return value
 
+    @model_validator(mode="after")
+    def task_association_boundary(self):
+        if bool(self.related_task_id) != bool(self.task_relation):
+            raise ValueError("related_task_id 和 task_relation 必须同时提供")
+        if self.related_task_id and self.reply_to_run_id:
+            raise ValueError("回复等待中的 Run 与关联旧 Task 不能同时指定")
+        return self
+
 
 class Task(StrictModel):
     id: str = Field(default_factory=lambda: new_id("task"))
@@ -276,6 +288,10 @@ class Task(StrictModel):
     status: TaskStatus = TaskStatus.PENDING
     subtasks: list[str] = Field(default_factory=list)
     result: str | None = None
+    status_reason: str | None = None
+    source_message_id: str | None = None
+    latest_run_id: str | None = None
+    progress_run_id: str | None = None
     conversation_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

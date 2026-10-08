@@ -27,8 +27,10 @@ from app.core.models import (
     Dataset,
     Message,
     Run,
+    RunStatus,
     SubTask,
     Task,
+    TaskStatus,
     TokenUsage,
     ToolCall,
     ToolExecutionStatus,
@@ -897,18 +899,146 @@ class StateStore:
             (task.id, task.conversation_id, task.goal, task.status.value, task.result, task.created_at.isoformat(), task.model_dump_json(), task.updated_at.isoformat()),
         )
 
-    def save_run_and_task(self, run: Run, task: Task | None = None) -> None:
-        """原子保存 Run 及其对应 Task，禁止状态转换出现半提交。"""
+    def save_run_and_task(self, run: Run, task: Task | None = None, *, checkpoint: Checkpoint | None = None) -> None:
+        """原子保存执行状态；收尾时连同最新恢复快照一起提交。"""
 
         with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
             self._save_run(db, run)
             if task is not None:
+                existing = db.execute("SELECT payload_json FROM tasks WHERE id=?", (task.id,)).fetchone()
+                latest_run_id = self._model(Task, existing[0]).latest_run_id if existing else task.latest_run_id
+                if latest_run_id is not None and latest_run_id != run.id:
+                    raise ValueError("该任务已有新的主运行，不能恢复或用旧运行覆盖任务状态")
                 self._save_task(db, task)
+            if checkpoint is not None:
+                if checkpoint.run_id != run.id:
+                    raise ValueError("Checkpoint 必须属于当前 Run")
+                self._save_checkpoint(db, checkpoint)
 
     def get_task(self, task_id: str) -> Task | None:
         with self._connect() as db:
             row = db.execute("SELECT payload_json FROM tasks WHERE id=?", (task_id,)).fetchone()
         return self._model(Task, row[0]) if row else None
+
+    def list_runs_for_task(self, task_id: str) -> list[Run]:
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT payload_json FROM runs WHERE task_id=? ORDER BY updated_at DESC", (task_id,)
+            ).fetchall()
+        return [self._model(Run, row[0]) for row in rows]
+
+    def run_for_message(self, message: Message) -> Run | None:
+        """历史用户消息未直接挂 Run 时，通过已保存的原请求 ID 精确反查。"""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT payload_json FROM runs WHERE conversation_id=?
+                AND (id=? OR json_extract(metadata_json,'$.original_request_message_id')=?)
+                ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, rowid LIMIT 1""",
+                (message.conversation_id, message.run_id, message.id, message.run_id),
+            ).fetchone()
+        return self._model(Run, row[0]) if row else None
+
+    def associate_task(
+        self, run_id: str, *, relation: str = "new", task_id: str | None = None,
+        source_run_id: str | None = None, user_id: str | None = None,
+    ) -> Run:
+        """原子确定主 Run 的任务归属；关联不是恢复或执行授权。"""
+        from app.run.lifecycle import task_status_for_run
+        from app.run.predicates import is_cancellable_run
+
+        if relation not in {"new", "continue", "reference"}:
+            raise ValueError("无效的任务关联类型")
+        if relation == "new" and (task_id or source_run_id):
+            raise ValueError("新任务不接受旧任务标识")
+        if relation != "new" and bool(task_id) == bool(source_run_id):
+            raise ValueError("关联旧任务必须提供 task_id 或 source_run_id 中的一个")
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT payload_json FROM runs WHERE id=?", (run_id,)).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            current = self._model(Run, row[0])
+            if current.parent_run_id:
+                raise ValueError("子运行不能改变主任务归属")
+            if user_id is not None and db.execute(
+                "SELECT 1 FROM conversations WHERE id=? AND user_id=?", (current.conversation_id, user_id)
+            ).fetchone() is None:
+                raise PermissionError("当前用户无权关联此运行")
+            if current.task_id:
+                same_target = (task_id == current.task_id if relation == "continue"
+                               else task_id == current.metadata.get("related_task_id"))
+                same_source = source_run_id and source_run_id == current.metadata.get("task_source_run_id")
+                if current.metadata.get("task_relation") == relation and (relation == "new" or same_target or same_source):
+                    return current
+                raise ValueError("本次运行已确定任务归属，不能中途切换任务")
+            if current.status in {RunStatus.COMPLETED, RunStatus.PARTIAL_COMPLETED, RunStatus.CANCELLED}:
+                raise ValueError("已结束的运行不能再关联任务")
+            source = None
+            target = None
+            if source_run_id:
+                row = db.execute("SELECT payload_json FROM runs WHERE id=?", (source_run_id,)).fetchone()
+                source = self._model(Run, row[0]) if row else None
+                if source is None or source.id == current.id or source.parent_run_id or source.conversation_id != current.conversation_id:
+                    raise ValueError("来源运行不存在或不属于当前会话的历史主运行")
+                task_id = source.task_id
+                if not task_id:
+                    goal = source.metadata.get("original_request")
+                    if not goal:
+                        snapshot = db.execute("SELECT payload_json FROM checkpoints WHERE run_id=?", (source.id,)).fetchone()
+                        saved_request = self._decode_checkpoint(snapshot[0]).state.get("request", {}) if snapshot else {}
+                        if saved_request.get("conversation_id") == source.conversation_id:
+                            goal = saved_request.get("user_input")
+                    if not isinstance(goal, str) or not goal.strip():
+                        raise ValueError("来源运行没有可确认的原目标，请明确新任务目标")
+                    target = Task(
+                        goal=goal, conversation_id=source.conversation_id,
+                        status=task_status_for_run(source), status_reason=source.error,
+                        source_message_id=source.metadata.get("original_request_message_id"),
+                        latest_run_id=source.id,
+                        result=(source.metadata.get("result") or {}).get("summary"),
+                        progress_run_id=source.id if source.metadata.get("completion_review") else None,
+                    )
+                    source = source.model_copy(update={"task_id": target.id})
+                    self._save_task(db, target)
+                    self._save_run(db, source)
+            if task_id:
+                row = db.execute("SELECT payload_json FROM tasks WHERE id=?", (task_id,)).fetchone()
+                target = self._model(Task, row[0]) if row else None
+            if relation != "new" and (target is None or target.conversation_id != current.conversation_id):
+                raise ValueError("任务不存在或不属于当前会话")
+            metadata = {**current.metadata, "task_relation": relation}
+            if source is not None:
+                metadata["task_source_run_id"] = source.id
+            if relation == "continue":
+                if target.status in {TaskStatus.SUCCEEDED, TaskStatus.CANCELLED}:
+                    raise ValueError("已完成或已取消任务不能隐式重开；请新建任务或只引用旧结果")
+                rows = db.execute("SELECT payload_json FROM runs WHERE task_id=?", (target.id,)).fetchall()
+                related = [self._model(Run, row[0]) for row in rows]
+                if any(item.status is RunStatus.CREATED or is_cancellable_run(item) for item in related):
+                    raise ValueError("该任务仍在执行或等待输入，请使用原运行的补充或恢复入口")
+                uncertain = db.execute(
+                    "SELECT 1 FROM tool_calls t JOIN runs r ON r.id=t.run_id WHERE r.task_id=? AND t.status=? LIMIT 1",
+                    (target.id, ToolExecutionStatus.RUNNING.value),
+                ).fetchone()
+                if uncertain or any(item.error == "SIDE_EFFECT_UNCERTAIN" for item in related):
+                    raise ValueError("原任务存在未确认的执行结果，不能通过新运行重复操作")
+                metadata["automatic_retries"] = max((item.metadata.get("automatic_retries", 0) for item in related), default=0)
+                task = target.model_copy(update={"status": TaskStatus.RUNNING, "status_reason": None,
+                                                 "latest_run_id": current.id, "updated_at": utc_now()})
+            else:
+                if target is not None:
+                    metadata["related_task_id"] = target.id
+                task = Task(
+                    goal=str(current.metadata.get("original_request") or ""),
+                    conversation_id=current.conversation_id, status=TaskStatus.RUNNING,
+                    source_message_id=current.metadata.get("original_request_message_id"),
+                    latest_run_id=current.id,
+                )
+            updated = current.model_copy(update={"task_id": task.id, "metadata": metadata})
+            self._save_task(db, task)
+            self._save_run(db, updated)
+            return updated
 
     def list_tasks(self, conversation_id: str | None = None, limit: int = 50) -> list[Task]:
         query = "SELECT payload_json FROM tasks"
@@ -1273,6 +1403,7 @@ class StateStore:
         limit: int,
         user_id: str | None = None,
         exclude_run_id: str | None = None,
+        task_id: str | None = None,
     ) -> list[tuple[ToolCall, ToolResult]]:
         query = (
             "SELECT tc.id,tc.run_id,tc.name,tc.arguments_json,tc.result_json,tc.attempt "
@@ -1287,6 +1418,9 @@ class StateStore:
         if exclude_run_id is not None:
             query += " AND tc.run_id<>?"
             args += (exclude_run_id,)
+        if task_id is not None:
+            query += " AND r.task_id=?"
+            args += (task_id,)
         query += " ORDER BY COALESCE(tc.updated_at,tc.created_at) DESC LIMIT ?"
         args += (max(1, limit),)
         with self._connect() as db:
@@ -1328,26 +1462,28 @@ class StateStore:
             db.commit()
 
     def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint:
-        with self._connect() as db:
+        with self.transaction() as db:
             db.execute("BEGIN IMMEDIATE")
-            previous = db.execute(
-                "SELECT id,created_at,payload_json FROM checkpoints WHERE run_id=?", (checkpoint.run_id,)
-            ).fetchone()
-            if previous is not None:
-                # 保持原有“最新快照”语义，晚到的旧快照不能使恢复位置倒退。
-                if checkpoint.created_at.isoformat() < previous["created_at"]:
-                    return self._decode_checkpoint(previous["payload_json"])
-                checkpoint = checkpoint.model_copy(update={"id": previous["id"]})
-            payload = zlib.compress(
-                checkpoint.model_dump_json().encode("utf-8"), level=CHECKPOINT_COMPRESSION_LEVEL
-            )
-            db.execute(
-                """INSERT INTO checkpoints(id,run_id,phase,payload_json,created_at) VALUES(?,?,?,?,?)
-                ON CONFLICT(run_id) DO UPDATE SET
-                    phase=excluded.phase, payload_json=excluded.payload_json, created_at=excluded.created_at""",
-                (checkpoint.id, checkpoint.run_id, checkpoint.phase, payload, checkpoint.created_at.isoformat()),
-            )
-            db.commit()
+            return self._save_checkpoint(db, checkpoint)
+
+    def _save_checkpoint(self, db: sqlite3.Connection, checkpoint: Checkpoint) -> Checkpoint:
+        previous = db.execute(
+            "SELECT id,created_at,payload_json FROM checkpoints WHERE run_id=?", (checkpoint.run_id,)
+        ).fetchone()
+        if previous is not None:
+            # 保持原有“最新快照”语义，晚到的旧快照不能使恢复位置倒退。
+            if checkpoint.created_at.isoformat() < previous["created_at"]:
+                return self._decode_checkpoint(previous["payload_json"])
+            checkpoint = checkpoint.model_copy(update={"id": previous["id"]})
+        payload = zlib.compress(
+            checkpoint.model_dump_json().encode("utf-8"), level=CHECKPOINT_COMPRESSION_LEVEL
+        )
+        db.execute(
+            """INSERT INTO checkpoints(id,run_id,phase,payload_json,created_at) VALUES(?,?,?,?,?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                phase=excluded.phase, payload_json=excluded.payload_json, created_at=excluded.created_at""",
+            (checkpoint.id, checkpoint.run_id, checkpoint.phase, payload, checkpoint.created_at.isoformat()),
+        )
         return checkpoint
 
     def latest_checkpoint(self, run_id: str) -> Checkpoint | None:
