@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     max_agent_turns: int = Field(default=50, ge=1)
     max_empty_response_retries: int = Field(default=1, ge=0)
     max_tool_retries: int = Field(default=2, ge=0)
-    max_model_retries: int = Field(default=1, ge=0)
+    max_model_retries: int = Field(default=2, ge=0)
     max_run_retries: int = Field(default=6, ge=0)
     retry_delay_seconds: float = Field(default=1, ge=0)
     retry_max_delay_seconds: float = Field(default=8, ge=0)
