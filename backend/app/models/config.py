@@ -14,6 +14,7 @@ class ModelConfig(BaseModel):
     wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     base_url: str | None = None
     api_key: str | None = None
+    use_system_certificates: bool = False
     model: str | None = None
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     timeout_seconds: int = Field(default=90, ge=1)
@@ -40,6 +41,7 @@ class ModelProfile(BaseModel):
     wire_api: Literal["chat_completions", "responses"] = "chat_completions"
     base_url: str | None = None
     api_key: str | None = None
+    use_system_certificates: bool = False
     model: str = Field(min_length=1)
     tokenizer_file: Path | None = None
     timeout_seconds: int = Field(default=90, ge=1)
@@ -65,6 +67,7 @@ class ModelProfile(BaseModel):
             wire_api=self.wire_api,
             base_url=self.base_url,
             api_key=self.api_key,
+            use_system_certificates=self.use_system_certificates,
             model=self.model,
             tokenizer_file=self.tokenizer_file or tokenizer_file,
             timeout_seconds=self.timeout_seconds,
