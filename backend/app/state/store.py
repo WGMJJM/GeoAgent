@@ -796,6 +796,12 @@ class StateStore:
             db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (message.created_at.isoformat(), message.conversation_id))
             db.commit()
 
+    def get_message(self, conversation_id: str, message_id: str) -> Message | None:
+        """按真实来源读取单条消息，不跨会话查找。"""
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM messages WHERE conversation_id=? AND id=?", (conversation_id, message_id)).fetchone()
+        return self._message_from_row(row) if row is not None else None
+
     def list_messages(self, conversation_id: str, limit: int = 100) -> list[Message]:
         with self._connect() as db:
             rows = db.execute(
