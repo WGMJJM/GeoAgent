@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_MAX_BATCH_MESSAGES = 32
 SUMMARY_MAX_BATCH_TOKENS = 6000
-SUMMARY_TIMEOUT_SECONDS = 60
+SUMMARY_TIMEOUT_SECONDS = 120
 SUMMARY_MAX_LENGTH = 1800
 SUMMARY_MAX_ENTRY_LENGTH = 500
 
@@ -160,6 +160,8 @@ class ConversationSummarizer:
                     temperature=0,
                     max_tokens=1800,
                     response_format=response_format,
+                    reasoning_effort=adapter.minimum_reasoning_effort,
+                    timeout_seconds=self.timeout_seconds,
                 )
             ),
             timeout=self.timeout_seconds,
