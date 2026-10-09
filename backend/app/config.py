@@ -28,14 +28,14 @@ class Settings(BaseSettings):
     workspace: Path = Field(default=Path("workspace"))
     skills_directory: Path = Field(default=Path("backend/skills"))
     default_crs: str = "EPSG:3857"
-    max_agent_turns: int = Field(default=20, ge=1)
+    max_agent_turns: int = Field(default=50, ge=1)
     max_empty_response_retries: int = Field(default=1, ge=0)
     max_tool_retries: int = Field(default=2, ge=0)
     max_model_retries: int = Field(default=1, ge=0)
     max_run_retries: int = Field(default=6, ge=0)
     retry_delay_seconds: float = Field(default=1, ge=0)
     retry_max_delay_seconds: float = Field(default=8, ge=0)
-    max_tool_calls: int = Field(default=40, ge=1)
+    max_tool_calls: int = Field(default=50, ge=1)
     max_subagents: int = Field(default=5, ge=1, le=20)
     max_parallel_agents: int = Field(default=3, ge=1, le=20)
     max_preview_features: int = Field(default=200, ge=1, le=1000)
@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     tool_search_regex_results: int = Field(default=2, ge=1)
     tool_search_chinese_results: int = Field(default=1, ge=1)
     tool_search_english_results: int = Field(default=3, ge=1)
-    max_execution_seconds: int = Field(default=300, ge=1)
+    max_execution_seconds: int | None = Field(default=None, ge=1)
     tool_timeout_seconds: int = Field(default=120, ge=1)
     enable_unsafe_python: bool = False
     enable_arcpy: bool = True
