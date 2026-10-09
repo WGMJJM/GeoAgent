@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     max_preview_features: int = Field(default=200, ge=1, le=1000)
     max_preview_fields: int = Field(default=32, ge=1, le=128)
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
-    max_tokens: int = Field(default=12800, ge=1)
+    max_tokens: int = Field(default=25600, ge=1)
     completion_review_enabled: bool = True
     completion_review_max_tokens: int = Field(default=3200, ge=1)
     completion_review_timeout_seconds: float = Field(default=20, gt=0)
