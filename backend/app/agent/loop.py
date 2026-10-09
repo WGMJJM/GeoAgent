@@ -893,8 +893,7 @@ class AgentLoop:
                     pending_approvals, discovered_names=discovered_names, used_names=used_names, pending_answer=answer,
                 )
                 try:
-                    async with asyncio.timeout(self.settings.completion_review_timeout_seconds):
-                        review = await self._review_answer(request, current, model, model_messages, answer, on_model_delta)
+                    review = await self._review_answer(request, current, model, model_messages, answer, on_model_delta)
                 except CompletionReviewError as exc:
                     current = self.store.get_run(current.id) or current
                     await self.trace.emit(
@@ -1008,7 +1007,8 @@ class AgentLoop:
         return updates[0]
 
     async def _request_model(self, run, model, prepared, input_tokens, on_model_delta,
-                             *, can_stream_answer: bool, operation_id: str | None = None):
+                             *, can_stream_answer: bool, operation_id: str | None = None,
+                             timeout_seconds: float | None = None):
         """只重试本轮请求；已发布正文的流不重放，半截工具调用不执行。"""
         if self.recovery is not None:
             state = self.recovery.begin(run.id, "model", operation_id or f"model:{run.turn_count}")
@@ -1036,7 +1036,7 @@ class AgentLoop:
             try:
                 if on_model_delta is not None:
                     await on_model_delta("", live_usage())
-                async with aclosing(model.stream(prepared)) as stream:
+                async with asyncio.timeout(timeout_seconds), aclosing(model.stream(prepared)) as stream:
                     async for chunk in stream:
                         if chunk.content:
                             parts.append(chunk.content)
@@ -1082,22 +1082,73 @@ class AgentLoop:
 
     async def _review_answer(self, request, run, model, messages, answer, on_model_delta) -> CompletionReview:
         prepared = self.completion_reviewer.prepare(request, run, model, messages, answer)
-        input_tokens = model_input_tokens(prepared.messages, [], model.count_tokens)
+        base = self.completion_reviewer.fingerprint(prepared)
+        checkpoint = self.store.latest_checkpoint(run.id)
+        state = checkpoint.state.get("review_state", {}) if checkpoint else {}
         previous = self.recovery.current(run.id) if self.recovery is not None else {}
         restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith("review:")
-        if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns and not restoring:
-            raise ValueError("没有足够预算执行完整性检查，未发送模型请求。")
-        run = run.model_copy(update={"turn_count": run.turn_count + (not restoring)})
-        self.store.save_run(run)
-        await self.trace.emit(run.id, EventType.VERIFICATION_STARTED, "正在核对完成情况",
-                              agent_id=run.agent_id, payload={"scope": "completion_review"})
-        response, _ = await self._request_model(run, model, prepared, input_tokens, on_model_delta,
-                                                can_stream_answer=False, operation_id=f"review:{run.turn_count}")
-        measured_tokens = model.count_tokens(response.content)
-        if response.tool_calls:
-            measured_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
-        current = await self._record_model_usage(run, response, input_tokens, measured_tokens)
-        return self.completion_reviewer.inspect(response, prepared, request, current)
+        if state.get("base") != base and not (state and restoring):
+            state = {"base": base, "evidence_refs": [], "evidence_rounds": 0}
+        state["base"] = base
+        while True:
+            if state["evidence_refs"]:
+                prepared = self.completion_reviewer.prepare(
+                    request, run, model, messages, answer, evidence_refs=state["evidence_refs"],
+                )
+            fingerprint = self.completion_reviewer.fingerprint(prepared)
+            if state.get("reviewed_fingerprint") == fingerprint:
+                report = self.completion_reviewer.inspect(
+                    ModelResponse(content=json.dumps(state["report"], ensure_ascii=False)), prepared, request, run,
+                )
+                return self._stop_unchanged_review(report) if report.decision == "continue" else report
+            input_tokens = model_input_tokens(prepared.messages, [], model.count_tokens)
+            previous = self.recovery.current(run.id) if self.recovery is not None else {}
+            restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith("review:")
+            run = self.store.get_run(run.id) or run
+            if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns and not restoring:
+                raise ValueError("没有足够预算执行完整性检查，未发送模型请求。")
+            run = run.model_copy(update={"turn_count": run.turn_count + (not restoring)})
+            operation_id = previous["operation_id"] if restoring else f"review:{run.turn_count}"
+            self.store.save_run(run)
+            self._save_review_state(run.id, state)
+            await self.trace.emit(run.id, EventType.VERIFICATION_STARTED, "正在核对完成情况",
+                                  agent_id=run.agent_id, payload={"scope": "completion_review"})
+            response, _ = await self._request_model(
+                run, model, prepared, input_tokens, on_model_delta, can_stream_answer=False,
+                operation_id=operation_id, timeout_seconds=self.settings.completion_review_timeout_seconds,
+            )
+            measured_tokens = model.count_tokens(response.content)
+            if response.tool_calls:
+                measured_tokens += model.count_tokens(json.dumps(response.tool_calls, ensure_ascii=False, separators=(",", ":")))
+            run = await self._record_model_usage(run, response, input_tokens, measured_tokens)
+            report = self.completion_reviewer.inspect(response, prepared, request, run)
+            state.update(reviewed_fingerprint=fingerprint, report=report.model_dump(mode="json"))
+            self._save_review_state(run.id, state)
+            if not report.needed_evidence:
+                return report
+            runtime = json.loads(prepared.messages[-1]["content"])["runtime"]
+            included = {(kind, item["id"]) for kind, key in (
+                ("tool_call", "tool_calls"), ("dataset", "datasets"), ("artifact", "artifacts"),
+            ) for item in runtime[key] if item["body_included"]}
+            additional = [ref.model_dump(mode="json") for ref in report.needed_evidence
+                          if (ref.kind, ref.id) not in included and ref.model_dump(mode="json") not in state["evidence_refs"]]
+            if not additional or state["evidence_rounds"] >= self.settings.completion_review_max_evidence_rounds:
+                return self._stop_unchanged_review(report)
+            state["evidence_refs"].extend(additional)
+            state["evidence_rounds"] += 1
+            self._save_review_state(run.id, state)
+
+    def _save_review_state(self, run_id, state):
+        checkpoint = self.store.latest_checkpoint(run_id)
+        if checkpoint is not None:
+            self.store.save_checkpoint(checkpoint.model_copy(update={"state": {**checkpoint.state, "review_state": state}}))
+
+    @staticmethod
+    def _stop_unchanged_review(report: CompletionReview) -> CompletionReview:
+        return report.model_copy(update={
+            "decision": "partial", "needed_evidence": [],
+            "feedback": "现有证据仍不足以确认全部要求，已保留已完成的结果，本轮停止继续尝试。",
+        })
 
     @staticmethod
     def _review_partial(run: Run, review: CompletionReview, *, budget_exceeded: bool = False) -> AgentResult:
@@ -1419,6 +1470,7 @@ class AgentLoop:
                 state={
                     "schema_version": RunCheckpointCodec.CURRENT_VERSION,
                     "recovery": previous.state.get("recovery") if previous else None,
+                    "review_state": (previous.state.get("review_state") or {}) if previous else {},
                     "pending_answer": pending_answer,
                     "request": request.model_dump(mode="json"),
                     "protocol_messages": protocol_messages,

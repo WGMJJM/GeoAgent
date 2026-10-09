@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     max_tokens: int = Field(default=25600, ge=1)
     completion_review_enabled: bool = True
     completion_review_max_tokens: int = Field(default=3200, ge=1)
-    completion_review_timeout_seconds: float = Field(default=20, gt=0)
+    completion_review_timeout_seconds: float = Field(default=60, gt=0)
+    completion_review_max_evidence_rounds: int = Field(default=1, ge=0)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     model_input_tokens: int = Field(default=256000, ge=1)
     summary_recent_messages: int = Field(default=DEFAULT_SUMMARY_RECENT_MESSAGES, ge=1)
