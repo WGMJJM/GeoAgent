@@ -44,8 +44,9 @@ class OpenAIResponsesAdapter(ModelAdapter):
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         kwargs, alias_to_name = _response_request(self, request)
-        async with asyncio.timeout(self.config.timeout_seconds):
-            response = await self.client.responses.create(**kwargs)
+        timeout = request.timeout_seconds if request.timeout_seconds is not None else self.config.timeout_seconds
+        async with asyncio.timeout(timeout):
+            response = await self.client.responses.create(**kwargs, timeout=timeout)
         return _model_response(response, alias_to_name)
 
     async def stream(self, request: ModelRequest):
@@ -66,8 +67,9 @@ class OpenAIResponsesAdapter(ModelAdapter):
         stream = None
         pending_calls: dict[int, dict[str, Any]] = {}
         terminal_sent = False
-        async with asyncio.timeout(self.config.timeout_seconds):
-            stream = await self.client.responses.create(**kwargs, stream=True)
+        timeout = request.timeout_seconds if request.timeout_seconds is not None else self.config.timeout_seconds
+        async with asyncio.timeout(timeout):
+            stream = await self.client.responses.create(**kwargs, stream=True, timeout=timeout)
             try:
                 async for event in stream:
                     event_type = getattr(event, "type", "")

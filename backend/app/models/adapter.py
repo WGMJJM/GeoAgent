@@ -21,6 +21,7 @@ class ModelRequest(BaseModel):
     max_tokens: int = 25600
     response_format: dict[str, Any] | None = None
     reasoning_effort: ReasoningEffort | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0)
     extra_body: dict[str, Any] | None = None
 
 

@@ -43,7 +43,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
     async def complete(self, request: ModelRequest) -> ModelResponse:
         reasoning_effort = _reasoning_effort(self.config, request)
         tools, name_to_alias, alias_to_name = _provider_tools(request.tools)
-        async with asyncio.timeout(self.config.timeout_seconds):
+        timeout = request.timeout_seconds if request.timeout_seconds is not None else self.config.timeout_seconds
+        async with asyncio.timeout(timeout):
             response = await self.client.chat.completions.create(
                 model=self.config.model,
                 messages=_provider_messages(request.messages, name_to_alias),
@@ -52,6 +53,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 temperature=request.temperature if request.temperature is not None else self.config.temperature,
                 max_tokens=request.max_tokens,
                 extra_body=request.extra_body,
+                timeout=timeout,
                 **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             )
         message = response.choices[0].message
@@ -78,7 +80,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         input_tokens = None
         output_tokens = None
         finish_reason = None
-        async with asyncio.timeout(self.config.timeout_seconds):
+        timeout = request.timeout_seconds if request.timeout_seconds is not None else self.config.timeout_seconds
+        async with asyncio.timeout(timeout):
             stream = await self.client.chat.completions.create(
                 model=self.config.model,
                 messages=_provider_messages(request.messages, name_to_alias),
@@ -89,6 +92,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 extra_body=request.extra_body,
                 stream=True,
                 stream_options={"include_usage": True},
+                timeout=timeout,
                 **({"reasoning_effort": reasoning_effort} if reasoning_effort else {}),
             )
             try:
