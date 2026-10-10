@@ -1,22 +1,10 @@
-"""Run 的轻量检查点读写与版本边界。"""
+"""Run 检查点的版本校验与请求、结果解码。"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.core.models import AgentRequest, AgentResult, Checkpoint
-from app.state import StateStore
-
-
-class CheckpointStore:
-    def __init__(self, store: StateStore) -> None:
-        self.store = store
-
-    def save(self, checkpoint: Checkpoint) -> Checkpoint:
-        return self.store.save_checkpoint(checkpoint)
-
-    def latest(self, run_id: str) -> Checkpoint | None:
-        return self.store.latest_checkpoint(run_id)
+from app.core.models import AgentRequest, AgentResult
 
 
 class RunCheckpointCodec:
@@ -43,4 +31,4 @@ class RunCheckpointCodec:
         return AgentResult.model_validate(payload) if isinstance(payload, dict) else None
 
 
-__all__ = ["CheckpointStore", "RunCheckpointCodec"]
+__all__ = ["RunCheckpointCodec"]

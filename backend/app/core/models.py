@@ -58,7 +58,7 @@ class TaskStatus(StrEnum):
 
 
 class RunStatus(StrEnum):
-    """运行状态；规划会话使用 PlanningStatus，不混入 Run 生命周期。"""
+    """单次 Run 的执行状态，与 Task 的目标完成状态分开。"""
 
     CREATED = "CREATED"
     RUNNING = "RUNNING"
@@ -338,12 +338,6 @@ class ToolError(StrictModel):
     message: str
     retryable: bool = False
     details: dict[str, Any] = Field(default_factory=dict)
-
-
-class VerificationIssue(StrictModel):
-    code: str
-    message: str
-    recoverable: bool = False
 
 
 class ToolResult(StrictModel):

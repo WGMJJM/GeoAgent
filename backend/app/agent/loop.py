@@ -165,8 +165,6 @@ class AgentLoop:
             skills=context_services.get("skills"),
         )
         self.model_adapter: ModelAdapter | None = None
-        self.model_adapters: dict[str, ModelAdapter] = {}
-        self.default_model_profile: str | None = None
         self.delegation = None
         self.completion_reviewer = CompletionReviewer(store, settings)
 

@@ -22,8 +22,8 @@ class MessageResponse(BaseModel):
     request_id: str
     route: MessageRoute
     message: str = ""
-    run: Run | None = None
-    result: AgentResult | None = None
+    run: Run
+    result: AgentResult
 
 
 class MessageGateway:

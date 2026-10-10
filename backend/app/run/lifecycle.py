@@ -178,27 +178,6 @@ def transition(
     return updated_run, updated_task
 
 
-def record_approval_denied(store: StateStore, approval: ApprovalRequest) -> tuple[Run, Task | None] | None:
-    """把审批拒绝后的 Run/Task 状态收敛到生命周期入口。"""
-
-    run = store.get_run(approval.source_run_id)
-    if run is None:
-        store.save_approval(approval)
-        return None
-    task = store.get_task(run.task_id) if run.task_id else None
-    if run.status is not RunStatus.WAITING_APPROVAL:
-        store.save_approval_and_run(approval, run, task)
-        return run, task
-    if task is not None and task.status in {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED, TaskStatus.FAILED}:
-        store.save_approval_and_run(approval, run, task)
-        return run, task
-    updated_run = finish_run(run, RunStatus.WAITING_USER, error="APPROVAL_DENIED")
-    updated_run = updated_run.model_copy(update={"metadata": {**run.metadata, "approval_denied": approval.id}})
-    updated_task = task.model_copy(update={"status": TaskStatus.WAITING, "status_reason": "APPROVAL_DENIED", "updated_at": datetime.now(UTC)}) if task is not None else None
-    store.save_approval_and_run(approval, updated_run, updated_task)
-    return updated_run, updated_task
-
-
 def record_approval_decision(
     store: StateStore,
     approval: ApprovalRequest,
@@ -229,7 +208,6 @@ __all__ = [
     "finish_run",
     "persist_result",
     "record_approval_decision",
-    "record_approval_denied",
     "resume",
     "run_status_for_result",
     "transition",

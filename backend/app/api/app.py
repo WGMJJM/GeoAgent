@@ -384,7 +384,7 @@ def create_app(application: Application | None = None) -> FastAPI:
     async def checkpoint(run_id: str, current_user: User = Depends(get_current_user)) -> dict[str, Any]:
         if not geoagent.store.run_belongs_to_user(run_id, current_user.id):
             raise HTTPException(status_code=404, detail="run not found")
-        item = geoagent.checkpoints.latest(run_id)
+        item = geoagent.store.latest_checkpoint(run_id)
         if item is None:
             raise HTTPException(status_code=404, detail="checkpoint not found")
         return item.model_dump(mode="json")
@@ -410,7 +410,7 @@ def create_app(application: Application | None = None) -> FastAPI:
         source = geoagent.store.get_run(item.source_run_id)
         if source is None or geoagent.store.user_id_for_run(source.id) not in {None, current_user.id} or source.status is not RunStatus.WAITING_APPROVAL:
             raise HTTPException(status_code=409, detail="原运行当前不在等待审批状态")
-        checkpoint = geoagent.checkpoints.latest(source.id)
+        checkpoint = geoagent.store.latest_checkpoint(source.id)
         if checkpoint is None:
             raise HTTPException(status_code=409, detail="审批来源运行没有可恢复上下文")
         if RunCheckpointCodec.request(checkpoint.state) is None:
@@ -466,7 +466,7 @@ def create_app(application: Application | None = None) -> FastAPI:
         previous = geoagent.store.get_run(run_id)
         if previous is None or not geoagent.store.run_belongs_to_user(run_id, current_user.id):
             raise HTTPException(status_code=404, detail="run not found")
-        checkpoint = geoagent.checkpoints.latest(run_id)
+        checkpoint = geoagent.store.latest_checkpoint(run_id)
         if checkpoint is None:
             raise HTTPException(status_code=409, detail="run has no checkpoint")
         checkpoint_result = RunCheckpointCodec.result(checkpoint.state)

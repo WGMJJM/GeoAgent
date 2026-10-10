@@ -14,7 +14,7 @@ from app.agent.loop import AgentLoop
 from app.agent.skills import SkillCatalog
 from app.auth import ApprovalService, AuthService, PermissionPolicy
 from app.config import Settings
-from app.core.models import AgentRequest, AgentResult, AgentResultStatus, ReasoningEffort, new_id
+from app.core.models import AgentRequest, AgentResult, ReasoningEffort, new_id
 from app.entry import AttachmentService, ConversationService, MessageGateway
 from app.execution.arcpy import ArcPyProvider, discover_arcpy_executable
 from app.execution.mcp import MCPManager, load_mcp_config
@@ -38,7 +38,6 @@ from app.models.config import ModelProfile
 from app.models.providers import OpenAICompatibleAdapter, OpenAIResponsesAdapter
 from app.observability import EventBus, Metrics, TraceRecorder
 from app.run import RunManager
-from app.run.checkpoints import CheckpointStore
 from app.run.recovery import RecoveryController
 from app.state import StateStore
 from app.tools.gis import register_gis_tools
@@ -67,7 +66,6 @@ class Application:
         self.dataset_preview = DatasetPreviewService()
         self.python_executor = PythonExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
         self.shell_executor = ShellExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
-        self.checkpoints = CheckpointStore(self.store)
         self.profile = UserProfileService(self.store)
         self.conversation_memory = ConversationMemoryService(
             self.store,
@@ -278,7 +276,7 @@ class Application:
         # Application 的 profile adapter。
         return self.agent_loop.model_adapter if hasattr(self, "agent_loop") else None
 
-    async def ask(self, user_input: str | AgentRequest, *, conversation_id: str | None = None, dataset_ids: list[str] | None = None, model_profile: str | None = None, reasoning_effort: ReasoningEffort | None = None):
+    async def ask(self, user_input: str | AgentRequest, *, conversation_id: str | None = None, dataset_ids: list[str] | None = None, model_profile: str | None = None, reasoning_effort: ReasoningEffort | None = None) -> AgentResult:
         await self.mcp.start()
         await self.run_manager.recover_interrupted_runs(on_result=self.conversations.record_result)
         request = user_input if isinstance(user_input, AgentRequest) else AgentRequest(
@@ -289,14 +287,7 @@ class Application:
             reasoning_effort=reasoning_effort,
         )
         response = await self.message_entry.submit(request)
-        if response.result is not None:
-            return response.result
-        return AgentResult(
-            agent_id="entry",
-            status=AgentResultStatus.SUCCESS,
-            summary=response.message,
-            trace_id=f"direct_{request.request_id}",
-        )
+        return response.result
 
     def register_dataset(self, path: str | Path, *, name: str | None = None, user_id: str | None = None):
         workspace = self.workspace.for_user(user_id)
