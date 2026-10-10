@@ -14,10 +14,8 @@ from importlib.metadata import distributions
 from threading import Event
 from typing import Any
 
-from app.execution.process import run_process
+from app.execution.process import ProcessExecutionResult, run_process
 from app.execution.sandbox import WorkspaceManager
-
-from .result import PythonExecutionResult
 
 
 class PythonExecutor:
@@ -45,7 +43,7 @@ class PythonExecutor:
         datasets: dict[str, dict[str, Any]] | None = None,
         workspace: WorkspaceManager | None = None,
         cancel_event: Event | None = None,
-    ) -> PythonExecutionResult:
+    ) -> ProcessExecutionResult:
         if not code.strip():
             raise ValueError("Python code 不能为空。")
         workspace = workspace or self.workspace
@@ -80,4 +78,4 @@ class PythonExecutor:
             script.unlink(missing_ok=True)
             bindings.unlink(missing_ok=True)
         created = [str(path) for path in sorted(output_dir.rglob("*")) if path.is_file()]
-        return PythonExecutionResult(returncode=completed.returncode, stdout=completed.stdout[-20000:], stderr=completed.stderr[-20000:], created_files=created)
+        return ProcessExecutionResult(returncode=completed.returncode, stdout=completed.stdout[-20000:], stderr=completed.stderr[-20000:], created_files=created)

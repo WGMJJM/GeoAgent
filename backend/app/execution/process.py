@@ -7,6 +7,15 @@ import time
 from collections.abc import Sequence
 from threading import Event
 
+from pydantic import BaseModel, Field
+
+
+class ProcessExecutionResult(BaseModel):
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    created_files: list[str] = Field(default_factory=list)
+
 
 class ProcessCancelled(Exception):
     """子进程因所属 Run 被取消而停止。"""

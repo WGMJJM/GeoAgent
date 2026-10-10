@@ -7,10 +7,8 @@ import shlex
 from pathlib import Path
 from threading import Event
 
-from app.execution.process import run_process
+from app.execution.process import ProcessExecutionResult, run_process
 from app.execution.sandbox import WorkspaceManager
-
-from .result import ShellExecutionResult
 
 
 class ShellExecutor:
@@ -20,7 +18,7 @@ class ShellExecutor:
         self.workspace = workspace
         self.timeout_seconds = timeout_seconds
 
-    def execute(self, command: str, *, cancel_event: Event | None = None) -> ShellExecutionResult:
+    def execute(self, command: str, *, cancel_event: Event | None = None) -> ProcessExecutionResult:
         tokens = _tokens(command)
         if not tokens:
             raise ValueError("Shell command 不能为空。")
@@ -37,7 +35,7 @@ class ShellExecutor:
                 self.workspace.resolve(cleaned)
         before = self.workspace.snapshot()
         completed = run_process(tokens, cwd=self.workspace.root, timeout_seconds=self.timeout_seconds, cancel_event=cancel_event)
-        return ShellExecutionResult(returncode=completed.returncode, stdout=completed.stdout[-20000:], stderr=completed.stderr[-20000:], created_files=[str(path) for path in self.workspace.discover_new_files(before)])
+        return ProcessExecutionResult(returncode=completed.returncode, stdout=completed.stdout[-20000:], stderr=completed.stderr[-20000:], created_files=[str(path) for path in self.workspace.discover_new_files(before)])
 
 
 def _tokens(command: str) -> list[str]:
