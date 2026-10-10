@@ -3,9 +3,9 @@ import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event,
 import { childRunsOf, isExecutionInflight, isMainRun, runDurationMs, runTitle, runsForConversation } from "./domain";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { Icon, IconName } from "./components/Icon";
-import { DatasetActions } from "./components/DatasetActions";
+import { ResultDatasets } from "./components/ResultDatasets";
 import { DatasetPanel } from "./components/DatasetPanel";
-import { DatasetPreviewButton, MapViewer } from "./components/MapViewer";
+import { DatasetPreviewButton } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
 import { MarkdownContent } from "./components/MarkdownContent";
 import { CopyReplyButton } from "./components/CopyReplyButton";
@@ -898,7 +898,7 @@ export function ChatBubble({ item, runs = [], datasets = [], selectedDatasetIds 
     {item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <DatasetPreviewButton className="message-resource" key={dataset.id} datasetId={dataset.id} title={dataset.name}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></DatasetPreviewButton>)}</div>}
     <div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? <MarkdownContent content={item.content} /> : item.content}</div>
     {item.role === "assistant" && item.content && <CopyReplyButton content={item.content} />}
-    {resultDatasets.length > 0 && <div className="chat-preview-grid">{resultDatasets.map((dataset) => <div className="chat-preview-item" key={dataset.id}><small>{dataset.created_by_run_id === run?.id ? "本次生成" : "关联数据"}</small><MapViewer datasetId={dataset.id} title={dataset.name} compact /><DatasetActions dataset={dataset} selected={selectedDatasetIds.includes(dataset.id)} onUse={onUseDataset} /></div>)}</div>}
+    {resultDatasets.length > 0 && <ResultDatasets key={item.id} datasets={resultDatasets} runId={run?.id} selectedIds={selectedDatasetIds} onUse={onUseDataset} />}
     {run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}
     {item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}
   </div>;

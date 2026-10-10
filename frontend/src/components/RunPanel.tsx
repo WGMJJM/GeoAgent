@@ -77,7 +77,10 @@ function RunResultDetails({ result, datasets, artifacts, selectedDatasetIds, onU
   result: Result | null; datasets: Dataset[]; artifacts: Artifact[];
   selectedDatasetIds: string[]; onUseDataset?: (id: string) => void;
 }) {
-  const output = result?.datasets.map((id) => datasets.find((dataset) => dataset.id === id)).find((dataset) => ["VECTOR", "RASTER", "IMAGE"].includes(dataset?.kind ?? ""));
+  const [previewSelection, setPreviewSelection] = useState<{ traceId: string; datasetId: string } | null>(null);
+  const previewDatasets = (result?.datasets ?? []).map((id) => datasets.find((dataset) => dataset.id === id))
+    .filter((dataset): dataset is Dataset => Boolean(dataset && ["VECTOR", "RASTER", "IMAGE", "TABLE", "DOCUMENT"].includes(dataset.kind)));
+  const output = previewDatasets.find((dataset) => previewSelection?.traceId === result?.trace_id && dataset.id === previewSelection?.datasetId) ?? previewDatasets[0];
   const names = Object.fromEntries(datasets.map((dataset) => [dataset.id, dataset.name]));
   if (!result) return <section className="run-result-details"><Empty text="选择一次运行后查看结果、证据和输出数据。" /></section>;
   return <section className="run-result-details">
@@ -96,7 +99,14 @@ function RunResultDetails({ result, datasets, artifacts, selectedDatasetIds, onU
       const artifact = artifacts.find((item) => item.id === artifactId);
       return <a className="artifact-link" href={api.artifactUrl(artifactId)} download target="_blank" rel="noreferrer" key={artifactId}>{artifact?.name ?? "结果文件"} <Icon name="external" size={12} /></a>;
     })}</div></section>}
-    {output && <div className="result-map-panel"><div className="panel-head"><h3>结果预览</h3><span className="count-badge">{output.name}</span></div><MapViewer datasetId={output.id} title={output.name} /></div>}
+    {output && <div className="result-map-panel"><div className="panel-head"><h3>关联数据预览</h3></div>
+      {previewDatasets.length > 1 && <label className="result-preview-select">选择预览数据
+        <select value={output.id} onChange={(event) => setPreviewSelection({ traceId: result.trace_id, datasetId: event.target.value })}>
+          {previewDatasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name} · {kindLabel(dataset.kind)}</option>)}
+        </select>
+      </label>}
+      <MapViewer datasetId={output.id} title={output.name} />
+    </div>}
     <details className="technical-details"><summary>技术信息与证据</summary>
       <dl className="result-identifiers"><dt>追踪编号</dt><dd>{result.trace_id}</dd><dt>数据集编号</dt><dd>{result.datasets.join("、") || "无"}</dd><dt>结果文件编号</dt><dd>{result.artifacts.join("、") || "无"}</dd></dl>
       {result.evidence.map((evidence, index) => <pre key={index}>{findingText(evidence)}</pre>)}

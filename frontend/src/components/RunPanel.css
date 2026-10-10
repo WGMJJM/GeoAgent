@@ -5,3 +5,5 @@
 .run-trace .trace-box{border:0;padding:14px 0 0}.run-trace .eyebrow{font-size:11px;overflow-wrap:anywhere}
 .result-identifiers{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;font-size:11px;color:var(--text-secondary)}.result-identifiers dd{margin:0;overflow-wrap:anywhere}
 .two-col>div{min-width:0}
+.result-preview-select{display:grid;gap:6px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)}
+.result-preview-select select{width:100%;min-width:0;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font:inherit}
