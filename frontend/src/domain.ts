@@ -11,15 +11,6 @@ export const HUMAN_WAITING_STATUSES: ReadonlySet<RunStatus> = new Set(["WAITING_
 
 export const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set(["CREATED", ...EXECUTION_INFLIGHT_STATUSES, ...HUMAN_WAITING_STATUSES]);
 
-export const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set([
-  "COMPLETED",
-  "PARTIAL_COMPLETED",
-  "FAILED",
-  "INTERRUPTED",
-  "CANCELLED",
-  "BUDGET_EXCEEDED",
-]);
-
 export const RESUMABLE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set(["CANCELLED", "INTERRUPTED", "BUDGET_EXCEEDED"]);
 
 export function isActiveRun(run: Run): boolean {

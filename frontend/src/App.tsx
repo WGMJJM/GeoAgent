@@ -498,25 +498,20 @@ export function App() {
       const response = await stream;
       if (streamCancels.current[targetConversationId] === stream.cancel) delete streamCancels.current[targetConversationId];
       if (targetReplyToRunId) setReplyToRunId((current) => current === targetReplyToRunId ? null : current);
-      if (response.result && response.run) {
-        const messageId = `local-assistant-${response.result.trace_id}`;
-        setRuns((current) => [response.run!, ...current.filter((item) => item.id !== response.run!.id)]);
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: response.result!.summary, kind: "execution", runId: response.run!.id }]);
-        if (activeConversationRef.current === targetConversationId) {
-          setResult(response.result);
-          setEvents(receivedEvents);
-        }
-        background((async () => {
-          // 当前消息已经拥有 result 和本次流式 events；完整 events/artifacts/child runs
-          // 只在用户明确点击“查看运行详情”时通过 loadRun 懒加载。
-          const refreshes: Promise<unknown>[] = [refreshRuns(), refreshConversations()];
-          if (response.result!.datasets.length > 0) refreshes.push(refreshDatasets());
-          await Promise.allSettled(refreshes);
-        })(), targetConversationId);
-      } else {
-        setMessagesForConversation(targetConversationId, (current) => [...current, { id: `local-assistant-${response.request_id}`, role: "assistant", content: response.message, kind: "text" }]);
-        background(refreshConversations(), targetConversationId);
+      const messageId = `local-assistant-${response.result.trace_id}`;
+      setRuns((current) => [response.run, ...current.filter((item) => item.id !== response.run.id)]);
+      setMessagesForConversation(targetConversationId, (current) => [...current, { id: messageId, role: "assistant", content: response.result.summary, kind: "execution", runId: response.run.id }]);
+      if (activeConversationRef.current === targetConversationId) {
+        setResult(response.result);
+        setEvents(receivedEvents);
       }
+      background((async () => {
+        // 当前消息已经拥有 result 和本次流式 events；完整 events/artifacts/child runs
+        // 只在用户明确点击“查看运行详情”时通过 loadRun 懒加载。
+        const refreshes: Promise<unknown>[] = [refreshRuns(), refreshConversations()];
+        if (response.result.datasets.length > 0) refreshes.push(refreshDatasets());
+        await Promise.allSettled(refreshes);
+      })(), targetConversationId);
       // 先让完成消息能从 runs 缓存派生摘要，再移除 live state；React 会在同一轮提交中
       // 从实时进度平滑切换到 CompletedRunSummary。
       setExecution(targetConversationId, undefined);

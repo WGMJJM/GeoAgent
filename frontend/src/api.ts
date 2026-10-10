@@ -23,7 +23,7 @@ export type ConversationMessage = { id: string; conversation_id: string; role: s
 export type ModelProfile = { id: string; label: string; provider: string; base_url?: string | null; model: string; timeout_seconds: number; temperature: number; supports_stream?: boolean; supports_tools?: boolean; supports_json_object?: boolean; supports_json_schema?: boolean; reasoning_efforts: ReasoningEffort[]; default_reasoning_effort?: ReasoningEffort | null; has_api_key: boolean; default: boolean };
 export type ModelStatus = { configured: boolean; source: string; default_profile?: string | null; profiles: ModelProfile[] };
 export type RunDetails = { run: Run; result: Result | null; events: Event[]; artifacts: Artifact[] };
-export type MessageResponse = { request_id: string; route: MessageRoute; message: string; run?: Run | null; result?: Result | null };
+export type MessageResponse = { request_id: string; route: MessageRoute; message: string; run: Run; result: Result };
 export type ApprovalRequest = { id: string; user_id: string; conversation_id?: string | null; task_id?: string | null; source_run_id: string; tool_call_id: string; tool_name: string; argument_fingerprint: string; risk_level: RiskLevel; argument_preview: Record<string, unknown>; reason: string; status: ApprovalStatus; created_at: string; decided_at?: string | null; consumed_at?: string | null; continuation_run_id?: string | null; decision_note?: string | null };
 export type ApprovalActionResponse = { approval: ApprovalRequest; run?: Run | null; result?: Result | null };
 export type DatasetPreview = { dataset_id: string; kind: string; crs?: string | null; source_crs?: string | null; bbox?: number[] | null; feature_count?: number | null; truncated: boolean; geojson?: { type: string; features?: unknown[] } | null; width?: number | null; height?: number | null; bands?: number | null; resolution?: number[] | null; columns: string[]; rows: Record<string, unknown>[]; media_type?: string | null; page_count?: number | null; text?: string | null };
@@ -67,13 +67,11 @@ function websocketUrl(): string {
   return `${protocol}//${window.location.host}/ws`;
 }
 
-async function uploadAttachment(file: File): Promise<Dataset> {
-  const form = new FormData();
-  form.append("file", file);
+async function uploadForm(url: string, form: FormData, failureMessage: string): Promise<Dataset> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
   try {
-    const response = await fetch("/api/v1/attachments", { method: "POST", credentials: "include", body: form, signal: controller.signal });
+    const response = await fetch(url, { method: "POST", credentials: "include", body: form, signal: controller.signal });
     const body = await response.text();
     if (!response.ok) {
       let message = body;
@@ -81,7 +79,7 @@ async function uploadAttachment(file: File): Promise<Dataset> {
         const payload = JSON.parse(body) as { detail?: string };
         message = payload.detail ?? body;
       } catch { /* 非 JSON 错误直接使用响应文本。 */ }
-      throw new ApiError(message || `文件上传失败（${response.status}）`, response.status);
+      throw new ApiError(message || `${failureMessage}（${response.status}）`, response.status);
     }
     const payload = JSON.parse(body) as { dataset: Dataset };
     return payload.dataset;
@@ -90,27 +88,16 @@ async function uploadAttachment(file: File): Promise<Dataset> {
   }
 }
 
-async function uploadShapefile(files: File[]): Promise<Dataset> {
+function uploadAttachment(file: File): Promise<Dataset> {
+  const form = new FormData();
+  form.append("file", file);
+  return uploadForm("/api/v1/attachments", form, "文件上传失败");
+}
+
+function uploadShapefile(files: File[]): Promise<Dataset> {
   const form = new FormData();
   files.forEach((file) => form.append("files", file));
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
-  try {
-    const response = await fetch("/api/v1/attachments/shapefile", { method: "POST", credentials: "include", body: form, signal: controller.signal });
-    const body = await response.text();
-    if (!response.ok) {
-      let message = body;
-      try {
-        const payload = JSON.parse(body) as { detail?: string };
-        message = payload.detail ?? body;
-      } catch { /* 非 JSON 错误直接使用响应文本。 */ }
-      throw new ApiError(message || `Shapefile 上传失败（${response.status}）`, response.status);
-    }
-    const payload = JSON.parse(body) as { dataset: Dataset };
-    return payload.dataset;
-  } finally {
-    window.clearTimeout(timeout);
-  }
+  return uploadForm("/api/v1/attachments/shapefile", form, "Shapefile 上传失败");
 }
 
 function streamMessage(message: string, datasetIds: string[], attachmentIds: string[], onRun: (run: Run) => void, onEvent: (event: Event) => void, onDelta: (content: string, tokenUsage?: TokenUsage) => void, conversationId?: string, modelProfile?: string, onProgress?: () => void, replyToRunId?: string, reasoningEffort?: ReasoningEffort) {
@@ -214,7 +201,6 @@ export const api = {
   retryRun: (runId: string) => request<RetryResponse>(`/api/v1/runs/${runId}/retry`, { method: "POST" }, null),
   modelStatus: () => request<ModelStatus>("/api/v1/models"),
   approvals: (status?: ApprovalStatus, limit = 50) => request<ApprovalRequest[]>(`/api/v1/approvals?limit=${limit}${status ? `&status=${encodeURIComponent(status)}` : ""}`),
-  approval: (approvalId: string) => request<ApprovalRequest>(`/api/v1/approvals/${encodeURIComponent(approvalId)}`),
   approve: (approvalId: string, note?: string) => request<ApprovalActionResponse>(`/api/v1/approvals/${encodeURIComponent(approvalId)}/approve`, { method: "POST", body: JSON.stringify(note ? { note } : {}) }),
   deny: (approvalId: string, note?: string) => request<ApprovalRequest>(`/api/v1/approvals/${encodeURIComponent(approvalId)}/deny`, { method: "POST", body: JSON.stringify(note ? { note } : {}) }),
 };
