@@ -26,7 +26,7 @@ export type RunDetails = { run: Run; result: Result | null; events: Event[]; art
 export type MessageResponse = { request_id: string; route: MessageRoute; message: string; run: Run; result: Result };
 export type ApprovalRequest = { id: string; user_id: string; conversation_id?: string | null; task_id?: string | null; source_run_id: string; tool_call_id: string; tool_name: string; argument_fingerprint: string; risk_level: RiskLevel; argument_preview: Record<string, unknown>; reason: string; status: ApprovalStatus; created_at: string; decided_at?: string | null; consumed_at?: string | null; continuation_run_id?: string | null; decision_note?: string | null };
 export type ApprovalActionResponse = { approval: ApprovalRequest; run?: Run | null; result?: Result | null };
-export type DatasetPreview = { dataset_id: string; kind: string; crs?: string | null; source_crs?: string | null; bbox?: number[] | null; feature_count?: number | null; truncated: boolean; geojson?: { type: string; features?: unknown[] } | null; width?: number | null; height?: number | null; bands?: number | null; resolution?: number[] | null; columns: string[]; rows: Record<string, unknown>[]; media_type?: string | null; page_count?: number | null; text?: string | null; image_data_url?: string | null; render_note?: string | null };
+export type DatasetPreview = { dataset_id: string; kind: string; crs?: string | null; source_crs?: string | null; bbox?: number[] | null; feature_count?: number | null; truncated: boolean; geojson?: { type: string; features?: unknown[] } | null; width?: number | null; height?: number | null; bands?: number | null; resolution?: number[] | null; columns: string[]; rows: Record<string, unknown>[]; media_type?: string | null; page_count?: number | null; text?: string | null; image_data_url?: string | null; render_note?: string | null; supports_encoding?: boolean };
 export type DatasetLineage = { id: string; run_id?: string | null; operation: string; input_dataset_ids: string[]; output_dataset_id: string; tool_call_id?: string | null; parameters: Record<string, unknown>; created_at: string };
 
 export class ApiError extends Error {
@@ -193,7 +193,7 @@ export const api = {
   artifacts: (runId?: string) => request<Artifact[]>(runId ? `/api/v1/artifacts?run_id=${encodeURIComponent(runId)}` : "/api/v1/artifacts"),
   artifactUrl: (artifactId: string) => `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
   datasetUrl: (datasetId: string) => `/api/v1/datasets/${encodeURIComponent(datasetId)}/content`,
-  datasetPreview: (datasetId: string) => request<DatasetPreview>(`/api/v1/datasets/${encodeURIComponent(datasetId)}/preview`),
+  datasetPreview: (datasetId: string, encoding?: string) => request<DatasetPreview>(`/api/v1/datasets/${encodeURIComponent(datasetId)}/preview${encoding ? `?encoding=${encodeURIComponent(encoding)}` : ""}`),
   datasetLineage: (datasetId: string) => request<DatasetLineage[]>(`/api/v1/datasets/${encodeURIComponent(datasetId)}/lineage`),
   streamMessage,
   cancelRun: (runId: string) => request<Run>(`/api/v1/runs/${runId}/cancel`, { method: "POST" }),

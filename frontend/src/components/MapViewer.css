@@ -22,6 +22,7 @@
 .interactive .preview-canvas:active{cursor:grabbing}
 .interactive .preview-feature{cursor:pointer}
 .preview-dialog{padding:0;width:min(1080px,92vw);max-width:none;max-height:90vh;border:1px solid var(--border);border-radius:16px;color:var(--text);background:var(--surface);box-shadow:0 20px 80px #0003;font-size:12px;font-weight:400}
+.preview-dialog-vector{width:min(1280px,94vw)}
 .preview-dialog::backdrop{background:rgba(20,39,34,.48)}
 .preview-dialog-content{padding:18px}
 .preview-dialog header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}
@@ -33,10 +34,43 @@
 .preview-toolbar span{min-width:36px;color:var(--muted);text-align:center}
 .preview-control{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:28px;padding:4px 7px;border:0;border-radius:5px;background:transparent;color:var(--text-secondary);font:12px/1 inherit;cursor:pointer}
 .preview-control:hover{background:var(--surface-hover);color:var(--accent)}
-.preview-attributes{padding:8px 12px;color:var(--muted);font-size:11px}
+.preview-main{min-width:0}
+.preview-vector-layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}
+.preview-encoding{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-bottom:12px;color:var(--text-secondary)}
+.preview-encoding label{display:flex;align-items:center;gap:8px}
+.preview-encoding select{max-width:100%;border:1px solid var(--border);border-radius:6px;background:var(--surface-muted);padding:5px 8px;color:var(--text);font:inherit}
+.preview-encoding small{font-size:11px;color:var(--muted)}
+.preview-attributes{display:flex;flex-direction:column;min-width:0;height:min(58vh,560px);border:1px solid var(--border);border-radius:9px;background:var(--surface);overflow:hidden;color:var(--text);font-size:12px}
+.preview-attributes-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:4px 8px;padding:14px 12px 10px}
+.preview-attributes-head h3{margin:0;font-size:13px;font-weight:600}
+.preview-attributes-head span{color:var(--muted);font-size:11px}
+.preview-field-search{display:flex;align-items:center;margin:0 12px 12px;border:1px solid var(--border);border-radius:7px;background:var(--surface-muted)}
+.preview-field-search input{width:100%;min-width:0;padding:8px;border:0;outline:0;background:transparent;color:var(--text);font:inherit}
+.preview-field-search:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.preview-attribute-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
+.preview-attribute-scroll:focus-visible,.preview-table:focus-visible,.preview-encoding select:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.preview-attribute-table{width:100%;border-collapse:collapse;table-layout:fixed;text-align:left;font-size:12px}
+.preview-attribute-table th,.preview-attribute-table td{padding:10px 12px;border-bottom:1px solid var(--border-muted);vertical-align:top;line-height:1.6}
+.preview-attribute-table th:first-child{width:42%}
+.preview-attribute-table thead th{position:sticky;top:0;background:var(--surface-muted);color:var(--text-secondary);font-weight:500;z-index:1}
+.preview-attribute-table tbody th{font-weight:400;color:var(--text-secondary);overflow-wrap:anywhere}
+.preview-attribute-table tr:hover{background:var(--surface-tinted)}
+.preview-attribute-table tr:last-child>*{border-bottom:0}
+.preview-value{display:block;white-space:pre-wrap;overflow-wrap:break-word}
+.preview-number{white-space:nowrap;font-variant-numeric:tabular-nums;overflow-wrap:normal}
+.preview-empty-value{color:var(--muted)}
+.preview-long-value summary{cursor:pointer;color:var(--accent);line-height:1.6;font-size:11px}
+.preview-long-value div{margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}
+.preview-attribute-empty{margin:auto;padding:28px 18px;text-align:center;color:var(--muted);line-height:1.8}
+.preview-attribute-empty .ui-icon{color:var(--accent-border)}
+.preview-attribute-empty p{margin:10px 0 4px;color:var(--text-secondary)}
+.preview-attribute-note{padding:10px 12px;border-top:1px solid var(--border-muted);font-size:10px;color:var(--muted);line-height:1.6}
 .preview-table{max-height:220px;overflow:auto;overscroll-behavior:contain}
-.preview-table table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}
-.preview-table th,.preview-table td{padding:8px 10px;border-bottom:1px solid var(--border);max-width:300px;overflow-wrap:anywhere}
+.preview-dialog .preview-table{max-height:65vh}
+.preview-table table{width:max-content;min-width:100%;border-collapse:collapse;text-align:left;font-size:12px}
+.preview-table th,.preview-table td{padding:9px 12px;border-bottom:1px solid var(--border);white-space:nowrap;vertical-align:top}
+.preview-table .preview-value,.preview-table .preview-long-value{min-width:64px;max-width:320px}
+.preview-open .preview-table .preview-value:not(.preview-number){max-height:4.8em;overflow:hidden;text-overflow:ellipsis}
 .preview-table th{background:var(--surface-muted);font-weight:500;position:sticky;top:0}
 .chat-preview-grid{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px;margin:12px 0}
 .chat-preview-item{min-width:0;max-width:100%}
@@ -45,4 +79,5 @@ button.message-resource{font-family:inherit;cursor:pointer}
 button.message-resource:hover{border-color:var(--accent-border);color:var(--accent)}
 .dataset-preview-name{border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .dataset-preview-name:hover{color:var(--accent);text-decoration:underline}
-@media(max-width:600px){.preview-dialog{width:96vw}.preview-dialog-content{padding:12px}.preview-dialog .preview-canvas-wrap{height:48vh}.preview-card{width:230px}}
+@media(max-width:900px){.preview-vector-layout{grid-template-columns:minmax(0,1fr);gap:8px}.preview-vector-layout .preview-canvas-wrap{height:min(42vh,360px)}.preview-attributes{height:320px}}
+@media(max-width:600px){.preview-dialog{width:96vw}.preview-dialog-content{padding:12px}.preview-dialog .preview-canvas-wrap{height:40vh}.preview-card{width:230px}.preview-attributes{height:300px}}
