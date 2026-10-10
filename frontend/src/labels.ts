@@ -34,24 +34,24 @@ export const KIND_LABELS: Record<string, string> = {
 };
 
 export const FORMAT_LABELS: Record<string, string> = {
-  geojson: "矢量文件",
-  gpkg: "空间数据库",
-  shp: "矢量文件",
-  tif: "栅格文件",
-  tiff: "栅格文件",
-  csv: "表格文件",
-  tsv: "表格文件",
-  parquet: "表格文件",
+  geojson: "GeoJSON",
+  gpkg: "GeoPackage",
+  shp: "Shapefile",
+  tif: "TIFF",
+  tiff: "TIFF",
+  csv: "CSV 表格",
+  tsv: "TSV 表格",
+  parquet: "Parquet 表格",
   txt: "文本文件",
   md: "Markdown 文档",
   pdf: "PDF 文档",
   doc: "Word 文档",
   docx: "Word 文档",
-  png: "图像文件",
-  jpg: "图像文件",
-  jpeg: "图像文件",
-  bmp: "图像文件",
-  webp: "图像文件",
+  png: "PNG 图像",
+  jpg: "JPEG 图像",
+  jpeg: "JPEG 图像",
+  bmp: "BMP 图像",
+  webp: "WebP 图像",
 };
 
 export const EVENT_LABELS: Record<string, string> = {
