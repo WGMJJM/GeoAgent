@@ -15,8 +15,9 @@
 .preview-canvas{display:block;width:100%;height:100%}
 .preview-feature{fill:var(--accent-soft-hover);stroke:var(--accent);stroke-width:1.2}
 .preview-feature circle{fill:var(--accent)}
-.preview-feature.selected{stroke:var(--warning);fill:var(--warning-soft);stroke-width:2}
-.preview-feature.selected circle{fill:var(--warning)}
+.preview-feature:focus{outline:none}
+.preview-feature.selected,.preview-feature:focus-visible{stroke:var(--warning);fill:var(--warning-soft);stroke-width:2}
+.preview-feature.selected circle,.preview-feature:focus-visible circle{fill:var(--warning)}
 .interactive .preview-canvas{touch-action:none;cursor:grab}
 .interactive .preview-canvas:active{cursor:grabbing}
 .interactive .preview-feature{cursor:pointer}
