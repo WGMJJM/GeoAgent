@@ -344,33 +344,36 @@ class AgentLoop:
             answer_declared = False
             model_messages = prepare_model_messages(messages, model_tools, model_cards, capabilities)
             try:
+                previous_compacted_ids = set(compacted_ids)
+                previous_summarized_ids = set(summarized_ids)
+                stored_result_ids = self.store.list_tool_result_ids(current.id)
+                model_messages = compact_model_input(
+                    model_messages,
+                    run_id=current.id,
+                    compacted_ids=compacted_ids,
+                    summarized_ids=summarized_ids,
+                    preview_tokens=self.settings.tool_result_preview_tokens,
+                    emergency_fraction=self.settings.tool_result_emergency_fraction,
+                    stored_result_ids=stored_result_ids,
+                    count_tokens=model.count_tokens,
+                )
                 if not resume_pending and not restoring_answer:
-                    previous_compacted_ids = set(compacted_ids)
-                    previous_summarized_ids = set(summarized_ids)
                     history_changed = False
-                    stored_result_ids = self.store.list_tool_result_ids(current.id)
-                    model_messages = compact_model_input(
-                        model_messages,
-                        run_id=current.id,
-                        compacted_ids=compacted_ids,
-                        summarized_ids=summarized_ids,
-                        recent_full=self.settings.tool_result_recent_full,
-                        emergency_fraction=self.settings.tool_result_emergency_fraction,
-                        stored_result_ids=stored_result_ids,
-                    )
                     if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
                         model_messages = compact_model_input(
                             prepare_model_messages(messages, model_tools, model_cards, capabilities),
                             run_id=current.id,
                             compacted_ids=compacted_ids,
                             summarized_ids=summarized_ids,
-                            recent_full=self.settings.tool_result_recent_full,
+                            preview_tokens=self.settings.tool_result_preview_tokens,
                             emergency_fraction=self.settings.tool_result_emergency_fraction,
                             emergency=True,
                             stored_result_ids=stored_result_ids,
+                            count_tokens=model.count_tokens,
                         )
                         start_message_id = current.metadata.get("original_request_message_id")
-                        if not current.parent_run_id and isinstance(start_message_id, str):
+                        if (model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens
+                                and not current.parent_run_id and isinstance(start_message_id, str)):
                             changed = await self.context.conversation_memory.compact_history_before(request, model, start_message_id)
                             if changed:
                                 messages, history_count = self._refresh_conversation_prefix(
@@ -386,9 +389,10 @@ class AgentLoop:
                                     run_id=current.id,
                                     compacted_ids=compacted_ids,
                                     summarized_ids=summarized_ids,
-                                    recent_full=self.settings.tool_result_recent_full,
+                                    preview_tokens=self.settings.tool_result_preview_tokens,
                                     emergency_fraction=self.settings.tool_result_emergency_fraction,
                                     stored_result_ids=stored_result_ids,
+                                    count_tokens=model.count_tokens,
                                 )
                     if history_changed or compacted_ids != previous_compacted_ids or summarized_ids != previous_summarized_ids:
                         self._save_checkpoint(
@@ -402,7 +406,7 @@ class AgentLoop:
                             model_tools,
                             input_budget_tokens=self.settings.model_input_tokens,
                             recent_messages=self.settings.emergency_recent_messages,
-                            recent_results=self.settings.tool_result_recent_full,
+                            recent_results=self.settings.emergency_recent_tool_results,
                             count_tokens=model.count_tokens,
                         )
                     local_input_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
@@ -412,7 +416,7 @@ class AgentLoop:
                             result=AgentResult(
                                 agent_id=current.agent_id,
                                 status=AgentResultStatus.BLOCKED,
-                                summary="本轮输入经会话摘要、旧消息与工具结果逐轮精简后仍超过模型上下文预算；当前请求未被截断。",
+                                summary="本轮输入经精简后仍超过模型上下文预算，未继续调用模型；当前请求及本轮明确回读的原文未被截断。",
                                 error="BUDGET_EXCEEDED",
                                 trace_id=current.id,
                             ),
@@ -1133,7 +1137,8 @@ class AgentLoop:
             runtime = json.loads(prepared.messages[-1]["content"])["runtime"]
             included = {(kind, item["id"]) for kind, key in (
                 ("tool_call", "tool_calls"), ("dataset", "datasets"), ("artifact", "artifacts"),
-            ) for item in runtime[key] if item["body_included"]}
+            ) for item in runtime[key] if item["body_included"]
+                and not (item.get("observation") or {}).get("output_truncated")}
             additional = [ref.model_dump(mode="json") for ref in report.needed_evidence
                           if (ref.kind, ref.id) not in included and ref.model_dump(mode="json") not in state["evidence_refs"]]
             if not additional or state["evidence_rounds"] >= self.settings.completion_review_max_evidence_rounds:
