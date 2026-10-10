@@ -45,7 +45,9 @@ from app.run.recovery import retry_after, transient_error
 from app.state import StateStore
 
 from .completion_review import (
+    CRITICAL_REVIEW_PROMPT,
     FEEDBACK_PREFIX,
+    REVIEW_PROMPT,
     CompletionReviewer,
     CompletionReviewError,
     review_feedback_message,
@@ -954,8 +956,9 @@ class AgentLoop:
                     return await self._wait_for_user(current, request, review.feedback)
                 if review.decision == "partial":
                     return await self._finish(current, request=request, result=self._review_partial(current, review))
-            references = [reference.model_dump(mode="json") for item in review.items for reference in item.evidence_refs
-                          if reference.kind != "context"] if review else []
+            references = list({(reference.kind, reference.id): reference.model_dump(mode="json")
+                               for item in review.items for reference in item.evidence_refs
+                               if reference.kind != "context"}.values()) if review else []
             if on_model_delta is not None:
                 await on_model_delta("" if streamed_answer else answer, current.token_usage or TokenUsage())
             return await self._finish(
@@ -1087,19 +1090,38 @@ class AgentLoop:
                     raise
 
     async def _review_answer(self, request, run, model, messages, answer, on_model_delta) -> CompletionReview:
-        prepared = self.completion_reviewer.prepare(request, run, model, messages, answer)
+        # 工具执行可能已关联 Task；审核与恢复都读取当前快照，不沿用执行前的候选状态。
+        self.context.refresh_state(messages, request, run)
+        completion = await self._review_stage(request, run, model, messages, answer, on_model_delta,
+                                              prompt=REVIEW_PROMPT, state_key="review_state", operation_prefix="review:")
+        if completion.decision != "accept":
+            return completion
+        checkpoint = self.store.latest_checkpoint(run.id)
+        evidence_refs = checkpoint.state["review_state"]["evidence_refs"]
+        critical = await self._review_stage(request, run, model, messages, answer, on_model_delta,
+                                            prompt=CRITICAL_REVIEW_PROMPT, state_key="critical_review_state",
+                                            operation_prefix="critical_review:", evidence_refs=evidence_refs)
+        if critical.decision != "accept":
+            return critical
+        # 两关都通过才形成最终报告；保留首轮已核验交付引用，不向第二模型暴露通过结论。
+        return completion.model_copy(update={"items": [*completion.items, *critical.items]})
+
+    async def _review_stage(self, request, run, model, messages, answer, on_model_delta, *,
+                            prompt, state_key, operation_prefix, evidence_refs=()) -> CompletionReview:
+        prepared = self.completion_reviewer.prepare(request, run, model, messages, answer,
+                                                    evidence_refs=evidence_refs, prompt=prompt)
         base = self.completion_reviewer.fingerprint(prepared)
         checkpoint = self.store.latest_checkpoint(run.id)
-        state = checkpoint.state.get("review_state", {}) if checkpoint else {}
+        state = checkpoint.state.get(state_key, {}) if checkpoint else {}
         previous = self.recovery.current(run.id) if self.recovery is not None else {}
-        restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith("review:")
+        restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith(operation_prefix)
         if state.get("base") != base and not (state and restoring):
-            state = {"base": base, "evidence_refs": [], "evidence_rounds": 0}
+            state = {"base": base, "evidence_refs": list(evidence_refs), "evidence_rounds": 0}
         state["base"] = base
         while True:
             if state["evidence_refs"]:
                 prepared = self.completion_reviewer.prepare(
-                    request, run, model, messages, answer, evidence_refs=state["evidence_refs"],
+                    request, run, model, messages, answer, evidence_refs=state["evidence_refs"], prompt=prompt,
                 )
             fingerprint = self.completion_reviewer.fingerprint(prepared)
             if state.get("reviewed_fingerprint") == fingerprint:
@@ -1109,16 +1131,16 @@ class AgentLoop:
                 return self._stop_unchanged_review(report) if report.decision == "continue" else report
             input_tokens = model_input_tokens(prepared.messages, [], model.count_tokens)
             previous = self.recovery.current(run.id) if self.recovery is not None else {}
-            restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith("review:")
+            restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith(operation_prefix)
             run = self.store.get_run(run.id) or run
             if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns and not restoring:
                 raise ValueError("没有足够预算执行完整性检查，未发送模型请求。")
             run = run.model_copy(update={"turn_count": run.turn_count + (not restoring)})
-            operation_id = previous["operation_id"] if restoring else f"review:{run.turn_count}"
+            operation_id = previous["operation_id"] if restoring else f"{operation_prefix}{run.turn_count}"
             self.store.save_run(run)
-            self._save_review_state(run.id, state)
+            self._save_review_state(run.id, state, state_key)
             await self.trace.emit(run.id, EventType.VERIFICATION_STARTED, "正在核对完成情况",
-                                  agent_id=run.agent_id, payload={"scope": "completion_review"})
+                                  agent_id=run.agent_id, payload={"scope": "completion_review", "stage": operation_prefix.rstrip(":")})
             response, _ = await self._request_model(
                 run, model, prepared, input_tokens, on_model_delta, can_stream_answer=False,
                 operation_id=operation_id, timeout_seconds=self.settings.completion_review_timeout_seconds,
@@ -1129,7 +1151,7 @@ class AgentLoop:
             run = await self._record_model_usage(run, response, input_tokens, measured_tokens)
             report = self.completion_reviewer.inspect(response, prepared, request, run)
             state.update(reviewed_fingerprint=fingerprint, report=report.model_dump(mode="json"))
-            self._save_review_state(run.id, state)
+            self._save_review_state(run.id, state, state_key)
             if not report.needed_evidence:
                 return report
             runtime = json.loads(prepared.messages[-1]["content"])["runtime"]
@@ -1143,12 +1165,12 @@ class AgentLoop:
                 return self._stop_unchanged_review(report)
             state["evidence_refs"].extend(additional)
             state["evidence_rounds"] += 1
-            self._save_review_state(run.id, state)
+            self._save_review_state(run.id, state, state_key)
 
-    def _save_review_state(self, run_id, state):
+    def _save_review_state(self, run_id, state, state_key):
         checkpoint = self.store.latest_checkpoint(run_id)
         if checkpoint is not None:
-            self.store.save_checkpoint(checkpoint.model_copy(update={"state": {**checkpoint.state, "review_state": state}}))
+            self.store.save_checkpoint(checkpoint.model_copy(update={"state": {**checkpoint.state, state_key: state}}))
 
     @staticmethod
     def _stop_unchanged_review(report: CompletionReview) -> CompletionReview:
@@ -1478,6 +1500,7 @@ class AgentLoop:
                     "schema_version": RunCheckpointCodec.CURRENT_VERSION,
                     "recovery": previous.state.get("recovery") if previous else None,
                     "review_state": (previous.state.get("review_state") or {}) if previous else {},
+                    "critical_review_state": (previous.state.get("critical_review_state") or {}) if previous else {},
                     "pending_answer": pending_answer,
                     "request": request.model_dump(mode="json"),
                     "protocol_messages": protocol_messages,
