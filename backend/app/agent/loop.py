@@ -1090,6 +1090,10 @@ class AgentLoop:
                     raise
 
     async def _review_answer(self, request, run, model, messages, answer, on_model_delta) -> CompletionReview:
+        if self.settings.completion_review_model_profile:
+            model = self.model_provider(self.settings.completion_review_model_profile)
+            if model is None:
+                raise ValueError("指定的审核模型未配置，不能改用主模型代替。")
         # 工具执行可能已关联 Task；审核与恢复都读取当前快照，不沿用执行前的候选状态。
         self.context.refresh_state(messages, request, run)
         completion = await self._review_stage(request, run, model, messages, answer, on_model_delta,
@@ -1140,7 +1144,9 @@ class AgentLoop:
             self.store.save_run(run)
             self._save_review_state(run.id, state, state_key)
             await self.trace.emit(run.id, EventType.VERIFICATION_STARTED, "正在核对完成情况",
-                                  agent_id=run.agent_id, payload={"scope": "completion_review", "stage": operation_prefix.rstrip(":")})
+                                  agent_id=run.agent_id, payload={"scope": "completion_review", "stage": operation_prefix.rstrip(":"),
+                                  "model_profile": self.settings.completion_review_model_profile or request.model_profile,
+                                  "reasoning_effort": prepared.reasoning_effort})
             response, _ = await self._request_model(
                 run, model, prepared, input_tokens, on_model_delta, can_stream_answer=False,
                 operation_id=operation_id, timeout_seconds=self.settings.completion_review_timeout_seconds,

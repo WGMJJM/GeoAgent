@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.models import ReasoningEffort
 from app.core.tokens import DEFAULT_TOKENIZER_FILE
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +45,8 @@ class Settings(BaseSettings):
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
     max_tokens: int = Field(default=25600, ge=1)
     completion_review_enabled: bool = True
+    completion_review_model_profile: str | None = None
+    completion_review_reasoning_effort: ReasoningEffort | None = None
     completion_review_max_tokens: int = Field(default=3200, ge=1)
     completion_review_timeout_seconds: float = Field(default=60, gt=0)
     completion_review_max_evidence_rounds: int = Field(default=1, ge=0)

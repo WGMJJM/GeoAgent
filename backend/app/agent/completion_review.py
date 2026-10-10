@@ -147,13 +147,13 @@ class CompletionReviewer:
             ],
             max_tokens=min(self.settings.max_tokens, self.settings.completion_review_max_tokens),
             response_format={"type": "json_object"} if model.supports_json_object else None,
-            reasoning_effort=model.minimum_reasoning_effort,
+            reasoning_effort=self.settings.completion_review_reasoning_effort or model.minimum_reasoning_effort,
             extra_body=model.completion_review_extra_body,
         )
 
-    @staticmethod
-    def fingerprint(prepared: ModelRequest) -> str:
-        return _digest(prepared.messages)
+    def fingerprint(self, prepared: ModelRequest) -> str:
+        return _digest({"model_profile": self.settings.completion_review_model_profile,
+                        "request": prepared.model_dump(mode="json")})
 
     def _retrieved_evidence(self, request, run, messages):
         """识别内部回读协议，但正文只信任同会话数据库记录。"""
