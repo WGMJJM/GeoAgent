@@ -1402,6 +1402,15 @@ class StateStore:
         call = ToolCall(id=row[0], run_id=row[1], name=row[2], arguments=json.loads(row[3]), attempt=row[5])
         return call, self._model(ToolResult, row[4]) if row[4] else None
 
+    def list_tool_result_ids(self, run_id: str) -> set[str]:
+        """仅列出当前 Run 已落库结果的 ID，供模型视图生成精确回读引用。"""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id FROM tool_calls WHERE run_id=? AND result_json IS NOT NULL",
+                (run_id,),
+            ).fetchall()
+        return {row[0] for row in rows}
+
     def list_tool_results_for_conversation(
         self,
         conversation_id: str,
