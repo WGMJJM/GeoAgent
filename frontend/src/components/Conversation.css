@@ -1,0 +1,5 @@
+.product-chat .composer{position:relative}
+.chat-latest-button{position:absolute;bottom:calc(100% + 12px);left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:5px;white-space:nowrap;padding:7px 12px;border:1px solid var(--border);border-radius:20px;background:var(--surface);color:var(--accent);box-shadow:0 3px 12px rgba(28,56,47,.1);font:inherit;font-size:12px;cursor:pointer}
+.chat-latest-button:hover{background:var(--surface-hover)}
+.chat-latest-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.reply-copy{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-secondary)}
