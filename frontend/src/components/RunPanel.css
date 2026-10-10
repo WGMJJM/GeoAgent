@@ -1,0 +1,7 @@
+.run-result-details .result-head{align-items:center;gap:12px;padding-bottom:12px}.run-result-details .result-head h2{font-size:18px;margin:0}
+.run-result-details{min-width:0}.run-result-details>section{margin-top:18px}.run-result-details h3{font-size:13px;font-weight:600;color:var(--text-secondary)}
+.run-result-details .markdown-content{font-size:13px}.run-result-details .markdown-content h2{font-size:1.2em}
+.run-result-details .dataset-card-actions{margin-top:8px}.result-warnings .warning{font-size:12px;line-height:1.65}
+.run-trace .trace-box{border:0;padding:14px 0 0}.run-trace .eyebrow{font-size:11px;overflow-wrap:anywhere}
+.result-identifiers{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;font-size:11px;color:var(--text-secondary)}.result-identifiers dd{margin:0;overflow-wrap:anywhere}
+.two-col>div{min-width:0}

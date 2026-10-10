@@ -5,8 +5,13 @@ import { agentLabel, displayEventMessage, eventLabel, findingText, kindLabel, st
 import { LineagePanel } from "./LineagePanel";
 import { DatasetPreviewButton, MapViewer } from "./MapViewer";
 import { Icon } from "./Icon";
+import { MarkdownContent } from "./MarkdownContent";
+import { DatasetActions } from "./DatasetActions";
+import "./RunPanel.css";
 
 type RunPanelProps = {
+  selectedDatasetIds?: string[];
+  onUseDataset?: (id: string) => void;
   runs: Run[];
   selectedRunId: string | null;
   events: Event[];
@@ -22,7 +27,7 @@ type RunPanelProps = {
   busy: boolean;
 };
 
-export function RunPanel({ runs, selectedRunId, events, result = null, datasets = [], artifacts = [], onSelect, onCancel, onResume, onRetry, onDelete, onDeleteMany, busy }: RunPanelProps) {
+export function RunPanel({ selectedDatasetIds = [], onUseDataset, runs, selectedRunId, events, result = null, datasets = [], artifacts = [], onSelect, onCancel, onResume, onRetry, onDelete, onDeleteMany, busy }: RunPanelProps) {
   const visibleEvents = events.filter((event) => !["completion_review", "model_protocol", "task_association"].includes(String(event.payload.scope)));
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [pendingRetryId, setPendingRetryId] = useState<string | null>(null);
@@ -65,13 +70,39 @@ export function RunPanel({ runs, selectedRunId, events, result = null, datasets 
     </div>;
   };
 
-  return <section className="panel two-col"><div><div className="panel-head run-panel-head"><div><span className="eyebrow">当前对话运行</span><h2>运行记录</h2></div><div className="run-bulk-actions"><label className="run-select-all"><input type="checkbox" checked={allSelected} disabled={busy || deletableIds.length === 0} onChange={toggleAll} />全选可删除记录</label>{selectedIds.length > 0 && <><span className="run-selected-count">已选 {selectedIds.length} 条</span>{bulkDeletePending ? <div className="run-bulk-confirm"><span>删除已选记录？</span><button type="button" className="conversation-confirm-delete" onClick={() => void confirmBulkDelete()}>确认删除</button><button type="button" className="conversation-confirm-cancel" onClick={() => setBulkDeletePending(false)}>取消</button></div> : <button type="button" className="small-action danger" disabled={busy} onClick={() => setBulkDeletePending(true)}>删除已选</button>}</>}</div></div>{runs.length === 0 ? <Empty text="当前对话还没有运行记录。" /> : <div className="run-list">{groups.map(([taskId, taskRuns]) => { const commandGroup = taskId === "__command__"; const mains = taskRuns.filter(isMainRun); const linkedIds = new Set(mains.flatMap((main) => [main.id, ...childRunsOf(main.id, taskRuns).map((child) => child.id)])); const orphanRuns = taskRuns.filter((run) => !linkedIds.has(run.id)); return <section className="run-task-group" key={taskId}><div className="run-task-heading"><b>{commandGroup ? "查询 / 命令运行" : `任务 ${taskId}`}</b>{!commandGroup && <small>{runTitle(mains[0] ?? taskRuns[0])}</small>}</div>{mains.map((main) => <div key={main.id}>{renderRun(main)}{childRunsOf(main.id, taskRuns).map((child) => renderRun(child, true))}</div>)}{orphanRuns.map((run) => renderRun(run, !isMainRun(run)))}</section>; })}</div>}</div><div className="run-detail-stack"><div className="trace-box"><div className="eyebrow">运行追踪 · {selectedRunId ?? "未选择"} · {visibleEvents.length} 个事件</div>{visibleEvents.length === 0 ? <Empty text="选择一个运行记录查看事件。" /> : visibleEvents.map((event) => { const eventRun = eventRuns(event, runs); const eventAgent = eventRun ? (isMainRun(eventRun) ? "主智能体" : `子智能体 · ${runTitle(eventRun)}`) : (event.agent_id === "main" ? "主智能体" : "子智能体"); return <div className="event" key={event.id}><span>{String(event.sequence).padStart(2, "0")}</span><div><b>{eventAgent} · {eventLabel(event.event_type)}</b><small>{displayEventMessage(event.message)}</small></div></div>; })}</div><RunResultDetails result={result} datasets={datasets} artifacts={artifacts} events={visibleEvents} /></div></section>;
+  return <section className="panel two-col"><div><div className="panel-head run-panel-head"><div><span className="eyebrow">当前对话运行</span><h2>运行记录</h2></div><div className="run-bulk-actions"><label className="run-select-all"><input type="checkbox" checked={allSelected} disabled={busy || deletableIds.length === 0} onChange={toggleAll} />全选可删除记录</label>{selectedIds.length > 0 && <><span className="run-selected-count">已选 {selectedIds.length} 条</span>{bulkDeletePending ? <div className="run-bulk-confirm"><span>删除已选记录？</span><button type="button" className="conversation-confirm-delete" onClick={() => void confirmBulkDelete()}>确认删除</button><button type="button" className="conversation-confirm-cancel" onClick={() => setBulkDeletePending(false)}>取消</button></div> : <button type="button" className="small-action danger" disabled={busy} onClick={() => setBulkDeletePending(true)}>删除已选</button>}</>}</div></div>{runs.length === 0 ? <Empty text="当前对话还没有运行记录。" /> : <div className="run-list">{groups.map(([taskId, taskRuns]) => { const commandGroup = taskId === "__command__"; const mains = taskRuns.filter(isMainRun); const linkedIds = new Set(mains.flatMap((main) => [main.id, ...childRunsOf(main.id, taskRuns).map((child) => child.id)])); const orphanRuns = taskRuns.filter((run) => !linkedIds.has(run.id)); return <section className="run-task-group" key={taskId}><div className="run-task-heading"><b>{commandGroup ? "查询 / 命令运行" : `任务 ${taskId}`}</b>{!commandGroup && <small>{runTitle(mains[0] ?? taskRuns[0])}</small>}</div>{mains.map((main) => <div key={main.id}>{renderRun(main)}{childRunsOf(main.id, taskRuns).map((child) => renderRun(child, true))}</div>)}{orphanRuns.map((run) => renderRun(run, !isMainRun(run)))}</section>; })}</div>}</div><div className="run-detail-stack"><RunResultDetails result={result} datasets={datasets} artifacts={artifacts} selectedDatasetIds={selectedDatasetIds} onUseDataset={onUseDataset} /><details className="technical-details run-trace"><summary>执行记录 · {visibleEvents.length} 个事件</summary><div className="trace-box"><div className="eyebrow">运行追踪 · {selectedRunId ?? "未选择"} · {visibleEvents.length} 个事件</div>{visibleEvents.length === 0 ? <Empty text="选择一个运行记录查看事件。" /> : visibleEvents.map((event) => { const eventRun = eventRuns(event, runs); const eventAgent = eventRun ? (isMainRun(eventRun) ? "主智能体" : `子智能体 · ${runTitle(eventRun)}`) : (event.agent_id === "main" ? "主智能体" : "子智能体"); return <div className="event" key={event.id}><span>{String(event.sequence).padStart(2, "0")}</span><div><b>{eventAgent} · {eventLabel(event.event_type)}</b><small>{displayEventMessage(event.message)}</small></div></div>; })}</div></details></div></section>;
 }
 
-function RunResultDetails({ result, datasets, artifacts, events }: { result: Result | null; datasets: Dataset[]; artifacts: Artifact[]; events: Event[] }) {
-  const output = result?.datasets.map((id) => datasets.find((dataset) => dataset.id === id)).find((dataset) => dataset?.kind === "VECTOR" || dataset?.kind === "RASTER" || dataset?.kind === "IMAGE");
+function RunResultDetails({ result, datasets, artifacts, selectedDatasetIds, onUseDataset }: {
+  result: Result | null; datasets: Dataset[]; artifacts: Artifact[];
+  selectedDatasetIds: string[]; onUseDataset?: (id: string) => void;
+}) {
+  const output = result?.datasets.map((id) => datasets.find((dataset) => dataset.id === id)).find((dataset) => ["VECTOR", "RASTER", "IMAGE"].includes(dataset?.kind ?? ""));
   const names = Object.fromEntries(datasets.map((dataset) => [dataset.id, dataset.name]));
-  return <section className="run-result-details">{!result ? <Empty text="选择一次运行后查看结果、证据和输出数据。" /> : <><div className="result-head"><div><span className={`pill ${result.status.toLowerCase()}`}>{statusLabel(result.status)}</span><h2>{result.summary}</h2></div><code>{result.trace_id}</code></div>{result.error && <div className="result-error"><b>错误</b><span>{result.error}</span></div>}<div className="result-columns"><div><h3>分析发现</h3>{result.findings.length === 0 ? <Empty text="没有结构化发现。" /> : result.findings.map((finding, index) => <pre key={index}>{findingText(finding)}</pre>)}<h3>关联数据集</h3>{result.datasets.length === 0 ? <p className="muted-text">本次运行没有关联数据集。</p> : <div className="dataset-result-list">{result.datasets.map((datasetId) => { const dataset = datasets.find((item) => item.id === datasetId); return <div className="dataset-result-item" key={datasetId}><b>{dataset ? <DatasetPreviewButton datasetId={dataset.id} title={dataset.name} className="dataset-preview-name">{dataset.name}</DatasetPreviewButton> : datasetId}</b><small>{dataset?.kind ? kindLabel(dataset.kind) : "数据集"} · {datasetId}</small></div>; })}</div>}<h3>结果文件</h3>{result.artifacts.length === 0 ? <p className="muted-text">本次运行没有产物。</p> : <div className="artifact-list">{result.artifacts.map((artifactId) => { const artifact = artifacts.find((item) => item.id === artifactId); return <a className="artifact-link" href={api.artifactUrl(artifactId)} target="_blank" rel="noreferrer" key={artifactId}>{artifact?.name ?? artifactId} <span><Icon name="external" size={12} /></span></a>; })}</div>}{result.evidence.length > 0 && <><h3>证据</h3>{result.evidence.map((evidence, index) => <pre key={index}>{findingText(evidence)}</pre>)}</>}</div><div><h3>执行情况</h3><div className="metric"><b>{events.length}</b><span>追踪事件</span></div><div className="metric"><b>{result.datasets.length}</b><span>涉及数据集</span></div><div className="metric"><b>{result.artifacts.length}</b><span>结果文件</span></div>{result.warnings.length > 0 && <><h3>警告</h3>{result.warnings.map((warning) => <p className="warning" key={warning}>{warning}</p>)}</>}</div></div>{output && <div className="result-map-panel"><div className="panel-head"><div><span className="eyebrow">GIS 结果</span><h3>地图与来源</h3></div><span className="count-badge">{output.name}</span></div><MapViewer datasetId={output.id} title={output.name} /><LineagePanel datasetId={output.id} datasetNames={names} /></div>}</>}</section>;
+  if (!result) return <section className="run-result-details"><Empty text="选择一次运行后查看结果、证据和输出数据。" /></section>;
+  return <section className="run-result-details">
+    <div className="result-head"><h2>运行结果</h2><span className={`pill ${result.status.toLowerCase()}`}>{statusLabel(result.status)}</span></div>
+    <MarkdownContent content={result.summary} />
+    {result.error && <div className="result-error"><b>未完成原因</b><span>{result.error}</span></div>}
+    {result.warnings.length > 0 && <section className="result-warnings" aria-label="需要注意">{result.warnings.map((warning, index) => <p className="warning" key={index}>{warning}</p>)}</section>}
+    {result.findings.length > 0 && <section><h3>分析发现</h3>{result.findings.map((finding, index) => <MarkdownContent key={index} content={findingText(finding)} />)}</section>}
+    {result.datasets.length > 0 && <section><h3>关联数据</h3><div className="dataset-result-list">{result.datasets.map((datasetId) => {
+      const dataset = datasets.find((item) => item.id === datasetId);
+      return <div className="dataset-result-item" key={datasetId}>
+        {dataset ? <><b><DatasetPreviewButton datasetId={dataset.id} title={dataset.name} className="dataset-preview-name">{dataset.name}</DatasetPreviewButton></b><small>{kindLabel(dataset.kind)}</small><DatasetActions dataset={dataset} selected={selectedDatasetIds.includes(datasetId)} onUse={onUseDataset} /></> : <span>该关联数据当前不可用</span>}
+      </div>;
+    })}</div></section>}
+    {result.artifacts.length > 0 && <section><h3>结果文件</h3><div className="artifact-list">{result.artifacts.map((artifactId) => {
+      const artifact = artifacts.find((item) => item.id === artifactId);
+      return <a className="artifact-link" href={api.artifactUrl(artifactId)} download target="_blank" rel="noreferrer" key={artifactId}>{artifact?.name ?? "结果文件"} <Icon name="external" size={12} /></a>;
+    })}</div></section>}
+    {output && <div className="result-map-panel"><div className="panel-head"><h3>结果预览</h3><span className="count-badge">{output.name}</span></div><MapViewer datasetId={output.id} title={output.name} /></div>}
+    <details className="technical-details"><summary>技术信息与证据</summary>
+      <dl className="result-identifiers"><dt>追踪编号</dt><dd>{result.trace_id}</dd><dt>数据集编号</dt><dd>{result.datasets.join("、") || "无"}</dd><dt>结果文件编号</dt><dd>{result.artifacts.join("、") || "无"}</dd></dl>
+      {result.evidence.map((evidence, index) => <pre key={index}>{findingText(evidence)}</pre>)}
+      {output && <LineagePanel datasetId={output.id} datasetNames={names} />}
+    </details>
+  </section>;
 }
 
 function Empty({ text }: { text: string }) {
