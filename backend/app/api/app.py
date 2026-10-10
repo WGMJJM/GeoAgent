@@ -20,6 +20,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.background import BackgroundTask
 
 from app.application import Application
 from app.core.models import (
@@ -33,6 +34,7 @@ from app.core.models import (
     new_id,
 )
 from app.gis.preview import DatasetPreview
+from app.gis.download import package_shapefile
 from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import record_approval_decision
 from app.run.predicates import is_cancellable_run, is_resumable_run
@@ -246,6 +248,25 @@ def create_app(application: Application | None = None) -> FastAPI:
         if geoagent.registry.get(dataset_id, user_id=current_user.id) is None:
             raise HTTPException(status_code=404, detail="dataset not found")
         return geoagent.store.list_lineage(dataset_id)
+
+    @api.get("/api/v1/datasets/{dataset_id}/content")
+    def dataset_content(dataset_id: str, current_user: User = Depends(get_current_user)):
+        dataset = geoagent.registry.get(dataset_id, user_id=current_user.id)
+        if dataset is None:
+            raise HTTPException(status_code=404, detail="dataset not found")
+        workspace = geoagent.workspace.for_user(current_user.id)
+        try:
+            path = workspace.resolve(dataset.path, allow_missing=False)
+            if not path.is_file():
+                raise ValueError("暂不支持直接下载目录或数据库图层，请先导出为文件")
+            if path.suffix.casefold() == ".shp":
+                archive = package_shapefile(path, workspace)
+                return FileResponse(archive, media_type="application/zip", filename=f"{path.stem}.zip", background=BackgroundTask(archive.unlink))
+            return FileResponse(path, filename=path.name)
+        except (FileNotFoundError, PermissionError) as exc:
+            raise HTTPException(status_code=404, detail="dataset file not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @api.get("/api/v1/datasets/{dataset_id}/preview", response_model=DatasetPreview)
     async def dataset_preview(dataset_id: str, current_user: User = Depends(get_current_user)) -> DatasetPreview:
