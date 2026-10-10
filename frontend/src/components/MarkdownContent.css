@@ -1,0 +1,16 @@
+.markdown-content{min-width:0;max-width:100%;white-space:normal;line-height:1.75;overflow-wrap:anywhere}
+.markdown-content>:first-child{margin-top:0}.markdown-content>:last-child{margin-bottom:0}
+.markdown-content p{margin:.65em 0}.markdown-content h1,.markdown-content h2,.markdown-content h3,.markdown-content h4{line-height:1.45;margin:1.1em 0 .5em;font-weight:650;color:var(--text)}
+.markdown-content h1{font-size:1.4em}.markdown-content h2{font-size:1.25em}.markdown-content h3{font-size:1.1em}
+.markdown-content ul,.markdown-content ol{padding-left:1.6em;margin:.6em 0}.markdown-content li+li{margin-top:.25em}
+.markdown-content blockquote{margin:.8em 0;padding:.15em 1em;border-left:3px solid var(--accent-border);color:var(--text-secondary);background:var(--surface-muted)}
+.markdown-content a{color:var(--accent);text-underline-offset:3px}.markdown-content hr{border:0;border-top:1px solid var(--border);margin:1em 0}
+.markdown-content :not(pre)>code{background:var(--surface-muted);border-radius:4px;padding:.12em .35em;font-size:.9em;overflow-wrap:anywhere}
+.markdown-table{max-width:100%;overflow-x:auto;margin:.85em 0;border:1px solid var(--border);border-radius:8px}
+.markdown-table table{border-collapse:collapse;min-width:100%;font-size:.93em}.markdown-table th,.markdown-table td{padding:8px 12px;border-bottom:1px solid var(--border-muted);text-align:left;min-width:90px}
+.markdown-table th{font-weight:600;background:var(--surface-muted)}.markdown-table tr:last-child td{border-bottom:0}
+.markdown-code{min-width:0;max-width:100%;margin:.8em 0;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface-muted)}
+.markdown-code-toolbar{display:flex;align-items:center;justify-content:space-between;padding:5px 12px;font-size:11px;color:var(--text-secondary);border-bottom:1px solid var(--border)}
+.markdown-code-toolbar button{border:0;background:transparent;color:var(--accent);font:inherit;cursor:pointer;padding:4px}
+.markdown-content .markdown-code pre{margin:0;padding:12px;overflow-x:auto;white-space:pre;font:12px/1.65 ui-monospace,Consolas,monospace;max-width:100%;background:transparent}
+.chat-message.assistant,.chat-message.assistant .chat-bubble{min-width:0;max-width:100%}

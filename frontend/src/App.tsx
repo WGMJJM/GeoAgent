@@ -6,6 +6,7 @@ import { Icon, IconName } from "./components/Icon";
 import { LineagePanel } from "./components/LineagePanel";
 import { DatasetPreviewButton, MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
+import { MarkdownContent } from "./components/MarkdownContent";
 import { formatLabel, kindLabel, statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
@@ -41,14 +42,6 @@ function fileExtension(filename: string): string {
 function shapefileStem(filename: string): string {
   const separator = filename.lastIndexOf(".");
   return (separator >= 0 ? filename.slice(0, separator) : filename).toLowerCase();
-}
-
-function assistantText(value: string): string {
-  return value
-    .replace(/\*\*(.*?)\*\*/gs, "$1")
-    .replace(/__(.*?)__/gs, "$1")
-    .replace(/^\s*[*-]\s+/gm, "• ")
-    .replace(/\*\*/g, "");
 }
 
 function errorMessage(error: unknown): string {
@@ -847,7 +840,7 @@ export function ProductChat({
       {messages.map((item) => <ChatBubble item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
         <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={liveTokenUsage ?? runs.find((run) => run.id === activeRunId)?.token_usage} streaming={Boolean(streamingReply)} smoothTokenUsage /></div>
-        {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble">{assistantText(streamingReply)}<span className="typing-cursor" aria-hidden="true" /></div></div>}
+        {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble"><MarkdownContent content={streamingReply} /><span className="typing-cursor" aria-hidden="true" /></div></div>}
       </>}
     </div>}
     <div className="composer">
@@ -864,7 +857,7 @@ export function ChatBubble({ item, runs = [], datasets = [], onShowRun, onReplyT
   const resources = (item.datasetIds ?? []).map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset));
   const resultDatasets = item.role === "assistant" ? [...new Set(item.datasetIds ?? run?.metadata.result?.datasets ?? [])]
     .map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset)) : [];
-  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <DatasetPreviewButton className="message-resource" key={dataset.id} datasetId={dataset.id} title={dataset.name}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></DatasetPreviewButton>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? assistantText(item.content) : item.content}</div>{resultDatasets.length > 0 && <div className="chat-preview-grid">{resultDatasets.map((dataset) => <div className="chat-preview-item" key={dataset.id}><small>{dataset.created_by_run_id === run?.id ? "本次生成" : "关联数据"}</small><MapViewer datasetId={dataset.id} title={dataset.name} compact /></div>)}</div>}{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
+  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <DatasetPreviewButton className="message-resource" key={dataset.id} datasetId={dataset.id} title={dataset.name}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></DatasetPreviewButton>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? <MarkdownContent content={item.content} /> : item.content}</div>{resultDatasets.length > 0 && <div className="chat-preview-grid">{resultDatasets.map((dataset) => <div className="chat-preview-item" key={dataset.id}><small>{dataset.created_by_run_id === run?.id ? "本次生成" : "关联数据"}</small><MapViewer datasetId={dataset.id} title={dataset.name} compact /></div>)}</div>}{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
 }
 
 export function CompletedRunSummary({ run }: { run: Run }) {
