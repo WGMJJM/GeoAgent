@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     completion_review_enabled: bool = True
     completion_review_model_profile: str | None = None
     completion_review_reasoning_effort: ReasoningEffort | None = None
-    completion_review_max_tokens: int = Field(default=3200, ge=1)
+    completion_review_max_tokens: int = Field(default=6400, ge=1)
     completion_review_timeout_seconds: float = Field(default=60, gt=0)
     completion_review_max_evidence_rounds: int = Field(default=1, ge=0)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
