@@ -1,0 +1,17 @@
+.dataset-card-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.dataset-card-actions .selected-action:disabled{opacity:1;cursor:default}
+.dataset-download{text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+.dataset-properties-dialog{color:var(--text);width:min(1100px,calc(100vw - 32px));max-height:90vh;margin:auto}
+.dataset-properties-dialog::backdrop{background:rgba(28,56,47,.35)}
+.technical-details{margin:12px 0;border-top:1px solid var(--border-muted);padding-top:10px;min-width:0}
+.technical-details>summary{cursor:pointer;color:var(--text-secondary);font-size:12px;line-height:1.6}
+.technical-details pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;background:var(--surface-muted);padding:12px;border-radius:6px;font-size:12px}
+.chat-preview-item>.dataset-card-actions{padding:7px 0 2px}
+.dataset-toolbar{display:flex;flex-wrap:wrap;gap:10px;margin:18px 0;align-items:center}
+.dataset-toolbar input,.dataset-toolbar select{border:1px solid var(--border);border-radius:7px;padding:8px 10px;background:var(--surface);color:var(--text);font:inherit;font-size:12px;min-width:0}
+.dataset-toolbar input{flex:1;min-width:160px}.dataset-scope{display:flex;gap:4px}
+.dataset-scope button{border:0;border-radius:6px;padding:8px 10px;font:inherit;font-size:12px;background:transparent;color:var(--text-secondary);cursor:pointer}
+.dataset-scope button[aria-pressed=true]{background:var(--accent-soft);color:var(--accent)}
+.dataset-grid .dataset-card{flex-direction:column;align-items:stretch;gap:10px}.dataset-grid .dataset-name{white-space:normal;overflow-wrap:anywhere}
+.dataset-grid .dataset-tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.dataset-grid .dataset-tags span{display:inline-block;margin:0;color:var(--text-secondary);background:var(--surface-muted);border-radius:4px;padding:3px 6px;font-size:11px}
+.dataset-grid .dataset-tags small{margin:0}.dataset-filter-empty{padding:28px;text-align:center;color:var(--text-secondary);font-size:13px;background:var(--surface-muted);border-radius:8px}

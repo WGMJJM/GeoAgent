@@ -3,11 +3,12 @@ import { api, ApiError, ApprovalRequest, Artifact, Conversation, Dataset, Event,
 import { childRunsOf, isExecutionInflight, isMainRun, runDurationMs, runTitle, runsForConversation } from "./domain";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { Icon, IconName } from "./components/Icon";
-import { LineagePanel } from "./components/LineagePanel";
+import { DatasetActions } from "./components/DatasetActions";
+import { DatasetPanel } from "./components/DatasetPanel";
 import { DatasetPreviewButton, MapViewer } from "./components/MapViewer";
 import { RunPanel } from "./components/RunPanel";
 import { MarkdownContent } from "./components/MarkdownContent";
-import { formatLabel, kindLabel, statusLabel } from "./labels";
+import { statusLabel } from "./labels";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[] };
@@ -43,6 +44,7 @@ function shapefileStem(filename: string): string {
   const separator = filename.lastIndexOf(".");
   return (separator >= 0 ? filename.slice(0, separator) : filename).toLowerCase();
 }
+
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") return "请求超时，请稍后重试。";
@@ -110,6 +112,14 @@ export function App() {
   const selectedDatasetIds = currentDraft.selectedDatasetIds;
   const uploadedFiles = currentDraft.uploadedFiles;
   const conversationRuns = useMemo(() => runsForConversation(conversationId, runs), [conversationId, runs]);
+  const conversationDatasetIds = useMemo(() => {
+    const runIds = new Set(conversationRuns.map((run) => run.id));
+    return new Set([
+      ...messages.flatMap((item) => item.datasetIds ?? []),
+      ...conversationRuns.flatMap((run) => run.metadata.result?.datasets ?? []),
+      ...datasets.filter((dataset) => dataset.created_by_run_id && runIds.has(dataset.created_by_run_id)).map((dataset) => dataset.id),
+    ]);
+  }, [messages, conversationRuns, datasets]);
   const agentCount = useMemo(() => {
     return conversationRuns.filter(isExecutionInflight).length;
   }, [conversationRuns]);
@@ -139,6 +149,9 @@ export function App() {
       const draft = current[conversationId] ?? emptyDraft();
       return { ...current, [conversationId]: { ...draft, selectedDatasetIds: typeof update === "function" ? update(draft.selectedDatasetIds) : update } };
     });
+  };
+  const useDataset = (id: string) => {
+    setSelectedDatasetIds((current) => current.includes(id) ? current : [...current, id]);
   };
   const setUploadedFiles = (update: Dataset[] | ((current: Dataset[]) => Dataset[])) => {
     setDraftsByConversation((current) => {
@@ -708,8 +721,8 @@ export function App() {
     <main className="main">
        {view !== "chat" && <header className="topbar"><div><h1>{view === "datasets" ? "数据集登记" : view === "agents" ? "智能体活动" : view === "runs" ? "运行与追踪" : "设置"}</h1></div><div className="topbar-actions"><button className="ghost" onClick={() => setView("chat")}>返回对话</button><button className="close-view" type="button" aria-label="关闭当前页面" title="关闭" onClick={() => setView("chat")}><Icon name="close" size={18} /></button><button className="ghost" onClick={() => void refreshAll()}><Icon name="refresh" size={13} /> 刷新</button></div></header>}
       {error && <div className="error">{error}</div>}
-       {view === "chat" && <ProductChat key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} onReasoningChange={setSelectedReasoningEffort} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
-      {view === "datasets" && <DatasetPanel datasets={datasets} selectedDatasetIds={selectedDatasetIds} onToggleRequestDataset={(id) => setSelectedDatasetIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id])} onRegister={registerDataset} busy={false} />}
+       {view === "chat" && <ProductChat onUseDataset={useDataset} key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} onReasoningChange={setSelectedReasoningEffort} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
+      {view === "datasets" && <DatasetPanel datasets={datasets} conversationDatasetIds={conversationDatasetIds} selectedDatasetIds={selectedDatasetIds} onUse={useDataset} onRemove={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} onRegister={registerDataset} busy={false} />}
       {view === "agents" && <AgentPanel runs={conversationRuns} />}
        {view === "runs" && <RunPanel runs={conversationRuns} selectedRunId={selectedRunId} events={events} result={result} datasets={datasets} artifacts={artifacts} onSelect={loadRun} onCancel={cancelRun} onResume={resumeRun} onRetry={retryRun} onDelete={deleteRun} onDeleteMany={deleteRunRecords} busy={resumingRunId !== null} />}
       {view === "settings" && <SettingsPanel currentUser={currentUser} onSaved={setCurrentUser} profile={userProfile} onProfileSaved={setUserProfile} modelStatus={modelStatus} />}
@@ -739,6 +752,7 @@ type ProductChatProps = {
   datasets: Dataset[];
   selectedDatasetIds: string[];
   onRemoveDataset: (id: string) => void;
+  onUseDataset?: (id: string) => void;
   uploadedFiles: Dataset[];
   uploading: boolean;
   onUpload: (files: FileList | null) => Promise<void>;
@@ -806,7 +820,7 @@ function ModelReasoningPicker({ profiles, selectedModelProfile, selectedReasonin
 }
 
 export function ProductChat({
-  message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
+  message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, onUseDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
   const historyRef = useRef<HTMLDivElement>(null);
@@ -834,10 +848,21 @@ export function ProductChat({
     if (followsLatestRef.current) history.scrollTop = history.scrollHeight;
   }, [busy, events, messages, runs, streamingReply]);
 
+  useEffect(() => {
+    const history = historyRef.current;
+    if (!history) return;
+    // 缩略图异步加载会改变消息高度；仅在用户仍跟随最新内容时滚到底部。
+    const observer = new ResizeObserver(() => {
+      if (followsLatestRef.current) history.scrollTop = history.scrollHeight;
+    });
+    for (const message of history.children) observer.observe(message);
+    return () => observer.disconnect();
+  }, [busy, messages]);
+
   return <section className="chat-layout product-chat">
     {approvals.length > 0 && <div className="approval-stack">{approvals.map((approval) => <ApprovalCard key={approval.id} approval={approval} busy={approvalBusyId === approval.id} onApprove={onApprove} onDeny={onDeny} />)}</div>}
     {(messages.length > 0 || busy) && <div className="chat-history" aria-live="polite" ref={historyRef} onScroll={updateScrollPreference}>
-      {messages.map((item) => <ChatBubble item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
+      {messages.map((item) => <ChatBubble selectedDatasetIds={selectedDatasetIds} onUseDataset={onUseDataset} item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
       {busy && <>
         <div className="live-execution-row"><LiveExecutionStatus events={events} durationMs={elapsedMs} phase={activeRunId ? "running" : "connecting"} tokenUsage={liveTokenUsage ?? runs.find((run) => run.id === activeRunId)?.token_usage} streaming={Boolean(streamingReply)} smoothTokenUsage /></div>
         {streamingReply && <div className="chat-message assistant streaming-message"><div className="chat-bubble"><MarkdownContent content={streamingReply} /><span className="typing-cursor" aria-hidden="true" /></div></div>}
@@ -851,13 +876,13 @@ export function ProductChat({
   </section>;
 }
 
-export function ChatBubble({ item, runs = [], datasets = [], onShowRun, onReplyToRun }: { item: ChatMessage; runs?: Run[]; datasets?: Dataset[]; onShowRun: (runId: string) => void; onReplyToRun: (runId: string | null) => void }) {
+export function ChatBubble({ item, runs = [], datasets = [], selectedDatasetIds = [], onUseDataset, onShowRun, onReplyToRun }: { selectedDatasetIds?: string[]; onUseDataset?: (id: string) => void; item: ChatMessage; runs?: Run[]; datasets?: Dataset[]; onShowRun: (runId: string) => void; onReplyToRun: (runId: string | null) => void }) {
   const run = item.kind === "execution" && item.runId ? runs.find((candidate) => candidate.id === item.runId) : undefined;
   const executionMessage = item.role === "assistant" && item.kind === "execution";
   const resources = (item.datasetIds ?? []).map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset));
   const resultDatasets = item.role === "assistant" ? [...new Set(item.datasetIds ?? run?.metadata.result?.datasets ?? [])]
     .map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is Dataset => Boolean(dataset)) : [];
-  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <DatasetPreviewButton className="message-resource" key={dataset.id} datasetId={dataset.id} title={dataset.name}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></DatasetPreviewButton>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? <MarkdownContent content={item.content} /> : item.content}</div>{resultDatasets.length > 0 && <div className="chat-preview-grid">{resultDatasets.map((dataset) => <div className="chat-preview-item" key={dataset.id}><small>{dataset.created_by_run_id === run?.id ? "本次生成" : "关联数据"}</small><MapViewer datasetId={dataset.id} title={dataset.name} compact /></div>)}</div>}{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
+  return <div className={`chat-message ${item.role} ${executionMessage ? "execution-message" : ""}`}>{run && <CompletedRunSummary run={run} />}{item.role === "user" && resources.length > 0 && <div className="message-resources">{resources.map((dataset) => <DatasetPreviewButton className="message-resource" key={dataset.id} datasetId={dataset.id} title={dataset.name}><Icon name="attachment" size={12} /><span>{dataset.path.split(/[\\/]/).pop() || dataset.name}</span></DatasetPreviewButton>)}</div>}<div className={`chat-bubble ${executionMessage ? "execution-answer" : ""}`}>{item.role === "assistant" ? <MarkdownContent content={item.content} /> : item.content}</div>{resultDatasets.length > 0 && <div className="chat-preview-grid">{resultDatasets.map((dataset) => <div className="chat-preview-item" key={dataset.id}><small>{dataset.created_by_run_id === run?.id ? "本次生成" : "关联数据"}</small><MapViewer datasetId={dataset.id} title={dataset.name} compact /><DatasetActions dataset={dataset} selected={selectedDatasetIds.includes(dataset.id)} onUse={onUseDataset} /></div>)}</div>}{run?.status === "WAITING_USER" && <button type="button" className="chat-result-link" onClick={() => onReplyToRun(run.id)}>继续此运行</button>}{item.runId && <button className="chat-result-link" onClick={() => onShowRun(item.runId!)}>查看运行详情</button>}</div>;
 }
 
 export function CompletedRunSummary({ run }: { run: Run }) {
@@ -965,30 +990,6 @@ export function RunProgress({ events, durationMs, status, live = false, phase = 
   const displayStatus = connecting ? "正在处理" : live ? "正在运行" : statusLabel(status ?? "COMPLETED");
   return <div className="run-progress"><div className="run-progress-head"><span className="run-progress-time">{formatDuration(durationMs, { live })}</span><span className={`run-progress-status ${connecting ? "connecting" : live ? "running" : (status ?? "COMPLETED").toLowerCase()}`}>{displayStatus}</span></div><div className="run-progress-current">{connecting ? <><span className="run-progress-marker waiting"><Icon name="clock" size={11} /></span><span className="run-progress-text">正在准备…</span></> : thinking ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在思考</span></> : generating ? <><span className="run-progress-spinner" /><span className="run-progress-text">正在生成回复</span></> : currentEvent ? <>{activeProgress ? <span className="run-progress-spinner" /> : <span className="run-progress-marker"><Icon name="check" size={11} /></span>}<span className="run-progress-text">{liveProgressText(currentEvent)}</span></> : <><span className="run-progress-spinner" /><span className="run-progress-text">等待智能体事件…</span></>}<TokenUsageSummary usage={usage} animated={smoothTokenUsage} /></div></div>;
 }
-
-function DatasetPanel({ datasets, selectedDatasetIds, onToggleRequestDataset, onRegister, busy }: { datasets: Dataset[]; selectedDatasetIds: string[]; onToggleRequestDataset: (id: string) => void; onRegister: (path: string, name: string) => Promise<void>; busy: boolean }) {
-  const [path, setPath] = useState("");
-  const [name, setName] = useState("");
-  const [registering, setRegistering] = useState(false);
-  const [propertyDataset, setPropertyDataset] = useState<Dataset | null>(null);
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!path.trim()) return;
-    setRegistering(true);
-    try {
-      await onRegister(path.trim(), name.trim());
-      setPath("");
-      setName("");
-    } catch {
-      // The parent renders the request error.
-    } finally {
-      setRegistering(false);
-    }
-  };
-  return <section className="panel"><div className="panel-head"><div><span className="eyebrow">已登记数据源</span><h2>数据集登记</h2></div><span className="count-badge">{datasets.length} 个数据集</span></div><form className="dataset-register" onSubmit={(event) => void submit(event)}><input value={path} onChange={(event) => setPath(event.target.value)} placeholder="请输入工作区内的数据文件路径" aria-label="数据文件路径" /><input value={name} onChange={(event) => setName(event.target.value)} placeholder="显示名称（可选）" aria-label="显示名称" /><button className="primary" disabled={busy || registering || !path.trim()}>{registering ? "正在登记…" : "登记数据集"}</button></form>{datasets.length === 0 ? <Empty text="还没有数据集。请输入工作区内的文件路径进行登记。" /> : <div className="dataset-grid">{datasets.map((item) => { const selected = selectedDatasetIds.includes(item.id); return <div className={`dataset-card ${selected ? "request-selected" : ""}`} key={item.id}><b className="dataset-name"><DatasetPreviewButton datasetId={item.id} title={item.name} className="dataset-preview-name">{item.name}</DatasetPreviewButton></b><div className="dataset-card-actions"><button type="button" className={`small-action ${selected ? "selected-action" : ""}`} onClick={() => onToggleRequestDataset(item.id)}>{selected ? "移出本轮" : "用于下一条消息"}</button><button type="button" className="small-action" onClick={() => setPropertyDataset(item)}>属性</button></div></div>; })}</div>}{propertyDataset && <div className="dataset-modal" role="dialog" aria-modal="true" aria-label="数据集属性" onClick={() => setPropertyDataset(null)}><div className="dataset-modal-card" onClick={(event) => event.stopPropagation()}><div className="dataset-modal-head"><div><span className="eyebrow">数据集属性</span><h2>{propertyDataset.name}</h2></div><button type="button" className="modal-close" onClick={() => setPropertyDataset(null)}>关闭</button></div><div className="dataset-preview-layout"><div><div className="property-grid"><Property label="数据集编号" value={propertyDataset.id} /><Property label="数据类型" value={kindLabel(propertyDataset.kind)} /><Property label="文件格式" value={formatLabel(propertyDataset.format)} /><Property label="坐标系" value={propertyDataset.crs?.authority ?? "未提供"} /><Property label="坐标系名称" value={propertyDataset.crs?.name ?? "未提供"} /><Property label="要素数量" value={propertyDataset.schema?.feature_count !== undefined ? String(propertyDataset.schema.feature_count) : "不适用"} /><Property label="几何类型" value={propertyDataset.schema?.geometry_type ?? "未提供"} /><Property label="栅格尺寸" value={propertyDataset.schema?.width !== undefined ? `${propertyDataset.schema.width} × ${propertyDataset.schema.height ?? "?"}，${propertyDataset.schema.bands ?? "?"} 个波段` : "不适用"} /><Property label="空间范围" value={propertyDataset.extent ? `${propertyDataset.extent.min_x}, ${propertyDataset.extent.min_y} 至 ${propertyDataset.extent.max_x}, ${propertyDataset.extent.max_y}` : "未提供"} /><Property label="文件路径" value={propertyDataset.path} /><Property label="创建时间" value={propertyDataset.created_at ?? "未提供"} /><Property label="创建运行" value={propertyDataset.created_by_run_id ?? "手动登记或上传"} /></div><h3>字段</h3><pre>{propertyDataset.schema?.fields && Object.keys(propertyDataset.schema.fields).length > 0 ? JSON.stringify(propertyDataset.schema.fields, null, 2) : "未提供字段信息"}</pre><h3>附加信息</h3><pre>{JSON.stringify(propertyDataset.metadata ?? {}, null, 2)}</pre></div><div><MapViewer datasetId={propertyDataset.id} title={propertyDataset.name} /><LineagePanel datasetId={propertyDataset.id} datasetNames={Object.fromEntries(datasets.map((item) => [item.id, item.name]))} /></div></div></div></div>}</section>;
-}
-
-function Property({ label, value }: { label: string; value: string }) { return <div className="property-item"><span>{label}</span><b>{value}</b></div>; }
 
 function AgentPanel({ runs }: { runs: Run[] }) {
   const mainRuns = runs.filter(isMainRun);

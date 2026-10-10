@@ -192,6 +192,7 @@ export const api = {
   events: (runId: string) => request<Event[]>(`/api/v1/runs/${runId}/events`),
   artifacts: (runId?: string) => request<Artifact[]>(runId ? `/api/v1/artifacts?run_id=${encodeURIComponent(runId)}` : "/api/v1/artifacts"),
   artifactUrl: (artifactId: string) => `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content`,
+  datasetUrl: (datasetId: string) => `/api/v1/datasets/${encodeURIComponent(datasetId)}/content`,
   datasetPreview: (datasetId: string) => request<DatasetPreview>(`/api/v1/datasets/${encodeURIComponent(datasetId)}/preview`),
   datasetLineage: (datasetId: string) => request<DatasetLineage[]>(`/api/v1/datasets/${encodeURIComponent(datasetId)}/lineage`),
   streamMessage,
