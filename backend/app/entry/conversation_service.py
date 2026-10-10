@@ -121,6 +121,7 @@ class ConversationService:
                         role="assistant",
                         content=result.summary,
                         run_id=result.trace_id,
+                        dataset_ids=list(dict.fromkeys(result.datasets)),
                     ),
                     user_id=user_id,
                     wait_for_summary=False,

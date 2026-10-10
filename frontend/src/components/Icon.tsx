@@ -7,6 +7,8 @@ const shapes = {
   agent: <><rect x="4" y="7" width="16" height="13" rx="3" /><path d="M12 3v4M2 12v4m20-4v4M9 16h6M9 11v1m6-1v1" /></>,
   activity: <path d="M3 12h4l3-8 4 16 3-8h4" />,
   plus: <path d="M12 5v14M5 12h14" />,
+  minus: <path d="M5 12h14" />,
+  expand: <path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
   trash: <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />,
   refresh: <path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6" />,
