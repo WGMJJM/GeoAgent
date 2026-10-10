@@ -11,6 +11,7 @@ import { MarkdownContent } from "./components/MarkdownContent";
 import { CopyReplyButton } from "./components/CopyReplyButton";
 import "./components/Conversation.css";
 import { statusLabel } from "./labels";
+import { ConversationDraft, emptyDraft, readConversationDrafts, saveConversationDrafts } from "./conversationDrafts";
 
 type View = "chat" | "datasets" | "agents" | "runs" | "settings";
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string; kind?: "text" | "execution"; runId?: string; datasetIds?: string[] };
@@ -25,17 +26,11 @@ type ConversationExecutionState = {
   tokenUsage?: TokenUsage | null;
   events: Event[];
 };
-type ConversationDraft = {
-  message: string;
-  selectedDatasetIds: string[];
-  uploadedFiles: Dataset[];
-};
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 48;
 const SHAPEFILE_EXTENSIONS = new Set([".shp", ".shx", ".dbf", ".prj", ".cpg", ".qpj"]);
 const SHAPEFILE_REQUIRED_EXTENSIONS = [".shp", ".shx", ".dbf"];
 const REASONING_EFFORT_LABELS: Record<ReasoningEffort, string> = { low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" };
-const emptyDraft = (): ConversationDraft => ({ message: "", selectedDatasetIds: [], uploadedFiles: [] });
 
 function fileExtension(filename: string): string {
   const separator = filename.lastIndexOf(".");
@@ -80,6 +75,8 @@ export function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [messagesByConversation, setMessagesByConversation] = useState<Record<string, ChatMessage[]>>({});
   const [draftsByConversation, setDraftsByConversation] = useState<Record<string, ConversationDraft>>({});
+  const [draftOwner, setDraftOwner] = useState<string | null>(null);
+  const [draftStorageError, setDraftStorageError] = useState("");
   const [executionsByConversation, setExecutionsByConversation] = useState<Record<string, ConversationExecutionState>>({});
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -131,6 +128,27 @@ export function App() {
   const liveEvents = activeExecution?.events ?? events;
 
   useEffect(() => {
+    if (!currentUser) return;
+    try {
+      setDraftsByConversation(readConversationDrafts(currentUser.id));
+      setDraftStorageError("");
+    } catch {
+      setDraftsByConversation({});
+      setDraftStorageError("未能恢复浏览器中的草稿，仍可正常输入和发送。");
+    }
+    setDraftOwner(currentUser.id);
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser || draftOwner !== currentUser.id) return;
+    try {
+      saveConversationDrafts(currentUser.id, draftsByConversation);
+    } catch {
+      setDraftStorageError("浏览器未能保存草稿，刷新或关闭页面可能丢失未发送内容。");
+    }
+  }, [currentUser?.id, draftOwner, draftsByConversation]);
+
+  useEffect(() => {
     if (Object.keys(executionsByConversation).length === 0) return;
     const timer = window.setInterval(() => setNow(performance.now()), 1000);
     return () => window.clearInterval(timer);
@@ -155,7 +173,7 @@ export function App() {
   const useDataset = (id: string) => {
     setSelectedDatasetIds((current) => current.includes(id) ? current : [...current, id]);
   };
-  const setUploadedFiles = (update: Dataset[] | ((current: Dataset[]) => Dataset[])) => {
+  const setUploadedFiles = (update: ConversationDraft["uploadedFiles"] | ((current: ConversationDraft["uploadedFiles"]) => ConversationDraft["uploadedFiles"])) => {
     setDraftsByConversation((current) => {
       const draft = current[conversationId] ?? emptyDraft();
       return { ...current, [conversationId]: { ...draft, uploadedFiles: typeof update === "function" ? update(draft.uploadedFiles) : update } };
@@ -305,6 +323,8 @@ export function App() {
     setConversations([]);
     setMessagesByConversation({});
     setDraftsByConversation({});
+    setDraftOwner(null);
+    setDraftStorageError("");
     setExecutionsByConversation({});
     setUploadingByConversation({});
     setDatasets([]);
@@ -324,6 +344,9 @@ export function App() {
   };
 
   const logout = async () => {
+    if (currentUser) {
+      try { saveConversationDrafts(currentUser.id, {}); } catch { /* 浏览器禁用存储时仍允许退出。 */ }
+    }
     try {
       await api.logout();
     } catch {
@@ -701,7 +724,7 @@ export function App() {
       for (const group of shapefiles.values()) {
         uploaded.push(await api.uploadShapefile(group));
       }
-      setDraftsByConversation((current) => ({ ...current, [targetConversationId]: { ...(current[targetConversationId] ?? emptyDraft()), uploadedFiles: [...(current[targetConversationId]?.uploadedFiles ?? []), ...uploaded] } }));
+      setDraftsByConversation((current) => ({ ...current, [targetConversationId]: { ...(current[targetConversationId] ?? emptyDraft()), uploadedFiles: [...(current[targetConversationId]?.uploadedFiles ?? []), ...uploaded.map(({ id, name }) => ({ id, name }))] } }));
       await refreshDatasets();
     } catch (err) {
       if (activeConversationRef.current === targetConversationId) setError(errorMessage(err));
@@ -723,7 +746,7 @@ export function App() {
     <main className="main">
        {view !== "chat" && <header className="topbar"><div><h1>{view === "datasets" ? "数据集登记" : view === "agents" ? "智能体活动" : view === "runs" ? "运行与追踪" : "设置"}</h1></div><div className="topbar-actions"><button className="ghost" onClick={() => setView("chat")}>返回对话</button><button className="close-view" type="button" aria-label="关闭当前页面" title="关闭" onClick={() => setView("chat")}><Icon name="close" size={18} /></button><button className="ghost" onClick={() => void refreshAll()}><Icon name="refresh" size={13} /> 刷新</button></div></header>}
       {error && <div className="error">{error}</div>}
-       {view === "chat" && <ProductChat onUseDataset={useDataset} key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} onReasoningChange={setSelectedReasoningEffort} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
+       {view === "chat" && <ProductChat draftStorageError={draftStorageError} onUseDataset={useDataset} key={conversationId ?? "pending-conversation"} message={message} setMessage={setMessage} busy={conversationRunning} conversationReady={Boolean(conversationId)} streamingReply={streamingReply} liveTokenUsage={activeExecution?.tokenUsage} elapsedMs={elapsedMs} activeRunId={activeRunId} events={liveEvents} messages={messages} runs={conversationRuns} send={send} cancel={cancelCurrentExecution} onShowRun={(runId) => { void loadRun(runId); setView("runs"); }} replyToRunId={replyToRunId} onReplyToRun={setReplyToRunId} datasets={datasets} selectedDatasetIds={selectedDatasetIds} onRemoveDataset={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} uploadedFiles={uploadedFiles} uploading={uploading} onUpload={uploadFiles} onRemoveFile={(id) => setUploadedFiles((current) => current.filter((item) => item.id !== id))} modelStatus={modelStatus} selectedModelProfile={selectedModelProfile} onModelChange={setSelectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} onReasoningChange={setSelectedReasoningEffort} approvals={approvals.filter((item) => item.conversation_id === conversationId)} approvalBusyId={approvalBusyId} onApprove={approve} onDeny={deny} />}
       {view === "datasets" && <DatasetPanel datasets={datasets} conversationDatasetIds={conversationDatasetIds} selectedDatasetIds={selectedDatasetIds} onUse={useDataset} onRemove={(id) => setSelectedDatasetIds((current) => current.filter((item) => item !== id))} onRegister={registerDataset} busy={false} />}
       {view === "agents" && <AgentPanel runs={conversationRuns} />}
        {view === "runs" && <RunPanel selectedDatasetIds={selectedDatasetIds} onUseDataset={useDataset} runs={conversationRuns} selectedRunId={selectedRunId} events={events} result={result} datasets={datasets} artifacts={artifacts} onSelect={loadRun} onCancel={cancelRun} onResume={resumeRun} onRetry={retryRun} onDelete={deleteRun} onDeleteMany={deleteRunRecords} busy={resumingRunId !== null} />}
@@ -735,6 +758,7 @@ export function App() {
 function Nav({ label, icon, count, active, onClick }: { label: string; icon: IconName; count?: number; active: boolean; onClick: () => void }) { return <button className={`nav ${active ? "active" : ""}`} onClick={onClick}><span aria-hidden="true"><Icon name={icon} /></span>{label}{count !== undefined && <em>{count}</em>}</button>; }
 
 type ProductChatProps = {
+  draftStorageError?: string;
   message: string;
   setMessage: (value: string) => void;
   busy: boolean;
@@ -755,7 +779,7 @@ type ProductChatProps = {
   selectedDatasetIds: string[];
   onRemoveDataset: (id: string) => void;
   onUseDataset?: (id: string) => void;
-  uploadedFiles: Dataset[];
+  uploadedFiles: ConversationDraft["uploadedFiles"];
   uploading: boolean;
   onUpload: (files: FileList | null) => Promise<void>;
   onRemoveFile: (id: string) => void;
@@ -822,6 +846,7 @@ function ModelReasoningPicker({ profiles, selectedModelProfile, selectedReasonin
 }
 
 export function ProductChat({
+  draftStorageError,
   message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, onUseDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
@@ -881,7 +906,8 @@ export function ProductChat({
     <div className="composer">
       {showLatest && <button type="button" className="chat-latest-button" onClick={scrollToLatest}><Icon name="chevronDown" size={14} />回到最新消息</button>}
       {replyToRunId && <div className="reply-target-banner" role="status">正在补充运行 {replyToRunId}<button type="button" onClick={() => onReplyToRun(null)}>取消</button></div>}
-      <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} rows={2} aria-label="输入消息" placeholder="输入消息" title="Enter 发送，Shift+Enter 换行" disabled={!conversationReady || sending} />
+      <textarea className="composer-input" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={handleComposerKeyDown} rows={2} aria-label="输入消息" placeholder={sending ? "可先编辑下一条消息，当前任务结束后发送" : "输入消息"} title={sending ? "草稿不会自动发送" : "Enter 发送，Shift+Enter 换行"} disabled={!conversationReady} />
+      {draftStorageError && <p className="draft-storage-note" role="status">{draftStorageError}</p>}
       <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <ModelReasoningPicker profiles={modelStatus.profiles} selectedModelProfile={selectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} disabled={sending} onModelChange={onModelChange} onReasoningChange={onReasoningChange} /> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
   </section>;

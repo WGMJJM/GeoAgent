@@ -5,3 +5,4 @@
 .reply-copy{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-secondary)}
 .chat-result-datasets{width:100%;min-width:0}.chat-result-heading{margin:8px 0;font-size:12px;color:var(--text-secondary)}
 .result-expand{margin-top:10px;padding:5px 0;font-size:12px}
+.draft-storage-note{margin:4px 0;color:var(--warning);font-size:11px;line-height:1.5}
