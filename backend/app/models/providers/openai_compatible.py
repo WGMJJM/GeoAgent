@@ -62,16 +62,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
     async def stream(self, request: ModelRequest):
         if not _capability(self, "supports_stream", True):
-            response = await self.complete(request)
-            yield ModelStreamChunk(
-                content=response.content,
-                tool_calls=response.tool_calls,
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-                model=response.model,
-                finish_reason=response.finish_reason or "stop",
-                done=True,
-            )
+            async for chunk in super().stream(request):
+                yield chunk
             return
         tool_calls: dict[int, dict] = {}
         reasoning_effort = _reasoning_effort(self.config, request)
