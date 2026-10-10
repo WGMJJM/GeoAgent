@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Any
 
 from app.config import DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT, DEFAULT_TASK_CONTEXT_LIMIT
@@ -455,6 +455,7 @@ def compact_model_input(
     recent_full: int,
     emergency_fraction: float,
     emergency: bool = False,
+    stored_result_ids: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """平时保留最近完整结果；超限时按比例精简较早结果并合并旧执行记录。"""
 
@@ -488,7 +489,7 @@ def compact_model_input(
         if item.get("role") == "tool" and item["tool_call_id"] in summarized_ids:
             continue
         if item.get("role") == "tool" and item["tool_call_id"] in compacted_ids:
-            item = _compact_observation(item, run_id)
+            item = _compact_observation(item, run_id, stored_result_ids)
         projected.append(item)
     if summarized_batches:
         summary = _tool_history_summary(view, summarized_batches, run_id)
@@ -582,15 +583,14 @@ def _tool_history_summary(
     return {"run_id": run_id, "batches": len(batches), "calls": sum(len(calls) for _, calls in batches), "tool_status_counts": grouped}
 
 
-def _compact_observation(message: dict[str, Any], run_id: str) -> dict[str, Any]:
+def _compact_observation(message: dict[str, Any], run_id: str, stored_result_ids: Collection[str]) -> dict[str, Any]:
     payload = json.loads(message["content"])
     payload["output"] = None
     payload["context_compacted"] = True
-    payload["result_reference"] = {
-        "run_id": run_id,
-        "tool_call_id": message["tool_call_id"],
-        "source": "checkpoint.protocol_messages",
-    }
+    payload.pop("result_reference", None)
+    # 外层 ID 用于模型协议配对；回读只能引用已落库结果的完整 call_id。
+    if payload["call_id"] in stored_result_ids:
+        payload["result_reference"] = {"run_id": run_id, "tool_call_id": payload["call_id"]}
     return {**message, "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}
 
 

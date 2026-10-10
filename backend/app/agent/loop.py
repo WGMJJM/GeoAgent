@@ -348,6 +348,7 @@ class AgentLoop:
                     previous_compacted_ids = set(compacted_ids)
                     previous_summarized_ids = set(summarized_ids)
                     history_changed = False
+                    stored_result_ids = self.store.list_tool_result_ids(current.id)
                     model_messages = compact_model_input(
                         model_messages,
                         run_id=current.id,
@@ -355,6 +356,7 @@ class AgentLoop:
                         summarized_ids=summarized_ids,
                         recent_full=self.settings.tool_result_recent_full,
                         emergency_fraction=self.settings.tool_result_emergency_fraction,
+                        stored_result_ids=stored_result_ids,
                     )
                     if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
                         model_messages = compact_model_input(
@@ -365,6 +367,7 @@ class AgentLoop:
                             recent_full=self.settings.tool_result_recent_full,
                             emergency_fraction=self.settings.tool_result_emergency_fraction,
                             emergency=True,
+                            stored_result_ids=stored_result_ids,
                         )
                         start_message_id = current.metadata.get("original_request_message_id")
                         if not current.parent_run_id and isinstance(start_message_id, str):
@@ -385,6 +388,7 @@ class AgentLoop:
                                     summarized_ids=summarized_ids,
                                     recent_full=self.settings.tool_result_recent_full,
                                     emergency_fraction=self.settings.tool_result_emergency_fraction,
+                                    stored_result_ids=stored_result_ids,
                                 )
                     if history_changed or compacted_ids != previous_compacted_ids or summarized_ids != previous_summarized_ids:
                         self._save_checkpoint(
