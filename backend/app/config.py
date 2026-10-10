@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     max_subagents: int = Field(default=5, ge=1, le=20)
     max_parallel_agents: int = Field(default=3, ge=1, le=20)
     max_preview_features: int = Field(default=200, ge=1, le=1000)
+    max_preview_dimension: int = Field(default=1024, ge=128, le=2048)
     max_preview_fields: int = Field(default=32, ge=1, le=128)
     max_preview_property_length: int = Field(default=160, ge=16, le=2000)
     max_tokens: int = Field(default=25600, ge=1)

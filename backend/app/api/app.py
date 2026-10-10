@@ -253,10 +253,12 @@ def create_app(application: Application | None = None) -> FastAPI:
         if dataset is None:
             raise HTTPException(status_code=404, detail="dataset not found")
         try:
-            return geoagent.dataset_preview.preview(
+            return await asyncio.to_thread(
+                geoagent.dataset_preview.preview,
                 dataset,
                 geoagent.workspace.for_user(current_user.id),
                 max_features=geoagent.settings.max_preview_features,
+                max_dimension=geoagent.settings.max_preview_dimension,
                 max_fields=geoagent.settings.max_preview_fields,
                 max_property_length=geoagent.settings.max_preview_property_length,
             )

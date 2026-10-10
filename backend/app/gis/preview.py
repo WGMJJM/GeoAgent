@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import rasterio
+from PIL import Image, ImageOps
+from rasterio.enums import ColorInterp, Resampling
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.models import Dataset, DatasetKind
@@ -37,6 +42,8 @@ class DatasetPreview(BaseModel):
     media_type: str | None = None
     page_count: int | None = None
     text: str | None = None
+    image_data_url: str | None = None
+    render_note: str | None = None
 
 
 class DatasetPreviewService:
@@ -48,19 +55,20 @@ class DatasetPreviewService:
         max_features: int = 200,
         max_fields: int = 32,
         max_property_length: int = 160,
+        max_dimension: int = 1024,
     ) -> DatasetPreview:
         path = workspace.resolve(dataset.path, allow_missing=False)
         source_crs = dataset.crs.authority if dataset.crs else None
         if dataset.kind is DatasetKind.VECTOR:
             return self._vector(dataset, path, source_crs, max_features, max_fields, max_property_length)
         if dataset.kind is DatasetKind.RASTER:
-            return self._raster(dataset, path, source_crs)
+            return self._raster(dataset, path, source_crs, max_dimension)
         if dataset.kind is DatasetKind.TABLE:
             return self._table(dataset, path, source_crs, max_features, max_fields, max_property_length)
         if dataset.kind is DatasetKind.DOCUMENT:
             return self._document(dataset)
         if dataset.kind is DatasetKind.IMAGE:
-            return self._image(dataset)
+            return self._image(dataset, path, max_dimension)
         raise ValueError(f"暂不支持预览的数据类型：{dataset.kind}")
 
     def _vector(self, dataset: Dataset, path: Path, source_crs: str | None, limit: int, max_fields: int, max_property_length: int) -> DatasetPreview:
@@ -87,8 +95,39 @@ class DatasetPreviewService:
             columns=[str(item) for item in frame.columns if item != frame.geometry.name],
         )
 
-    def _raster(self, dataset: Dataset, path: Path, source_crs: str | None) -> DatasetPreview:
+    def _raster(self, dataset: Dataset, path: Path, source_crs: str | None, max_dimension: int) -> DatasetPreview:
         with rasterio.open(path) as source:
+            scale = min(1, max_dimension / max(source.width, source.height))
+            height, width = max(1, round(source.height * scale)), max(1, round(source.width * scale))
+            rgb = (ColorInterp.red, ColorInterp.green, ColorInterp.blue)
+            indexes = [source.colorinterp.index(color) + 1 for color in rgb] if all(color in source.colorinterp for color in rgb) else [1]
+            pixels = source.read(indexes, out_shape=(len(indexes), height, width), masked=True, resampling=Resampling.nearest)
+            valid = ~np.any(np.ma.getmaskarray(pixels), axis=0) & np.all(np.isfinite(pixels.data), axis=0)
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            rgba[:, :, 3] = np.where(valid, 255, 0)
+            if source.colorinterp[0] == ColorInterp.palette and len(indexes) == 1:
+                colors = source.colormap(1)
+                palette = np.zeros((max(colors) + 1, 4), dtype=np.uint8)
+                for value, color in colors.items():
+                    palette[value] = color
+                values = pixels.data[0]
+                in_palette = valid & (values >= 0) & (values < len(palette))
+                rgba[:, :, 3] = 0
+                rgba[in_palette] = palette[values[in_palette].astype(np.intp)]
+                note = "第 1 波段 · 文件内置色表"
+            else:
+                for channel in range(3):
+                    band = pixels.data[channel if len(indexes) == 3 else 0]
+                    if len(indexes) == 3 and band.dtype == np.uint8:
+                        rgba[:, :, channel] = band
+                    elif np.any(valid):
+                        values = band[valid].astype(np.float64)
+                        low, high = values.min(), values.max()
+                        rgba[:, :, channel][valid] = np.clip((values - low) / (high - low) * 255, 0, 255).astype(np.uint8) if high > low else 127
+                note = "RGB 波段" if len(indexes) == 3 else "第 1 波段 · 灰度拉伸（按预览样本）"
+            if ColorInterp.alpha in source.colorinterp:
+                alpha = source.read(source.colorinterp.index(ColorInterp.alpha) + 1, out_shape=(height, width), resampling=Resampling.nearest)
+                rgba[:, :, 3] = np.minimum(rgba[:, :, 3], np.clip(alpha, 0, 255).astype(np.uint8))
             bbox = [float(source.bounds.left), float(source.bounds.bottom), float(source.bounds.right), float(source.bounds.top)]
             return DatasetPreview(
                 dataset_id=dataset.id,
@@ -100,6 +139,8 @@ class DatasetPreviewService:
                 height=source.height,
                 bands=source.count,
                 resolution=[float(source.res[0]), float(source.res[1])],
+                image_data_url=_png_data_url(Image.fromarray(rgba)),
+                render_note=f"{note}；NoData 透明。仅供查看，不改变原始数据。",
             )
 
     def _table(self, dataset: Dataset, path: Path, source_crs: str | None, limit: int, max_fields: int, max_property_length: int) -> DatasetPreview:
@@ -133,16 +174,29 @@ class DatasetPreviewService:
             text=str(dataset.metadata.get("text_preview") or ""),
         )
 
-    def _image(self, dataset: Dataset) -> DatasetPreview:
-        schema = dataset.schema
+    def _image(self, dataset: Dataset, path: Path, max_dimension: int) -> DatasetPreview:
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
+            width, height = image.size
+            bands = len(image.getbands())
+            image.thumbnail((max_dimension, max_dimension))
+            data_url = _png_data_url(image.convert("RGBA"))
         return DatasetPreview(
             dataset_id=dataset.id,
             kind=dataset.kind,
             media_type=str(dataset.metadata.get("media_type") or "application/octet-stream"),
-            width=schema.width if schema else None,
-            height=schema.height if schema else None,
-            bands=schema.bands if schema else None,
+            width=width,
+            height=height,
+            bands=bands,
+            image_data_url=data_url,
+            render_note="等比例缩略图；不改变原始图片。",
         )
+
+
+def _png_data_url(image: Image.Image) -> str:
+    with BytesIO() as buffer:
+        image.save(buffer, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def _compact_json(value: Any, max_length: int) -> Any:
