@@ -269,7 +269,7 @@ def create_app(application: Application | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @api.get("/api/v1/datasets/{dataset_id}/preview", response_model=DatasetPreview)
-    async def dataset_preview(dataset_id: str, current_user: User = Depends(get_current_user)) -> DatasetPreview:
+    async def dataset_preview(dataset_id: str, current_user: User = Depends(get_current_user), encoding: Literal["utf-8", "gb18030"] | None = None) -> DatasetPreview:
         dataset = geoagent.registry.get(dataset_id, user_id=current_user.id)
         if dataset is None:
             raise HTTPException(status_code=404, detail="dataset not found")
@@ -282,6 +282,7 @@ def create_app(application: Application | None = None) -> FastAPI:
                 max_dimension=geoagent.settings.max_preview_dimension,
                 max_fields=geoagent.settings.max_preview_fields,
                 max_property_length=geoagent.settings.max_preview_property_length,
+                encoding=encoding,
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="dataset file not found") from exc

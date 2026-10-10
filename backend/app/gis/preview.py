@@ -44,6 +44,7 @@ class DatasetPreview(BaseModel):
     text: str | None = None
     image_data_url: str | None = None
     render_note: str | None = None
+    supports_encoding: bool = False
 
 
 class DatasetPreviewService:
@@ -56,11 +57,14 @@ class DatasetPreviewService:
         max_fields: int = 32,
         max_property_length: int = 160,
         max_dimension: int = 1024,
+        encoding: str | None = None,
     ) -> DatasetPreview:
         path = workspace.resolve(dataset.path, allow_missing=False)
+        if encoding is not None and path.suffix.lower() != ".shp":
+            raise ValueError("仅 Shapefile 预览支持指定文字编码")
         source_crs = dataset.crs.authority if dataset.crs else None
         if dataset.kind is DatasetKind.VECTOR:
-            return self._vector(dataset, path, source_crs, max_features, max_fields, max_property_length)
+            return self._vector(dataset, path, source_crs, max_features, max_fields, max_property_length, encoding)
         if dataset.kind is DatasetKind.RASTER:
             return self._raster(dataset, path, source_crs, max_dimension)
         if dataset.kind is DatasetKind.TABLE:
@@ -71,8 +75,9 @@ class DatasetPreviewService:
             return self._image(dataset, path, max_dimension)
         raise ValueError(f"暂不支持预览的数据类型：{dataset.kind}")
 
-    def _vector(self, dataset: Dataset, path: Path, source_crs: str | None, limit: int, max_fields: int, max_property_length: int) -> DatasetPreview:
-        frame = gpd.read_file(path, rows=limit)
+    def _vector(self, dataset: Dataset, path: Path, source_crs: str | None, limit: int, max_fields: int, max_property_length: int, encoding: str | None = None) -> DatasetPreview:
+        options = {"encoding": encoding} if encoding else {}
+        frame = gpd.read_file(path, rows=limit, **options)
         if len(frame.columns) > max_fields + 1:
             geometry_column = frame.geometry.name if frame.geometry.name in frame.columns else "geometry"
             columns = [item for item in frame.columns if item != geometry_column][:max_fields] + [geometry_column]
@@ -93,6 +98,7 @@ class DatasetPreviewService:
             truncated=feature_count is not None and feature_count > len(frame),
             geojson=geojson,
             columns=[str(item) for item in frame.columns if item != frame.geometry.name],
+            supports_encoding=path.suffix.lower() == ".shp",
         )
 
     def _raster(self, dataset: Dataset, path: Path, source_crs: str | None, max_dimension: int) -> DatasetPreview:
