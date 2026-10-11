@@ -1,9 +1,94 @@
-.run-result-details .result-head{align-items:center;gap:12px;padding-bottom:12px}.run-result-details .result-head h2{font-size:18px;margin:0}
-.run-result-details{min-width:0}.run-result-details>section{margin-top:18px}.run-result-details h3{font-size:13px;font-weight:600;color:var(--text-secondary)}
-.run-result-details .markdown-content{font-size:13px}.run-result-details .markdown-content h2{font-size:1.2em}
-.run-result-details .dataset-card-actions{margin-top:8px}.result-warnings .warning{font-size:12px;line-height:1.65}
-.run-trace .trace-box{border:0;padding:14px 0 0}.run-trace .eyebrow{font-size:11px;overflow-wrap:anywhere}
-.result-identifiers{display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px;font-size:11px;color:var(--text-secondary)}.result-identifiers dd{margin:0;overflow-wrap:anywhere}
-.two-col>div{min-width:0}
-.result-preview-select{display:grid;gap:6px;margin-bottom:12px;font-size:12px;color:var(--text-secondary)}
-.result-preview-select select{width:100%;min-width:0;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font:inherit}
+.two-col > div { min-width: 0; }
+.run-panel-head { align-items: flex-start; flex-wrap: wrap; gap: 16px; }
+.run-bulk-actions { justify-content: flex-start; }
+.run-select-all,
+.run-selected-count { font-size: 12px; }
+.run-list { display: grid; gap: 20px; }
+.run-task-group { gap: 0; }
+.run-task-heading {
+  display: grid;
+  gap: 4px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+}
+.run-task-heading b { color: var(--text-secondary); font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.run-task-heading small { color: var(--muted); font-size: 12px; }
+.run-task-group + .run-task-group { margin: 0; padding: 0; border: 0; }
+.run-list .run-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 0 8px;
+  padding: 15px 10px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border-muted);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  cursor: default;
+}
+.run-list .run-row:hover { background: var(--surface-tinted); }
+.run-list .run-row.selected { background: var(--surface-muted); box-shadow: inset 2px 0 0 var(--accent); }
+.run-list .run-check { padding-top: 3px; }
+.run-list .run-select {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  width: 100%;
+  padding: 0;
+}
+.run-select .run-state { width: 6px; height: 6px; margin-top: 7px; }
+.run-select > div { min-width: 0; }
+.run-row .run-select b { font-size: 13px; line-height: 1.6; font-weight: 550; overflow-wrap: anywhere; }
+.run-row .run-select small { margin-top: 5px; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.run-row .run-select em { padding-top: 2px; color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+.run-list .run-actions { grid-column: 2; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding: 0; }
+.run-list .nested-run { margin-left: 22px; }
+.run-list .run-delete-confirm { width: min(290px, 100%); font-size: 12px; line-height: 1.6; }
+.run-detail-stack { display: flex; flex-direction: column; min-width: 0; gap: 24px; }
+.run-result-details { min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.run-result-details .result-head { align-items: center; gap: 12px; margin-bottom: 22px; padding: 0 0 15px; }
+.run-result-details .result-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.run-result-details > section { margin-top: 26px; }
+.run-result-details > section > h3,
+.run-result-details .result-map-panel h3 { margin: 0 0 12px; color: var(--text-secondary); font-size: 13px; font-weight: 600; }
+.run-result-details .markdown-content { font-size: 15px; }
+.run-result-details .dataset-result-list { gap: 0; border-top: 1px solid var(--border-muted); }
+.run-result-details .dataset-result-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px 12px;
+  padding: 13px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border-muted);
+  border-radius: 0;
+  background: transparent;
+}
+.run-result-details .dataset-result-item b { min-width: 0; color: var(--text); font-size: 13px; font-weight: 500; }
+.run-result-details .dataset-result-item small { font-size: 11px; }
+.run-result-details .dataset-card-actions { grid-column: 1 / -1; margin-top: 5px; }
+.result-warnings .warning { font-size: 13px; line-height: 1.7; }
+.run-result-details .artifact-link { padding: 10px 12px; border-radius: 5px; background: var(--surface-tinted); font-size: 13px; }
+.run-result-details .result-map-panel { margin-top: 26px; }
+.run-result-details .result-map-panel .panel-head { margin-bottom: 0; }
+.run-trace .trace-box { padding: 16px 0 0; border: 0; }
+.run-trace .eyebrow { color: var(--muted); font-size: 11px; font-weight: 400; overflow-wrap: anywhere; }
+.run-trace .event { gap: 12px; padding: 14px 0; }
+.run-trace .event b { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
+.run-trace .event small { font-size: 12px; line-height: 1.75; overflow-wrap: anywhere; }
+.result-identifiers { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.result-identifiers dd { margin: 0; overflow-wrap: anywhere; }
+.result-preview-select { display: grid; gap: 8px; margin-bottom: 14px; color: var(--text-secondary); font-size: 12px; }
+.result-preview-select select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; }
+
+@media (max-width: 640px) {
+  .run-list .run-row { padding-right: 6px; padding-left: 6px; }
+  .run-list .run-select { grid-template-columns: 7px minmax(0, 1fr); }
+  .run-row .run-select em { grid-column: 2; padding: 0; }
+  .run-list .run-actions { justify-content: flex-start; padding-left: 16px; }
+  .run-list .nested-run { margin-left: 14px; }
+  .result-identifiers { grid-template-columns: 1fr; gap: 4px; }
+  .result-identifiers dd { margin-bottom: 10px; }
+}
