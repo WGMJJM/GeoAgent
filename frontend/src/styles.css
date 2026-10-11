@@ -156,7 +156,6 @@ input::placeholder,textarea::placeholder { color:var(--muted); }
 .chat-welcome { padding:0 0 27px; }
 .welcome-label { display:flex; align-items:center; gap:8px; color:var(--accent); font-size:12px; }
 .chat-welcome h2 { margin:18px 0 9px; font-size:29px; line-height:1.35; letter-spacing:-.8px; font-weight:550; }
-.chat-welcome p { margin:0; color:var(--muted); font-size:14px; }
 .reply-target-banner { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; padding:8px 10px; border-left:2px solid var(--accent-border); background:var(--surface-muted); color:var(--text-secondary); font-size:12px; overflow-wrap:anywhere; }
 .reply-target-banner button { border:0; background:transparent; color:var(--muted); font-size:12px; white-space:nowrap; }
 .message-resources { display:flex; justify-content:flex-end; gap:6px; flex-wrap:wrap; max-width:100%; }
@@ -369,7 +368,6 @@ input::placeholder,textarea::placeholder { color:var(--muted); }
   .chat-empty { padding-bottom:8vh; }
   .chat-welcome { padding-bottom:22px; }
   .chat-welcome h2 { font-size:24px; margin-top:13px; }
-  .chat-welcome p { font-size:13px; }
   .composer { padding:10px 12px 8px; }
   .composer textarea { font-size:14px; min-height:32px; height:32px; }
   .composer-hint { font-size:9px; }

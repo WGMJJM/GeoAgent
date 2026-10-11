@@ -898,7 +898,7 @@ export function ProductChat({
   }, [busy, messages]);
 
   return <section className={`chat-layout product-chat ${messages.length === 0 && !busy && approvals.length === 0 ? "chat-empty" : ""}`}>
-    {messages.length === 0 && !busy && approvals.length === 0 && <div className="chat-welcome"><span className="welcome-label"><Icon name="compass" size={19} /> 空间分析</span><h2>开始一段新对话</h2><p>描述分析目标，或添加需要处理的数据。</p></div>}
+    {messages.length === 0 && !busy && approvals.length === 0 && <div className="chat-welcome"><span className="welcome-label"><Icon name="compass" size={19} /> 空间分析</span><h2>说说你想解决的空间问题</h2></div>}
     {approvals.length > 0 && <div className="approval-stack">{approvals.map((approval) => <ApprovalCard key={approval.id} approval={approval} busy={approvalBusyId === approval.id} onApprove={onApprove} onDeny={onDeny} />)}</div>}
     {(messages.length > 0 || busy) && <div className="chat-history" aria-live="polite" ref={historyRef} onScroll={updateScrollPreference}>
       {messages.map((item) => <ChatBubble selectedDatasetIds={selectedDatasetIds} onUseDataset={onUseDataset} item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
