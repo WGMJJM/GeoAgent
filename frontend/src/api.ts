@@ -1,3 +1,5 @@
+import { readServerEvents } from "./sse";
+
 export type RunStatus = "CREATED" | "RUNNING" | "WAITING_TOOL" | "WAITING_SUBAGENT" | "WAITING_USER" | "WAITING_APPROVAL" | "RETRYING" | "COMPLETED" | "PARTIAL_COMPLETED" | "FAILED" | "INTERRUPTED" | "CANCELLED" | "BUDGET_EXCEEDED";
 export type AgentResultStatus = "SUCCESS" | "PARTIAL" | "FAILED" | "BLOCKED" | "CANCELLED";
 export type MessageRoute = "execution" | "waiting" | "blocked";
@@ -62,11 +64,6 @@ async function request<T>(url: string, init?: RequestInit, timeoutMs: number | n
   }
 }
 
-function websocketUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/ws`;
-}
-
 async function uploadForm(url: string, form: FormData, failureMessage: string): Promise<Dataset> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
@@ -101,72 +98,69 @@ function uploadShapefile(files: File[]): Promise<Dataset> {
 }
 
 function streamMessage(message: string, datasetIds: string[], attachmentIds: string[], onRun: (run: Run) => void, onEvent: (event: Event) => void, onDelta: (content: string, tokenUsage?: TokenUsage) => void, conversationId?: string, modelProfile?: string, onProgress?: () => void, replyToRunId?: string, reasoningEffort?: ReasoningEffort) {
-  let cancelRequest = () => undefined;
-  const promise = new Promise<MessageResponse>((resolve, reject) => {
-    let socket: WebSocket | null = null;
-    let settled = false;
-    let watchdog: number | undefined;
-    const clearWatchdog = () => {
-      if (watchdog !== undefined) window.clearTimeout(watchdog);
-      watchdog = undefined;
-    };
-    const touchConnection = () => {
-      if (settled) return;
-      clearWatchdog();
-      watchdog = window.setTimeout(() => fail(new Error("GeoAgent 实时通道长时间无响应")), STREAM_INACTIVITY_TIMEOUT_MS);
-    };
-    const markExecutionProgress = () => {
-      if (!settled) onProgress?.();
-    };
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      clearWatchdog();
-      socket?.close();
-      reject(error);
-    };
-    cancelRequest = () => {
-      if (settled) return;
-      settled = true;
-      clearWatchdog();
-      socket?.close();
-      reject(new Error("请求已取消"));
-    };
-    socket = new WebSocket(websocketUrl());
+  const controller = new AbortController();
+  let settled = false;
+  let abortReason: Error | undefined;
+  let watchdog: number | undefined;
+  const clearWatchdog = () => {
+    if (watchdog !== undefined) window.clearTimeout(watchdog);
+    watchdog = undefined;
+  };
+  const abort = (error: Error) => {
+    if (settled || controller.signal.aborted) return;
+    abortReason = error;
+    controller.abort();
+  };
+  const touchConnection = () => {
+    if (settled || controller.signal.aborted) return;
+    clearWatchdog();
+    watchdog = window.setTimeout(() => abort(new Error("GeoAgent 实时通道长时间无响应")), STREAM_INACTIVITY_TIMEOUT_MS);
+  };
+  const promise = (async (): Promise<MessageResponse> => {
     touchConnection();
-    socket.onopen = () => {
+    try {
+      const response = await fetch("/api/v1/messages/stream", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        signal: controller.signal,
+        body: JSON.stringify({ message, conversation_id: conversationId, model_profile: modelProfile || undefined, reasoning_effort: reasoningEffort || undefined, dataset_ids: datasetIds, attachment_ids: attachmentIds, reply_to_run_id: replyToRunId || undefined }),
+      });
       touchConnection();
-      try {
-        socket.send(JSON.stringify({ type: "ask", message, conversation_id: conversationId, model_profile: modelProfile || undefined, reasoning_effort: reasoningEffort || undefined, dataset_ids: datasetIds, attachment_ids: attachmentIds, reply_to_run_id: replyToRunId || undefined }));
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error("无法发送 GeoAgent 请求"));
+      if (!response.ok) {
+        const body = await response.text();
+        let detail = body;
+        try { detail = (JSON.parse(body) as { detail?: string }).detail ?? body; } catch { /* 保留非 JSON 错误。 */ }
+        throw new ApiError(detail || `实时请求失败（${response.status}）`, response.status);
       }
-    };
-    socket.onmessage = (raw) => {
-      try {
-        // heartbeat 只刷新连接 watchdog，不进入 execution progress。
-        touchConnection();
-        const payload = JSON.parse(raw.data as string) as { type: string; data?: Run | Event | MessageResponse; content?: string; token_usage?: TokenUsage; message?: string };
-        if (payload.type === "run") { markExecutionProgress(); onRun(payload.data as Run); }
-        else if (payload.type === "event") { markExecutionProgress(); onEvent(payload.data as Event); }
-        else if (payload.type === "delta") { markExecutionProgress(); onDelta(payload.content ?? "", payload.token_usage); }
-        else if (payload.type === "usage") { markExecutionProgress(); onDelta("", payload.token_usage); }
-        else if (payload.type === "heartbeat") return;
-        else if (payload.type === "response") {
-          markExecutionProgress();
-          settled = true;
-          clearWatchdog();
-          resolve(payload.data as MessageResponse);
-          socket?.close();
-        } else if (payload.type === "error") fail(new Error(payload.message ?? "实时请求失败"));
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error("GeoAgent 返回了无效的实时消息"));
+      if (response.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "text/event-stream" || !response.body) {
+        throw new Error("GeoAgent 未返回有效的 SSE 响应");
       }
-    };
-    socket.onerror = () => fail(new Error("无法连接 GeoAgent 实时通道"));
-    socket.onclose = () => fail(new Error("GeoAgent 实时通道已断开"));
-  });
-  return Object.assign(promise, { cancel: () => cancelRequest() });
+      for await (const event of readServerEvents(response.body, touchConnection)) {
+        if (controller.signal.aborted) throw abortReason;
+        // 心跳只维持连接，不代表 Agent 执行取得进展。未知事件允许向前兼容。
+        if (event.event === "heartbeat") continue;
+        if (!["run", "event", "delta", "usage", "response", "error"].includes(event.event)) continue;
+        let payload;
+        try { payload = JSON.parse(event.data); } catch { throw new Error("GeoAgent 返回了无效的实时消息"); }
+        if (event.event === "error") throw new Error(payload.message ?? "实时请求失败");
+        onProgress?.();
+        if (event.event === "run") onRun(payload as Run);
+        else if (event.event === "event") onEvent(payload as Event);
+        else if (event.event === "delta") onDelta(payload.content ?? "", payload.token_usage);
+        else if (event.event === "usage") onDelta("", payload.token_usage);
+        else if (event.event === "response") return payload as MessageResponse;
+      }
+      throw new Error("GeoAgent 实时通道提前结束，未收到最终结果");
+    } catch (error) {
+      throw abortReason ?? error;
+    } finally {
+      settled = true;
+      clearWatchdog();
+      controller.abort();
+    }
+  })();
+  return Object.assign(promise, { cancel: () => abort(new Error("请求已取消")) });
 }
 
 export const api = {
