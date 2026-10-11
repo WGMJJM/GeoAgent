@@ -86,10 +86,10 @@ class Settings(BaseSettings):
     knowledge_max_calls: int = Field(default=3, ge=1)
     knowledge_query_cache_size: int = Field(default=64, ge=1)
     embedding_base_url: str = "https://api.siliconflow.cn/v1"
-    embedding_model: str = "BAAI/bge-m3"
+    embedding_model: str = "Qwen/Qwen3-Embedding-8B"
     embedding_api_key: SecretStr = SecretStr("")
-    embedding_tokenizer_file: Path = Field(default=Path("state/knowledge/tokenizers/bge-m3.json"))
-    embedding_max_input_tokens: int = Field(default=8192, ge=1)
+    embedding_tokenizer_file: Path = Field(default=Path("state/knowledge/tokenizers/qwen3-embedding-8b.json"))
+    embedding_max_input_tokens: int = Field(default=32768, ge=1)
     embedding_timeout_seconds: float = Field(default=20, gt=0)
     embedding_max_retries: int = Field(default=1, ge=0)
     embedding_batch_size: int = Field(default=16, ge=1)
