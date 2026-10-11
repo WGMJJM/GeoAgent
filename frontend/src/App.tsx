@@ -932,9 +932,9 @@ export function ProductChat({
     {isEmpty && <div className="welcome-examples">
       <p className="welcome-examples-label">从一个具体问题开始</p>
       <ul>
-        <li><span className="welcome-example-category"><Icon name="layers" size={14} />数据检查</span><span>检查数据的坐标系与字段</span></li>
-        <li><span className="welcome-example-category"><Icon name="compass" size={14} />空间分析</span><span>计算道路周边的缓冲区</span></li>
-        <li><span className="welcome-example-category"><Icon name="activity" size={14} />统计汇总</span><span>统计各区域的地物数量</span></li>
+        <li><span className="welcome-example-category"><Icon name="layers" size={14} />数据检查</span></li>
+        <li><span className="welcome-example-category"><Icon name="compass" size={14} />空间分析</span></li>
+        <li><span className="welcome-example-category"><Icon name="activity" size={14} />统计汇总</span></li>
       </ul>
     </div>}
   </section>;
