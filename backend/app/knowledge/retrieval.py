@@ -131,18 +131,36 @@ class KnowledgeService:
         dimensions = {len(item["vector"]) for item in chunks if item["embedding_key"] == key and item["vector"] is not None}
         if len(dimensions) > 1:
             raise ValueError("已有索引维度不一致，请用新的模型配置完整重建。")
-        vectors, tokens, requests, dimension = {}, 0, 0, next(iter(dimensions), None)
-        for start in range(0, len(pending), self.settings.embedding_batch_size):
-            batch = pending[start:start + self.settings.embedding_batch_size]
-            encoded, usage = await self.embeddings.embed([item["text"] for item in batch])
-            if dimension is not None and encoded.shape[1] != dimension:
-                raise ValueError("同一次构建返回了不同维度；旧索引未覆盖。")
-            dimension = encoded.shape[1]
-            vectors.update({item["id"]: vector for item, vector in zip(batch, encoded, strict=True)})
-            tokens += usage["input_tokens"] or 0
-            requests += usage["requests"]
-        self.store.publish_vectors(revision, key, vectors)
-        return {"embedded_chunks": len(vectors), "reused_chunks": len(chunks) - len(vectors),
+        embedded, tokens, requests, dimension = 0, 0, 0, next(iter(dimensions), None)
+        starts = range(0, len(pending), self.settings.embedding_batch_size)
+        batches = iter(starts)
+
+        async def worker():
+            nonlocal revision, dimension, embedded, tokens, requests
+            for start in batches:
+                batch = pending[start:start + self.settings.embedding_batch_size]
+                encoded, usage = await self.embeddings.embed([item["text"] for item in batch])
+                if dimension is not None and encoded.shape[1] != dimension:
+                    raise ValueError("同一次构建返回了不同维度；当前批次未写入，已保存批次保留。")
+                # 网络并行；同一事件循环内的短事务和修订号更新之间不 await，避免并发覆盖。
+                revision = self.store.publish_vectors(
+                    revision, key, {item["id"]: vector for item, vector in zip(batch, encoded, strict=True)},
+                )
+                dimension = encoded.shape[1]
+                embedded += len(batch)
+                tokens += usage["input_tokens"] or 0
+                requests += usage["requests"]
+
+        workers = [asyncio.create_task(worker())
+                   for _ in range(min(self.settings.embedding_concurrency, len(starts)))]
+        try:
+            await asyncio.gather(*workers)
+        finally:
+            for task in workers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+        return {"embedded_chunks": embedded, "reused_chunks": len(chunks) - len(pending),
                 "input_tokens": tokens, "requests": requests, "dimension": dimension}
 
     async def close(self) -> None:

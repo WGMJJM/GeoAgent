@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: float = Field(default=20, gt=0)
     embedding_max_retries: int = Field(default=1, ge=0)
     embedding_batch_size: int = Field(default=16, ge=1)
+    embedding_concurrency: int = Field(default=10, ge=1)
     model_profiles: str | None = None
     additional_model_profiles: str | None = None
     model_reasoning_config: str | None = None

@@ -84,14 +84,15 @@ class KnowledgeStore:
             db.execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'")
         return {"chunks": len(chunks), "changed": changed, "removed": len(removed)}
 
-    def publish_vectors(self, revision: int, key: str, vectors: dict[str, np.ndarray]) -> None:
-        """网络请求不占数据库锁；发布时检查导入版本，防止给已变更正文套上旧向量。"""
+    def publish_vectors(self, revision: int, key: str, vectors: dict[str, np.ndarray]) -> int:
+        """按批原子发布并返回新修订号；版本冲突时不覆盖已变更正文的向量。"""
         with self.connect(write=True) as db:
             db.execute("BEGIN IMMEDIATE")
             if int(db.execute("SELECT value FROM metadata WHERE key='revision'").fetchone()[0]) != revision:
-                raise ValueError("资料在嵌入期间已更新，请重新执行 embed；旧索引未被覆盖。")
+                raise ValueError("资料在嵌入期间已更新，请重新执行 embed；当前批次未写入，已保存批次保留。")
             db.executemany("UPDATE chunks SET embedding_key=?,vector=? WHERE id=?",
                            ((key, np.asarray(vector, dtype="<f4").tobytes(), identifier)
                             for identifier, vector in vectors.items()))
             if vectors:
                 db.execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'")
+        return revision + 1 if vectors else revision
