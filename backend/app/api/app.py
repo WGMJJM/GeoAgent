@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,20 +15,18 @@ from fastapi import (
     Request,
     Response,
     UploadFile,
-    WebSocket,
-    WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
+from app.api.streaming import message_stream
 from app.application import Application
 from app.core.models import (
     AgentRequest,
     ApprovalStatus,
     ReasoningEffort,
     RunStatus,
-    TokenUsage,
     User,
     UserView,
     new_id,
@@ -302,6 +300,15 @@ def create_app(application: Application | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return response.model_dump(mode="json")
 
+    @api.post("/api/v1/messages/stream")
+    async def stream_message(body: AskBody, current_user: User = Depends(get_current_user)) -> StreamingResponse:
+        _ensure_body_conversation_access(geoagent, body, current_user)
+        try:
+            request = _request_from_body(body, user_id=current_user.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return message_stream(geoagent, request)
+
     @api.get("/api/v1/conversations")
     async def conversations(limit: int = 50, current_user: User = Depends(get_current_user)) -> list[dict[str, Any]]:
         return [item.model_dump(mode="json") for item in geoagent.conversations.list(limit, user_id=current_user.id)]
@@ -510,117 +517,6 @@ def create_app(application: Application | None = None) -> FastAPI:
         run = await geoagent.run_manager.continue_run(run_id, user_id=current_user.id, technical=True)
         result = await geoagent.conversations.wait(run.id, force_assistant=True)
         return {"resumed_from": run_id, "run_id": run.id, "checkpoint": checkpoint.id, "result": result.model_dump(mode="json")}
-
-    @api.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket) -> None:
-        current_user = geoagent.auth.authenticate_token(websocket.cookies.get(geoagent.settings.auth_cookie_name))
-        if current_user is None:
-            await websocket.close(code=1008, reason="请先登录")
-            return
-        await websocket.accept()
-        try:
-            while True:
-                payload = await websocket.receive_json()
-                if payload.get("type") != "ask":
-                    await websocket.send_json({"type": "error", "message": "只支持 type=ask"})
-                    continue
-                request = AgentRequest(
-                    user_input=payload.get("message", ""),
-                    conversation_id=payload.get("conversation_id") or new_id("conv"),
-                    user_id=current_user.id,
-                    model_profile=payload.get("model_profile"),
-                    reasoning_effort=payload.get("reasoning_effort"),
-                    dataset_ids=payload.get("dataset_ids", []),
-                    attachment_ids=payload.get("attachment_ids", []),
-                    referenced_run_ids=payload.get("referenced_run_ids", []),
-                    reply_to_run_id=payload.get("reply_to_run_id"),
-                    related_task_id=payload.get("related_task_id"),
-                    task_relation=payload.get("task_relation"),
-                    context=payload.get("context", {}),
-                )
-                event_queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
-                stream_run = None
-
-                async def on_event(event) -> None:
-                    if stream_run is not None and event.run_id == stream_run.id:
-                        event_queue.put_nowait(("event", event))
-
-                async def on_model_delta(content: str, token_usage: TokenUsage) -> None:
-                    event_queue.put_nowait(("delta", {"content": content, "token_usage": token_usage}))
-
-                async def on_run(item) -> None:
-                    nonlocal stream_run
-                    stream_run = item
-                    event_queue.put_nowait(("run", item))
-
-                geoagent.bus.subscribe(on_event)
-                response_task = asyncio.create_task(
-                    geoagent.message_entry.submit(
-                        request,
-                        on_run=on_run,
-                        on_model_delta=on_model_delta,
-                    )
-                )
-
-                async def emit_heartbeat() -> None:
-                    while True:
-                        await asyncio.sleep(15)
-                        event_queue.put_nowait(("heartbeat", None))
-
-                heartbeat_task = asyncio.create_task(emit_heartbeat())
-
-                waiter = response_task
-                event_waiter = asyncio.create_task(event_queue.get())
-                try:
-                    while True:
-                        done, _ = await asyncio.wait((waiter, event_waiter), return_when=asyncio.FIRST_COMPLETED)
-                        if event_waiter in done:
-                            kind, item = event_waiter.result()
-                            if kind == "run":
-                                await websocket.send_json({"type": "run", "data": item.model_dump(mode="json")})
-                            elif kind == "event":
-                                await websocket.send_json({"type": "event", "data": item.model_dump(mode="json")})
-                            elif kind == "heartbeat":
-                                await websocket.send_json({"type": "heartbeat"})
-                            else:
-                                await websocket.send_json({
-                                    "type": "delta" if item["content"] else "usage",
-                                    "content": item["content"],
-                                    "token_usage": item["token_usage"].model_dump(mode="json"),
-                                })
-                            event_waiter = asyncio.create_task(event_queue.get())
-                            continue
-                        response = waiter.result()
-                        while not event_queue.empty():
-                            kind, item = event_queue.get_nowait()
-                            if kind == "run":
-                                await websocket.send_json({"type": "run", "data": item.model_dump(mode="json")})
-                            elif kind == "event":
-                                await websocket.send_json({"type": "event", "data": item.model_dump(mode="json")})
-                            elif kind == "heartbeat":
-                                await websocket.send_json({"type": "heartbeat"})
-                            else:
-                                await websocket.send_json({
-                                    "type": "delta" if item["content"] else "usage",
-                                    "content": item["content"],
-                                    "token_usage": item["token_usage"].model_dump(mode="json"),
-                                })
-                        await websocket.send_json({"type": "response", "data": response.model_dump(mode="json")})
-                        break
-                finally:
-                    geoagent.bus.unsubscribe(on_event)
-                    if not event_waiter.done():
-                        event_waiter.cancel()
-                    heartbeat_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await heartbeat_task
-                    if not waiter.done():
-                        if stream_run is not None:
-                            await geoagent.run_manager.cancel(stream_run.id)
-                        if not response_task.done():
-                            response_task.cancel()
-        except WebSocketDisconnect:
-            return
 
     return api
 

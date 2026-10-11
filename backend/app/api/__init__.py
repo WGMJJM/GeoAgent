@@ -1,4 +1,4 @@
-"""HTTP/WebSocket API。"""
+"""HTTP/SSE API。"""
 
 from .app import create_app
 
