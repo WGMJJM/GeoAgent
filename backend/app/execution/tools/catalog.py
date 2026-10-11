@@ -9,10 +9,10 @@ from threading import RLock
 from typing import Any
 
 import bm25s
-from bm25s.stopwords import STOPWORDS_EN
 
 from app.auth.policy import PermissionPolicy, ToolDiscoveryContext
 from app.core.models import ToolMetadata
+from app.core.search import tokenize_terms as _tokenize
 
 from .provider import DynamicToolProvider, UnsupportedToolDefinition
 from .registry import ToolRegistry
@@ -300,21 +300,6 @@ def _metadata_text(metadata: ToolMetadata) -> str:
             if isinstance(value, dict):
                 parts.append(str(value.get("description", "")))
     return " ".join(parts)
-
-
-def _tokenize(text: str) -> tuple[str, ...]:
-    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
-    terms = [
-        item.casefold()
-        for item in _ASCII_WORD.findall(separated)
-        if len(item) >= 2 and item.casefold() not in STOPWORDS_EN
-    ]
-    for value in _CJK_RUN.findall(text):
-        if len(value) <= 2:
-            terms.append(value)
-        else:
-            terms.extend(value[index : index + 2] for index in range(len(value) - 1))
-    return tuple(terms)
 
 
 def _identifier_terms(value: str) -> tuple[str, ...]:

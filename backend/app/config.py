@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.models import ReasoningEffort
@@ -75,6 +75,24 @@ class Settings(BaseSettings):
     arcpy_cache: Path = Field(default=Path("state/arcpy"))
     mcp_config: Path | None = None
     geocoding_url: str = "https://geocoding-api.open-meteo.com/v1/search"
+    knowledge_enabled: bool = False
+    knowledge_directory: Path = Field(default=Path("state/knowledge"))
+    knowledge_chunk_tokens: int = Field(default=700, ge=64)
+    knowledge_bm25_candidates: int = Field(default=10, ge=1)
+    knowledge_vector_candidates: int = Field(default=10, ge=1)
+    knowledge_rrf_k: int = Field(default=60, ge=1)
+    knowledge_results: int = Field(default=3, ge=1)
+    knowledge_result_tokens: int = Field(default=3200, ge=256)
+    knowledge_max_calls: int = Field(default=3, ge=1)
+    knowledge_query_cache_size: int = Field(default=64, ge=1)
+    embedding_base_url: str = "https://api.siliconflow.cn/v1"
+    embedding_model: str = "BAAI/bge-m3"
+    embedding_api_key: SecretStr = SecretStr("")
+    embedding_tokenizer_file: Path = Field(default=Path("state/knowledge/tokenizers/bge-m3.json"))
+    embedding_max_input_tokens: int = Field(default=8192, ge=1)
+    embedding_timeout_seconds: float = Field(default=20, gt=0)
+    embedding_max_retries: int = Field(default=1, ge=0)
+    embedding_batch_size: int = Field(default=16, ge=1)
     model_profiles: str | None = None
     additional_model_profiles: str | None = None
     model_reasoning_config: str | None = None
@@ -97,6 +115,14 @@ class Settings(BaseSettings):
     @property
     def skills_path(self) -> Path:
         return self._absolute(self.skills_directory)
+
+    @property
+    def knowledge_path(self) -> Path:
+        return self._absolute(self.knowledge_directory)
+
+    @property
+    def embedding_tokenizer_path(self) -> Path:
+        return self._absolute(self.embedding_tokenizer_file)
 
     @property
     def arcpy_cache_path(self) -> Path:
