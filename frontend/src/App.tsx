@@ -853,6 +853,7 @@ export function ProductChat({
   message, setMessage, busy, conversationReady, streamingReply, liveTokenUsage, elapsedMs, send, cancel, activeRunId, events, messages, runs = [], onShowRun, replyToRunId, onReplyToRun, datasets, selectedDatasetIds, onRemoveDataset, onUseDataset, uploadedFiles, uploading, onUpload, onRemoveFile, modelStatus, selectedModelProfile, onModelChange, selectedReasoningEffort, onReasoningChange, approvals, approvalBusyId, onApprove, onDeny,
 }: ProductChatProps) {
   const sending = busy;
+  const isEmpty = messages.length === 0 && !busy && approvals.length === 0;
   const historyRef = useRef<HTMLDivElement>(null);
   const followsLatestRef = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
@@ -897,8 +898,21 @@ export function ProductChat({
     return () => observer.disconnect();
   }, [busy, messages]);
 
-  return <section className={`chat-layout product-chat ${messages.length === 0 && !busy && approvals.length === 0 ? "chat-empty" : ""}`}>
-    {messages.length === 0 && !busy && approvals.length === 0 && <div className="chat-welcome"><span className="welcome-label"><Icon name="compass" size={19} /> 空间分析</span><h2>说说你想解决的空间问题</h2></div>}
+  return <section className={`chat-layout product-chat ${isEmpty ? "chat-empty" : ""}`}>
+    {isEmpty && <div className="chat-welcome">
+      <div className="welcome-copy"><span className="welcome-label"><Icon name="compass" size={19} /> 空间分析</span><h2>说说你想解决的空间问题</h2></div>
+      <svg className="welcome-terrain" viewBox="0 0 240 136" fill="none" aria-hidden="true" focusable="false">
+        <g stroke="currentColor" strokeWidth="1">
+          <path opacity=".35" d="M10 96C-2 72 26 65 34 43C44 13 67 24 87 14C111 2 140 8 159 24C178 41 213 29 226 53C245 87 216 106 185 108C154 110 143 131 113 128C84 124 70 110 48 113C29 116 16 110 10 96Z" />
+          <path opacity=".5" d="M28 91C17 73 43 65 49 47C57 27 76 36 94 25C114 14 134 23 149 35C166 49 197 41 211 59C226 81 204 94 180 97C153 101 139 118 116 115C90 112 78 99 56 101C43 103 33 102 28 91Z" />
+          <path opacity=".65" d="M46 85C39 72 59 64 65 51C73 38 88 44 102 36C118 27 131 36 143 46C157 59 182 51 194 65C204 78 189 83 175 87C150 91 136 105 117 102C96 99 84 87 68 90C58 92 50 94 46 85Z" />
+          <path opacity=".8" d="M64 78C61 70 77 64 81 55C86 48 100 51 108 47C119 42 128 50 137 57C150 68 171 61 177 69C184 80 161 78 151 85C138 94 123 93 112 86C99 78 89 77 80 80C72 83 67 84 64 78Z" />
+          <path d="M88 65C89 57 102 61 112 57C122 54 127 65 136 68C146 74 134 82 123 78C111 72 105 68 96 71C88 74 82 72 88 65Z" />
+        </g>
+        <path d="M111 62V72M106 67H116" stroke="var(--accent)" strokeWidth="1.2" />
+        <path d="M205 18V34M197 26H213M24 119V127M20 123H28" stroke="currentColor" strokeWidth="1" opacity=".5" />
+      </svg>
+    </div>}
     {approvals.length > 0 && <div className="approval-stack">{approvals.map((approval) => <ApprovalCard key={approval.id} approval={approval} busy={approvalBusyId === approval.id} onApprove={onApprove} onDeny={onDeny} />)}</div>}
     {(messages.length > 0 || busy) && <div className="chat-history" aria-live="polite" ref={historyRef} onScroll={updateScrollPreference}>
       {messages.map((item) => <ChatBubble selectedDatasetIds={selectedDatasetIds} onUseDataset={onUseDataset} item={item} runs={runs} datasets={datasets} onShowRun={onShowRun} onReplyToRun={onReplyToRun} key={item.id} />)}
@@ -915,6 +929,14 @@ export function ProductChat({
       <div className="composer-foot"><div className="composer-left"><label className="file-button" title="添加文件；Shapefile 请同时选择同名的 .shp、.shx、.dbf，或上传 ZIP" aria-label="添加文件"><span aria-hidden="true"><Icon name="plus" size={22} /></span><input type="file" multiple accept=".geojson,.json,.gpkg,.shp,.shx,.dbf,.prj,.cpg,.qpj,.zip,.kml,.gml,.tif,.tiff,.img,.vrt,.asc,.csv,.tsv,.parquet,.jsonl,.txt,.md,.pdf,.doc,.docx,.png,.jpg,.jpeg,.bmp,.webp" disabled={sending || uploading} onChange={(event) => { void onUpload(event.currentTarget.files); event.currentTarget.value = ""; }} /></label>{selectedDatasetIds.length > 0 && <div className="file-chips request-dataset-chips"><span className="resource-chip-label">数据：</span>{selectedDatasetIds.map((id) => { const dataset = datasets.find((item) => item.id === id); return <span className="file-chip" key={id}><span className="file-chip-name"><Icon name="layers" size={11} /> {dataset?.name ?? id}</span><button type="button" className="file-remove" title={`移除数据集 ${dataset?.name ?? id}`} aria-label={`移除数据集 ${dataset?.name ?? id}`} onClick={() => onRemoveDataset(id)}><Icon name="close" size={11} /></button></span>; })}</div>}{uploadedFiles.length > 0 && <div className="file-chips request-attachment-chips">{uploadedFiles.map((file) => <span className="file-chip" key={file.id}><span className="file-chip-name"><Icon name="attachment" size={11} /> {file.name}</span><button type="button" className="file-remove" title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => onRemoveFile(file.id)}><Icon name="close" size={11} /></button></span>)}</div>}</div><div className="composer-right">{uploading && <span className="uploading">正在上传…</span>}{modelStatus && (modelStatus.profiles.length > 0 ? <ModelReasoningPicker profiles={modelStatus.profiles} selectedModelProfile={selectedModelProfile} selectedReasoningEffort={selectedReasoningEffort} disabled={sending} onModelChange={onModelChange} onReasoningChange={onReasoningChange} /> : <span className="model-picker-offline">未配置模型</span>)}{busy ? <button className="cancel" aria-label="取消运行" onClick={() => void cancel()}>取消运行</button> : <button className="primary send-button" aria-label="发送" title="发送" disabled={!message.trim() || sending || uploading || !conversationReady} onClick={() => void send()}><Icon name="send" size={19} /></button>}</div></div>
     </div>
     <p className="composer-hint">Enter 发送<span>·</span>Shift + Enter 换行</p>
+    {isEmpty && <div className="welcome-examples">
+      <p className="welcome-examples-label">从一个具体问题开始</p>
+      <ul>
+        <li><span className="welcome-example-category"><Icon name="layers" size={14} />数据检查</span><span>检查数据的坐标系与字段</span></li>
+        <li><span className="welcome-example-category"><Icon name="compass" size={14} />空间分析</span><span>计算道路周边的缓冲区</span></li>
+        <li><span className="welcome-example-category"><Icon name="activity" size={14} />统计汇总</span><span>统计各区域的地物数量</span></li>
+      </ul>
+    </div>}
   </section>;
 }
 
