@@ -173,6 +173,12 @@ class ToolExecutor:
                 return stored_result.model_copy(update={"call_id": call.id})
             if execution_status is ToolExecutionStatus.RUNNING:
                 return _in_progress_result(call.id)
+        limit = registered.metadata.max_calls_per_run
+        if limit is not None and call.run_id:
+            previous_count = sum(name == call.name and identifier != call.id
+                                 for identifier, name, _, _ in self.store.list_tool_call_states(call.run_id))
+            if previous_count >= limit:
+                return _blocked_tool_result(call.id, "TOOL_CALL_LIMIT", "本轮此能力的调用次数已用尽，请使用已有证据完成回答或说明资料不足。")
         if self.metrics:
             self.metrics.increment("tool_calls.started")
             self.metrics.increment("tool_call_count")

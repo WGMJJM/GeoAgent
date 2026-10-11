@@ -319,6 +319,8 @@ class ToolMetadata(StrictModel):
     required_envs: list[str] = Field(default_factory=list)
     risk_level: RiskLevel = RiskLevel.READ
     supports_retry: bool = False
+    requires_completion_review: bool = True
+    max_calls_per_run: int | None = Field(default=None, ge=1)
     dataset_output_policy: DatasetOutputPolicy = DatasetOutputPolicy.NONE
     produces_artifact: bool = False
     tags: list[str] = Field(default_factory=list)

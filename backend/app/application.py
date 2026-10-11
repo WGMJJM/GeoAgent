@@ -28,6 +28,7 @@ from app.gis.preview import DatasetPreviewService
 from app.gis.raster import RasterService
 from app.gis.vector import VectorService
 from app.gis.visualization import MapRenderer
+from app.knowledge.retrieval import KnowledgeService
 from app.memory import (
     ConversationMemoryService,
     ConversationSummarizer,
@@ -41,6 +42,7 @@ from app.run import RunManager
 from app.run.recovery import RecoveryController
 from app.state import StateStore
 from app.tools.gis import register_gis_tools
+from app.tools.knowledge import register_knowledge_tools
 from app.tools.runtime import register_runtime_tools
 
 
@@ -53,6 +55,7 @@ class Application:
         self.approvals = ApprovalService(self.store)
         self.bus = EventBus()
         self.metrics = Metrics()
+        self.knowledge = KnowledgeService(self.settings, self.metrics)
         self.trace = TraceRecorder(self.store, self.bus, self.metrics)
         self.recovery = RecoveryController(self.store, self.settings, self.trace)
         self.workspace = WorkspaceManager(self.settings.workspace_path)
@@ -88,6 +91,7 @@ class Application:
         self.tool_registry = ToolRegistry()
         register_gis_tools(self.tool_registry)
         register_runtime_tools(self.tool_registry, python_environment=self.python_executor.environment())
+        register_knowledge_tools(self.tool_registry, max_calls=self.settings.knowledge_max_calls)
         self.arcpy = None
         if self.settings.enable_arcpy:
             executable = discover_arcpy_executable(self.settings.arcpy_executable)
@@ -117,6 +121,7 @@ class Application:
             "shell": self.shell_executor,
             "arcpy": self.arcpy,
             "mcp": self.mcp,
+            "knowledge": self.knowledge,
             "allow_unsafe_python": self.settings.enable_unsafe_python,
             "system_owned": True,
         }
@@ -223,6 +228,7 @@ class Application:
         await self.run_manager.close()
         await self.conversation_memory.close()
         await self.mcp.close()
+        await self.knowledge.close()
         if self.arcpy is not None:
             self.arcpy.close()
         adapters = list(self.model_adapters.values())

@@ -1125,6 +1125,12 @@ class StateStore:
                            (memory.model_dump_json(), memory.updated_at.isoformat(), memory.task_id))
             db.execute("UPDATE delegations SET payload_json=? WHERE id=?", (self._json(state), state["id"]))
 
+    def list_tool_call_states(self, run_id: str) -> list[tuple[str, str, ToolExecutionStatus, int]]:
+        """预算和审核入口只读状态，不反复解码可能很大的工具结果。"""
+        with self._connect() as db:
+            rows = db.execute("SELECT id,name,status,attempt FROM tool_calls WHERE run_id=?", (run_id,)).fetchall()
+        return [(row[0], row[1], ToolExecutionStatus(row[2]), row[3]) for row in rows]
+
     def list_tool_calls(self, run_id: str) -> list[tuple[ToolCall, ToolExecutionStatus, ToolResult | None]]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM tool_calls WHERE run_id=? ORDER BY created_at,id", (run_id,)).fetchall()

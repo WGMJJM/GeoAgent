@@ -79,6 +79,11 @@ class PermissionPolicy:
             else frozenset()
         )
         environments: set[str] = set()
+        knowledge = services.get("knowledge")
+        if knowledge is not None and knowledge.available:
+            environments.add("knowledge.index")
+            if authenticated_user:
+                scopes |= frozenset({"knowledge.read"})
         if services.get("registry") is not None and services.get("inspector") is not None:
             environments.add("gis.dataset")
         for service, environment in (

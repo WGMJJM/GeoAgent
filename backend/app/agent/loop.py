@@ -23,6 +23,7 @@ from app.core.models import (
     TokenUsage,
     ToolCall,
     ToolError,
+    ToolExecutionStatus,
     ToolResult,
     ToolStatus,
     new_id,
@@ -433,7 +434,7 @@ class AgentLoop:
                                           pending_approvals, discovered_names=discovered_names, used_names=used_names)
                     response, streamed_answer = await self._request_model(
                         current, model, model_request, local_input_tokens, on_model_delta,
-                        can_stream_answer=not self.settings.completion_review_enabled or current.tool_call_count == 0,
+                        can_stream_answer=not self._requires_completion_review(current),
                     )
                     resume_model = False
             except Exception:
@@ -782,6 +783,7 @@ class AgentLoop:
                                     result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
                                 else:
                                     execution_services = self._execution_services(request, current)
+                                    execution_services["count_tokens"] = model.count_tokens
                                     execution_context = self._discovery_context(request, execution_services, current)
                                     allowed_now = self._available_tool_names(execution_context, permitted_this_batch)
                                     call = ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id, agent_id=current.agent_id)
@@ -893,7 +895,7 @@ class AgentLoop:
                 ))
             answer = response.content
             review = None
-            if self.settings.completion_review_enabled and current.tool_call_count > 0:
+            if self._requires_completion_review(current):
                 if not restoring_answer:
                     messages.append({"role": "assistant", "content": answer})
                 self._save_checkpoint(
@@ -992,6 +994,19 @@ class AgentLoop:
                 trace_id=current.id,
             ),
         )
+
+    def _requires_completion_review(self, run: Run) -> bool:
+        """仅显式声明为资料检索的工具免执行审核；旧工具及内部控制动作维持原边界。"""
+        if not self.settings.completion_review_enabled or run.tool_call_count == 0:
+            return False
+        records = self.store.list_tool_call_states(run.id)
+        exempt_attempts = 0
+        for _, name, status, attempt in records:
+            if status is ToolExecutionStatus.RUNNING:
+                return True
+            if name in self.registry.names() and not self.registry.get(name).metadata.requires_completion_review:
+                exempt_attempts += attempt
+        return run.tool_call_count > exempt_attempts
 
     async def _wait_for_user(self, run: Run, request: AgentRequest, question: str) -> AgentResult:
         return await self._finish(run, request=request, result=AgentResult(
