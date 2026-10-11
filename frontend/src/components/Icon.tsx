@@ -14,6 +14,7 @@ const shapes = {
   refresh: <path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6" />,
   chevronDown: <path d="m7 10 5 5 5-5" />,
   check: <path d="m5 12 4 4L19 6" />,
+  copy: <><rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></>,
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   attachment: <path d="m8 12 7-7a4 4 0 0 1 6 6L10 22a6 6 0 0 1-8-8L13 3m-7 13 9-9" />,
   send: <><path d="m21 3-7 18-4-7-7-4 18-7Z" /><path d="m10 14 11-11" /></>,
