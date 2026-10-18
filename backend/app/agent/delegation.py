@@ -43,7 +43,7 @@ DELEGATE_TOOL = {
     "type": "function",
     "function": {
         "name": "agent.delegate",
-        "description": "将可拆分任务交给独立子 Agent。提交结构化依赖、输入数据和最小工具白名单；output_roles 将输出角色映射到真实产出工具名。子 Agent 不能再次委派。",
+        "description": "仅将高工作量、相互独立且协作收益明显的局部工作交给子 Agent；默认单 Agent ReAct，可拆分不等于需要委派。基于当前已知事实提交局部计划、真实输入引用和最小工具白名单；output_roles 将输出角色映射到真实且允许的 Dataset 产出工具名。子 Agent 不能再次委派。",
         "parameters": DelegationPlan.model_json_schema(),
     },
 }
