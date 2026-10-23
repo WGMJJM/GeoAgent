@@ -231,9 +231,8 @@ class ContextBuilder:
         task_id = None
         if run is not None:
             current = self.store.get_run(run.id) or run
-            if current.metadata.get("task_relation") == "continue":
-                task_id = current.task_id
-            elif current.metadata.get("task_relation") == "reference":
+            task_id = current.task_id
+            if current.metadata.get("task_relation") == "reference":
                 task_id = current.metadata.get("related_task_id")
         records = self.store.list_tool_results_for_conversation(
             request.conversation_id,
