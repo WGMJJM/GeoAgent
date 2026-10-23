@@ -79,7 +79,6 @@ class ContextBuilder:
         *,
         conversation_memory: ConversationMemoryService,
         profile_service=None,
-        recent_message_limit: int = 24,
         recent_tool_results: int = DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT,
         task_context_limit: int = DEFAULT_TASK_CONTEXT_LIMIT,
         skills: SkillCatalog | None = None,
@@ -87,7 +86,6 @@ class ContextBuilder:
         self.store = store
         self.profile_service = profile_service
         self.conversation_memory = conversation_memory
-        self.recent_message_limit = max(1, recent_message_limit)
         self.recent_tool_results = max(1, recent_tool_results)
         self.task_context_limit = task_context_limit
         self.skills = skills
@@ -110,7 +108,6 @@ class ContextBuilder:
         memory, persisted = self.conversation_memory.load_context(
             request.conversation_id,
             user_id=request.user_id,
-            recent_message_limit=self.recent_message_limit,
             include_history=protocol_messages is None,
         )
         trusted_context = self._trusted_context(request, run, memory)
@@ -342,8 +339,9 @@ class ContextBuilder:
 
     def refresh_state(self, messages: list[dict[str, Any]], request: AgentRequest, run: Run) -> None:
         """关联后替换状态快照，不复制历史协议或旧 Checkpoint。"""
-        memory, _ = self.conversation_memory.load_context(request.conversation_id, user_id=request.user_id,
-                                                          recent_message_limit=self.recent_message_limit, include_history=False)
+        memory, _ = self.conversation_memory.load_context(
+            request.conversation_id, user_id=request.user_id, include_history=False
+        )
         state = self._trusted_context(request, run, memory)
         state.pop("user_profile", None)
         message = {"role": "system", "content": STATE_CONTEXT_PREFIX + json.dumps(state, ensure_ascii=False, separators=(",", ":"))}
@@ -488,10 +486,11 @@ def compact_model_input(
     preview_tokens: int,
     emergency_fraction: float,
     emergency: bool = False,
+    collapse_compacted: bool = True,
     stored_result_ids: Collection[str] = (),
     count_tokens: Callable[[str], int] = estimate_tokens,
 ) -> list[dict[str, Any]]:
-    """平时仅限制单次正文；总输入超限时精简中间部分，并合并已精简记录。"""
+    """按预算生成工具结果视图；软水位保留精确引用，硬预算路径可合并更早已精简记录。"""
 
     view = [dict(item) for item in messages]
     batches = _completed_tool_batches(view)
@@ -509,12 +508,15 @@ def compact_model_input(
     if emergency:
         previously_compacted = set(compacted_ids)
         full_ids = [call_id for call_id in execution_ids
-                    if call_id not in compacted_ids | summarized_ids and observations[call_id].get("output") is not None]
+                    if call_id not in compacted_ids | summarized_ids
+                    and observations[call_id].get("output") is not None
+                    and observations[call_id].get("call_id") in stored_result_ids]
         amount = int(len(full_ids) * emergency_fraction)
         start = (len(full_ids) - amount) // 2
         compacted_ids.update(call_id for call_id in full_ids[start:start + amount] if call_id not in protected_ids)
-        for _, calls in batches:
-            summarized_ids.update(call["id"] for call in calls if call["id"] in previously_compacted and call["id"] not in protected_ids)
+        if collapse_compacted:
+            for _, calls in batches:
+                summarized_ids.update(call["id"] for call in calls if call["id"] in previously_compacted and call["id"] not in protected_ids)
 
     read_ids -= compacted_ids | summarized_ids
 

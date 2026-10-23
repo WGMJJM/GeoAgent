@@ -553,6 +553,7 @@ class Message(StrictModel):
     run_id: str | None = None
     dataset_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
+    token_estimate: int | None = Field(default=None, ge=0, exclude=True)
 
 
 class ConversationMemoryEntry(StrictModel):

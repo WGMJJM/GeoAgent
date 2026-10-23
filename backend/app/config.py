@@ -12,10 +12,8 @@ from app.core.tokens import DEFAULT_TOKENIZER_FILE
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = PROJECT_ROOT / "backend" / ".env"
-DEFAULT_SUMMARY_RECENT_MESSAGES = 16
-DEFAULT_SUMMARY_TRIGGER_MESSAGES = 24
-DEFAULT_SUMMARY_TRIGGER_TOKENS = 51200
-DEFAULT_SUMMARY_MESSAGE_MAX_CHARS = 10000
+DEFAULT_CONTEXT_COMPACTION_TRIGGER_RATIO = 0.8
+DEFAULT_SUMMARY_RECENT_TOKENS = 6400
 DEFAULT_EMERGENCY_RECENT_MESSAGES = 8
 DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT = 8
 DEFAULT_TASK_CONTEXT_LIMIT = 8
@@ -52,10 +50,8 @@ class Settings(BaseSettings):
     completion_review_max_evidence_rounds: int = Field(default=1, ge=0)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     model_input_tokens: int = Field(default=256000, ge=1)
-    summary_recent_messages: int = Field(default=DEFAULT_SUMMARY_RECENT_MESSAGES, ge=1)
-    summary_trigger_messages: int = Field(default=DEFAULT_SUMMARY_TRIGGER_MESSAGES, ge=1)
-    summary_trigger_tokens: int = Field(default=DEFAULT_SUMMARY_TRIGGER_TOKENS, ge=1)
-    summary_message_max_chars: int = Field(default=DEFAULT_SUMMARY_MESSAGE_MAX_CHARS, ge=1)
+    context_compaction_trigger_ratio: float = Field(default=DEFAULT_CONTEXT_COMPACTION_TRIGGER_RATIO, gt=0, le=1)
+    summary_recent_tokens: int = Field(default=DEFAULT_SUMMARY_RECENT_TOKENS, ge=1)
     emergency_recent_messages: int = Field(default=DEFAULT_EMERGENCY_RECENT_MESSAGES, ge=1)
     tool_result_preview_tokens: int = Field(default=12800, ge=1)
     emergency_recent_tool_results: int = Field(default=16, ge=1)

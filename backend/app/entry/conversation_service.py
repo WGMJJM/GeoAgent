@@ -124,7 +124,6 @@ class ConversationService:
                         dataset_ids=list(dict.fromkeys(result.datasets)),
                     ),
                     user_id=user_id,
-                    wait_for_summary=False,
                 )
 
     async def _save_user_message(self, request: AgentRequest) -> None:

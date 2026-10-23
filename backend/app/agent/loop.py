@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -81,6 +82,8 @@ ASK_USER_TOOL = {
         },
     },
 }
+
+logger = logging.getLogger(__name__)
 
 SEARCH_HISTORY_TOOL = {
     "type": "function",
@@ -244,6 +247,9 @@ class AgentLoop:
                 ),
             )
 
+        if resume_from is None and not run.parent_run_id:
+            await self._precompact_oversized_history(request, run, model)
+
         messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
         if resume_from is None:
@@ -360,6 +366,73 @@ class AgentLoop:
                 )
                 if not resume_pending and not restoring_answer:
                     history_changed = False
+                    soft_limit = int(
+                        self.settings.model_input_tokens * self.settings.context_compaction_trigger_ratio
+                    )
+                    input_tokens_before_compaction = model_input_tokens(model_messages, model_tools, model.count_tokens)
+                    if input_tokens_before_compaction >= soft_limit:
+                        model_messages = compact_model_input(
+                            prepare_model_messages(messages, model_tools, model_cards, capabilities),
+                            run_id=current.id,
+                            compacted_ids=compacted_ids,
+                            summarized_ids=summarized_ids,
+                            preview_tokens=self.settings.tool_result_preview_tokens,
+                            emergency_fraction=self.settings.tool_result_emergency_fraction,
+                            emergency=True,
+                            collapse_compacted=False,
+                            stored_result_ids=stored_result_ids,
+                            count_tokens=model.count_tokens,
+                        )
+                        compacted_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
+                        start_message_id = current.metadata.get("original_request_message_id")
+                        if not current.parent_run_id and isinstance(start_message_id, str):
+                            while compacted_tokens >= soft_limit:
+                                memory_before = self.context.conversation_memory.get(
+                                    request.conversation_id, request.user_id
+                                ) if request.user_id else None
+                                cursor_before = memory_before.summarized_through_message_id if memory_before else None
+                                changed = await self.context.conversation_memory.compact_history_before(
+                                    request,
+                                    model,
+                                    start_message_id,
+                                    recent_tokens=self.settings.summary_recent_tokens,
+                                )
+                                memory_after = self.context.conversation_memory.get(
+                                    request.conversation_id, request.user_id
+                                ) if request.user_id else None
+                                cursor_after = memory_after.summarized_through_message_id if memory_after else None
+                                if not changed or cursor_after == cursor_before:
+                                    break
+                                messages, history_count = self._refresh_conversation_prefix(
+                                    messages, request, current, history_count, start_message_id
+                                )
+                                history_changed = True
+                                current = current.model_copy(update={
+                                    "metadata": {**current.metadata, "conversation_history_count": history_count}
+                                })
+                                self.store.save_run(current)
+                                model_messages = compact_model_input(
+                                    prepare_model_messages(messages, model_tools, model_cards, capabilities),
+                                    run_id=current.id,
+                                    compacted_ids=compacted_ids,
+                                    summarized_ids=summarized_ids,
+                                    preview_tokens=self.settings.tool_result_preview_tokens,
+                                    emergency_fraction=self.settings.tool_result_emergency_fraction,
+                                    stored_result_ids=stored_result_ids,
+                                    count_tokens=model.count_tokens,
+                                )
+                                compacted_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
+                                logger.info(
+                                    "conversation_context_compacted conversation_id=%s run_id=%s "
+                                    "input_before=%s input_after=%s soft_limit=%s cursor_before=%s cursor_after=%s",
+                                    request.conversation_id,
+                                    current.id,
+                                    input_tokens_before_compaction,
+                                    compacted_tokens,
+                                    soft_limit,
+                                    cursor_before,
+                                    cursor_after,
+                                )
                     if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
                         model_messages = compact_model_input(
                             prepare_model_messages(messages, model_tools, model_cards, capabilities),
@@ -372,10 +445,16 @@ class AgentLoop:
                             stored_result_ids=stored_result_ids,
                             count_tokens=model.count_tokens,
                         )
+                        compacted_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
                         start_message_id = current.metadata.get("original_request_message_id")
-                        if (model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens
-                                and not current.parent_run_id and isinstance(start_message_id, str)):
-                            changed = await self.context.conversation_memory.compact_history_before(request, model, start_message_id)
+                        if compacted_tokens > self.settings.model_input_tokens and isinstance(start_message_id, str):
+                            changed = await self.context.conversation_memory.compact_history_before(
+                                request,
+                                model,
+                                start_message_id,
+                                recent_tokens=self.settings.summary_recent_tokens,
+                                all_pending=True,
+                            )
                             if changed:
                                 messages, history_count = self._refresh_conversation_prefix(
                                     messages, request, current, history_count, start_message_id
@@ -392,6 +471,7 @@ class AgentLoop:
                                     summarized_ids=summarized_ids,
                                     preview_tokens=self.settings.tool_result_preview_tokens,
                                     emergency_fraction=self.settings.tool_result_emergency_fraction,
+                                    emergency=True,
                                     stored_result_ids=stored_result_ids,
                                     count_tokens=model.count_tokens,
                                 )
@@ -1428,6 +1508,49 @@ class AgentLoop:
         self._save_checkpoint(request, run, messages, cursor_id, "approval_resolved", activated_names, [])
         return None
 
+    async def _precompact_oversized_history(self, request: AgentRequest, run: Run, model: ModelAdapter) -> None:
+        """仅当原始历史自身已超过硬输入预算时，先分批整理再构建完整消息视图。"""
+
+        if not request.user_id:
+            return
+        start_message_id = run.metadata.get("original_request_message_id")
+        if not isinstance(start_message_id, str):
+            return
+        memory = self.context.conversation_memory.get(request.conversation_id, request.user_id)
+        cursor = memory.summarized_through_message_id if memory and memory.summary else None
+        if cursor is not None and not self.store.message_exists(request.conversation_id, cursor):
+            cursor = None
+        cached_tokens = self.context.conversation_memory.estimated_history_tokens(
+            request.conversation_id, user_id=request.user_id
+        )
+        if cached_tokens <= self.settings.model_input_tokens:
+            return
+
+        source_tokens = 0
+        for page in self.store.iter_message_pages_after(request.conversation_id, cursor):
+            source_tokens += sum(model.count_tokens(message.content) for message in page)
+            if source_tokens > self.settings.model_input_tokens:
+                break
+        if source_tokens <= self.settings.model_input_tokens:
+            return
+
+        changed = await self.context.conversation_memory.compact_history_before(
+            request,
+            model,
+            start_message_id,
+            recent_tokens=self.settings.summary_recent_tokens,
+            all_pending=True,
+        )
+        logger.info(
+            "conversation_history_precompaction conversation_id=%s run_id=%s source_tokens=%s "
+            "cached_tokens=%s changed=%s",
+            request.conversation_id,
+            run.id,
+            source_tokens,
+            cached_tokens,
+            changed,
+        )
+
     def _initial_messages(
         self,
         request: AgentRequest,
@@ -1472,7 +1595,6 @@ class AgentLoop:
         _, persisted = self.context.conversation_memory.load_context(
             request.conversation_id,
             user_id=request.user_id,
-            recent_message_limit=self.context.recent_message_limit,
         )
         start = next((index for index, item in enumerate(persisted) if item.id == start_message_id), None)
         if start is None:

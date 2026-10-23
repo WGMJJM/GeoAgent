@@ -42,6 +42,7 @@ from app.core.models import (
     UserSession,
     utc_now,
 )
+from app.core.tokens import estimate_tokens
 
 T = TypeVar("T")
 CHECKPOINT_COMPRESSION_LEVEL = 6
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     run_id TEXT,
     dataset_ids_json TEXT NOT NULL DEFAULT '[]',
+    token_estimate INTEGER,
     created_at TEXT NOT NULL,
     FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
@@ -257,6 +259,8 @@ class StateStore:
         message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()}
         if "dataset_ids_json" not in message_columns:
             db.execute("ALTER TABLE messages ADD COLUMN dataset_ids_json TEXT NOT NULL DEFAULT '[]'")
+        if "token_estimate" not in message_columns:
+            db.execute("ALTER TABLE messages ADD COLUMN token_estimate INTEGER")
         StateStore._add_columns(
             db,
             "tasks",
@@ -751,10 +755,11 @@ class StateStore:
             updated = current.model_copy(
                 update={
                     "summary": summary,
-                    "key_facts": _merge_conversation_entries(current.key_facts, key_facts),
-                    "decisions": _merge_conversation_entries(current.decisions, decisions),
-                    "important_references": _merge_conversation_entries(current.important_references, important_references),
-                    "unresolved_topics": _merge_conversation_entries(current.unresolved_topics, unresolved_topics),
+                    # 摘要模型返回的是本次合并后的当前视图；允许清除已被替代或已解决的旧条目。
+                    "key_facts": key_facts[-20:],
+                    "decisions": decisions[-20:],
+                    "important_references": important_references[-20:],
+                    "unresolved_topics": unresolved_topics[-20:],
                     "summary_version": current.summary_version + 1,
                     "summarized_through_message_id": through_message_id,
                     "summary_updated_at": now,
@@ -774,10 +779,11 @@ class StateStore:
         return self._model(ConversationMemory, row[0]) if row else None
 
     def save_message(self, message: Message) -> None:
+        token_estimate = estimate_tokens(message.content)
         with self._connect() as db:
             db.execute(
                 """INSERT OR REPLACE INTO messages
-                (id,conversation_id,role,content,run_id,dataset_ids_json,created_at) VALUES(?,?,?,?,?,?,?)""",
+                (id,conversation_id,role,content,run_id,dataset_ids_json,token_estimate,created_at) VALUES(?,?,?,?,?,?,?,?)""",
                 (
                     message.id,
                     message.conversation_id,
@@ -785,6 +791,7 @@ class StateStore:
                     message.content,
                     message.run_id,
                     self._json(list(dict.fromkeys(message.dataset_ids))),
+                    token_estimate,
                     message.created_at.isoformat(),
                 ),
             )
@@ -803,6 +810,14 @@ class StateStore:
             row = db.execute("SELECT * FROM messages WHERE conversation_id=? AND id=?", (conversation_id, message_id)).fetchone()
         return self._message_from_row(row) if row is not None else None
 
+    def latest_user_message_id(self, conversation_id: str) -> str | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT id FROM messages WHERE conversation_id=? AND role='user' ORDER BY rowid DESC LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def list_messages(self, conversation_id: str, limit: int = 100) -> list[Message]:
         with self._connect() as db:
             rows = db.execute(
@@ -817,24 +832,64 @@ class StateStore:
         return [self._message_from_row(row) for row in rows]
 
     def list_messages_after(self, conversation_id: str, message_id: str | None) -> list[Message]:
-        """按 SQLite 持久化顺序返回摘要游标之后的原始消息。"""
+        """按 SQLite 顺序分批读取摘要游标之后的消息；游标失效时明确报错。"""
+
+        return [message for page in self.iter_message_pages_after(conversation_id, message_id) for message in page]
+
+    def iter_message_pages_after(
+        self, conversation_id: str, message_id: str | None, *, page_size: int = 128
+    ) -> Iterator[list[Message]]:
+        """渐进读取历史，并为旧消息懒回填本地 Token 估算。"""
 
         with self._connect() as db:
-            if message_id is None:
-                cursor_rowid = 0
-            else:
+            cursor_rowid = 0
+            if message_id is not None:
                 cursor = db.execute(
                     "SELECT rowid FROM messages WHERE id=? AND conversation_id=?",
                     (message_id, conversation_id),
                 ).fetchone()
                 if cursor is None:
-                    return []
+                    raise ValueError("会话摘要游标对应的原始消息不存在")
                 cursor_rowid = int(cursor[0])
-            rows = db.execute(
-                "SELECT rowid AS _rowid,* FROM messages WHERE conversation_id=? AND rowid>? ORDER BY rowid",
-                (conversation_id, cursor_rowid),
-            ).fetchall()
-        return [self._message_from_row(row) for row in rows]
+            while True:
+                rows = db.execute(
+                    "SELECT rowid AS _rowid,* FROM messages WHERE conversation_id=? AND rowid>? ORDER BY rowid LIMIT ?",
+                    (conversation_id, cursor_rowid, max(1, page_size)),
+                ).fetchall()
+                if not rows:
+                    return
+                page: list[Message] = []
+                for row in rows:
+                    token_estimate = row["token_estimate"]
+                    if token_estimate is None:
+                        token_estimate = estimate_tokens(row["content"])
+                        db.execute(
+                            "UPDATE messages SET token_estimate=? WHERE id=? AND token_estimate IS NULL",
+                            (token_estimate, row["id"]),
+                        )
+                        payload = dict(row)
+                        payload["token_estimate"] = token_estimate
+                        page.append(self._message_from_row(payload))
+                    else:
+                        page.append(self._message_from_row(row))
+                db.commit()
+                cursor_rowid = int(rows[-1]["_rowid"])
+                yield page
+
+    def message_token_estimate_total_after(self, conversation_id: str, message_id: str | None) -> int:
+        """返回缓存估算总量；只用于读取预检查，不替代所选模型分词器。"""
+
+        return sum(
+            message.token_estimate or 0
+            for page in self.iter_message_pages_after(conversation_id, message_id)
+            for message in page
+        )
+
+    def message_exists(self, conversation_id: str, message_id: str) -> bool:
+        with self._connect() as db:
+            return db.execute(
+                "SELECT 1 FROM messages WHERE conversation_id=? AND id=?", (conversation_id, message_id)
+            ).fetchone() is not None
 
     def search_messages(
         self,

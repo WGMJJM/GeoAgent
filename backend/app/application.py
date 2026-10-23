@@ -74,13 +74,9 @@ class Application:
             self.store,
             summarizer=ConversationSummarizer(
                 self.store,
-                trigger_messages=self.settings.summary_trigger_messages,
-                trigger_tokens=self.settings.summary_trigger_tokens,
-                recent_messages=self.settings.summary_recent_messages,
-                message_max_chars=self.settings.summary_message_max_chars,
-                emergency_recent_messages=self.settings.emergency_recent_messages,
+                summary_recent_tokens=self.settings.summary_recent_tokens,
+                model_input_tokens=self.settings.model_input_tokens,
             ),
-            model_provider=self.get_model_adapter,
         )
         self.model_profiles: dict[str, ModelProfile] = {}
         self.model_adapters: dict[str, ModelAdapter] = {}
@@ -226,7 +222,6 @@ class Application:
 
     async def close(self) -> None:
         await self.run_manager.close()
-        await self.conversation_memory.close()
         await self.mcp.close()
         await self.knowledge.close()
         if self.arcpy is not None:
