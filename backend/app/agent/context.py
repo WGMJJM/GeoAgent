@@ -291,16 +291,7 @@ class ContextBuilder:
             if current_run.task_id:
                 task = self.store.get_task(current_run.task_id)
                 if task is not None and task.conversation_id in {None, request.conversation_id}:
-                    current_task = self._task_snapshot(task, request)
-                    working = self.store.get_working_memory(task.id)
-                    if working is not None:
-                        current_task["working_memory"] = {
-                                "active_dataset_ids": self._visible_dataset_ids(working.active_dataset_ids, request),
-                                "active_artifact_ids": self._visible_artifact_ids(working.active_artifact_ids, request),
-                                "constraints": working.constraints[-12:],
-                                "unresolved_questions": working.unresolved_questions[-8:],
-                            }
-                    context["current_task"] = current_task
+                    context["current_task"] = self._task_snapshot(task, request)
             else:
                 context["task_candidates"] = [
                     {"id": item.id, "goal": item.goal[:2000], "status": item.status.value,

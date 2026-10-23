@@ -40,7 +40,6 @@ from app.core.models import (
     User,
     UserProfile,
     UserSession,
-    WorkingMemory,
     utc_now,
 )
 
@@ -86,12 +85,6 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT,
     result TEXT,
     created_at TEXT,
-    payload_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS working_memories (
-    task_id TEXT PRIMARY KEY,
-    conversation_id TEXT,
     payload_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -213,7 +206,6 @@ CREATE TABLE IF NOT EXISTS trace_events (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_updated ON runs(updated_at);
-CREATE INDEX IF NOT EXISTS idx_working_memories_conversation ON working_memories(conversation_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_lineage_output ON dataset_lineage(output_dataset_id);
 CREATE INDEX IF NOT EXISTS idx_planning_sessions_user ON planning_sessions(user_id, updated_at);
@@ -411,7 +403,11 @@ class StateStore:
 
     @staticmethod
     def _model(model_type: type[T], value: str) -> T:
-        return model_type.model_validate_json(value)  # type: ignore[attr-defined]
+        model = model_type.model_validate_json(value)  # type: ignore[attr-defined]
+        if isinstance(model, Run) and isinstance(result := model.metadata.get("subagent_result"), dict):
+            # 只兼容已知旧子结果快照；不清洗其他元数据或放宽严格模型。
+            result.pop("memory_delta", None)
+        return model
 
     def save_user(self, user: User) -> None:
         with self._connect() as db:
@@ -595,6 +591,9 @@ class StateStore:
             if db.execute(query, args).fetchone() is None:
                 return False
 
+            legacy_memory_table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='working_memories'"
+            ).fetchone() is not None
             run_ids, task_ids = self._conversation_run_and_task_ids(db, conversation_id)
             self._preserve_user_resources(db, run_ids)
             if run_ids:
@@ -617,12 +616,14 @@ class StateStore:
             db.execute("DELETE FROM conversation_memories WHERE conversation_id=?", (conversation_id,))
             db.execute("DELETE FROM conversation_tool_states WHERE conversation_id=?", (conversation_id,))
             db.execute("DELETE FROM planning_sessions WHERE conversation_id=?", (conversation_id,))
-            db.execute("DELETE FROM working_memories WHERE conversation_id=?", (conversation_id,))
+            if legacy_memory_table:
+                db.execute("DELETE FROM working_memories WHERE conversation_id=?", (conversation_id,))
             if task_ids:
                 placeholders = ",".join("?" for _ in task_ids)
                 task_args = tuple(task_ids)
                 db.execute(f"DELETE FROM subtasks WHERE task_id IN ({placeholders})", task_args)
-                db.execute(f"DELETE FROM working_memories WHERE task_id IN ({placeholders})", task_args)
+                if legacy_memory_table:
+                    db.execute(f"DELETE FROM working_memories WHERE task_id IN ({placeholders})", task_args)
                 db.execute(f"DELETE FROM tasks WHERE id IN ({placeholders})", task_args)
             cursor = db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
             db.commit()
@@ -1058,21 +1059,6 @@ class StateStore:
             rows = db.execute(query, args).fetchall()
         return [self._model(Task, row[0]) for row in rows]
 
-    def save_working_memory(self, memory: WorkingMemory) -> None:
-        with self._connect() as db:
-            db.execute(
-                """INSERT INTO working_memories(task_id,conversation_id,payload_json,updated_at) VALUES(?,?,?,?)
-                ON CONFLICT(task_id) DO UPDATE SET conversation_id=excluded.conversation_id,
-                payload_json=excluded.payload_json, updated_at=excluded.updated_at""",
-                (memory.task_id, memory.conversation_id, memory.model_dump_json(), memory.updated_at.isoformat()),
-            )
-            db.commit()
-
-    def get_working_memory(self, task_id: str) -> WorkingMemory | None:
-        with self._connect() as db:
-            row = db.execute("SELECT payload_json FROM working_memories WHERE task_id=?", (task_id,)).fetchone()
-        return self._model(WorkingMemory, row[0]) if row else None
-
     def save_subtask(self, task_id: str, subtask: SubTask) -> None:
         with self._connect() as db:
             db.execute(
@@ -1087,7 +1073,7 @@ class StateStore:
         return self._model(SubTask, row[0]) if row else None
 
     def create_delegation(self, state: dict[str, Any], parent: Run, task: Task,
-                          subtasks: list[SubTask], children: list[Run], memory: WorkingMemory) -> bool:
+                          subtasks: list[SubTask], children: list[Run]) -> bool:
         """计划、稳定子身份和父 Task 关联先原子保存，之后才能启动执行。"""
 
         with self.transaction() as db:
@@ -1100,8 +1086,6 @@ class StateStore:
                 db.execute("INSERT INTO subtasks(id,task_id,payload_json) VALUES(?,?,?)",
                            (subtask.id, task.id, subtask.model_dump_json()))
                 self._save_run(db, child)
-            db.execute("INSERT OR IGNORE INTO working_memories(task_id,conversation_id,payload_json,updated_at) VALUES(?,?,?,?)",
-                       (memory.task_id, memory.conversation_id, memory.model_dump_json(), memory.updated_at.isoformat()))
             db.execute("INSERT INTO delegations(id,parent_run_id,call_id,payload_json) VALUES(?,?,?,?)",
                        (state["id"], parent.id, state["call_id"], self._json(state)))
         return True
@@ -1109,20 +1093,30 @@ class StateStore:
     def get_delegation(self, call_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute("SELECT payload_json FROM delegations WHERE call_id=?", (call_id,)).fetchone()
-        return json.loads(row[0]) if row else None
+        return self._decode_delegation(row[0]) if row else None
 
     def list_delegations(self, parent_run_id: str) -> list[dict[str, Any]]:
         with self._connect() as db:
             rows = db.execute("SELECT payload_json FROM delegations WHERE parent_run_id=? ORDER BY rowid", (parent_run_id,)).fetchall()
-        return [json.loads(row[0]) for row in rows]
+        return [self._decode_delegation(row[0]) for row in rows]
 
-    def save_delegation(self, state: dict[str, Any], *, memory: WorkingMemory | None = None) -> None:
-        """委派结果和主工作记忆在一个事务内提交，模型观察晚于此事务。"""
+    @staticmethod
+    def _decode_delegation(value: str) -> dict[str, Any]:
+        """在旧委派加载边界移除已废弃字段，其他字段仍交给严格模型校验。"""
+
+        state = json.loads(value)
+        state.pop("merged", None)
+        for result in state["results"].values():
+            result.pop("memory_delta", None)
+        if state.get("result") is not None:
+            for result in state["result"]["subtasks"]:
+                result.pop("memory_delta", None)
+        return state
+
+    def save_delegation(self, state: dict[str, Any]) -> None:
+        """先原子提交结构化委派结果，再向模型发布观察。"""
 
         with self.transaction() as db:
-            if memory is not None:
-                db.execute("UPDATE working_memories SET payload_json=?,updated_at=? WHERE task_id=?",
-                           (memory.model_dump_json(), memory.updated_at.isoformat(), memory.task_id))
             db.execute("UPDATE delegations SET payload_json=? WHERE id=?", (self._json(state), state["id"]))
 
     def list_tool_call_states(self, run_id: str) -> list[tuple[str, str, ToolExecutionStatus, int]]:
@@ -1261,6 +1255,9 @@ class StateStore:
         deleted: list[str] = []
         task_ids: set[str] = set()
         with self._connect() as db:
+            legacy_memory_table = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='working_memories'"
+            ).fetchone() is not None
             for run_id in dict.fromkeys(run_ids):
                 row = db.execute("SELECT payload_json FROM runs WHERE id=?", (run_id,)).fetchone()
                 if row is None:
@@ -1280,7 +1277,8 @@ class StateStore:
                 remaining = db.execute("SELECT 1 FROM runs WHERE task_id=? LIMIT 1", (task_id,)).fetchone()
                 if remaining is None:
                     db.execute("DELETE FROM subtasks WHERE task_id=?", (task_id,))
-                    db.execute("DELETE FROM working_memories WHERE task_id=?", (task_id,))
+                    if legacy_memory_table:
+                        db.execute("DELETE FROM working_memories WHERE task_id=?", (task_id,))
                     db.execute("DELETE FROM tasks WHERE id=?", (task_id,))
             db.commit()
         return deleted

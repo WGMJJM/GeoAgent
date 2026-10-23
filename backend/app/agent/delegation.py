@@ -31,11 +31,8 @@ from app.core.models import (
     ToolExecutionStatus,
     ToolResult,
     ToolStatus,
-    WorkingMemory,
-    WorkingMemoryDelta,
     new_id,
 )
-from app.memory.working_memory import WorkingMemoryUpdater
 from app.observability import EventType
 from app.run.lifecycle import persist_result
 
@@ -52,7 +49,6 @@ DELEGATE_TOOL = {
 class DelegationCoordinator:
     def __init__(self, store, loop, manager, settings) -> None:
         self.store, self.loop, self.manager, self.settings = store, loop, manager, settings
-        self.updater = WorkingMemoryUpdater(store)
         self._locks: dict[str, asyncio.Lock] = {}
         self._semaphore = asyncio.Semaphore(settings.max_parallel_agents)
         # 共享写资源只在单进程内互斥；当前未开放的 Python/Shell 将来也须串行。
@@ -168,18 +164,12 @@ class DelegationCoordinator:
                     None,
                 )
                 if waiting is None:
-                    memory = self.updater.load_or_create(state["task_id"], request.conversation_id)
-                    merged = self.updater.merge_deltas(
-                        memory, [item.memory_delta for item in outcome.subtasks]
-                    )
-                    state.update(
-                        completed=True, merged=True, result=outcome.model_dump(mode="json")
-                    )
-                    self.store.save_delegation(state, memory=merged)
+                    state.update(completed=True, result=outcome.model_dump(mode="json"))
+                    self.store.save_delegation(state)
                     await self.loop.trace.emit(
                         parent.id,
                         EventType.DELEGATION_COMPLETED,
-                        "结构化委派结果已保存并合并",
+                        "结构化委派结果已保存",
                         payload={"delegation_id": state["id"], "status": outcome.status.value},
                         agent_id=parent.agent_id,
                     )
@@ -263,12 +253,8 @@ class DelegationCoordinator:
             },
             "results": {},
             "completed": False,
-            "merged": False,
         }
-        memory = self.store.get_working_memory(task.id) or WorkingMemory(
-            task_id=task.id, conversation_id=request.conversation_id
-        )
-        if not self.store.create_delegation(state, parent, task, subtasks, children, memory):
+        if not self.store.create_delegation(state, parent, task, subtasks, children):
             return self.store.get_delegation(call_id)
         return state
 
@@ -367,7 +353,7 @@ class DelegationCoordinator:
                 if not active:
                     break
                 done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
-                # 完成顺序不用于 WorkingMemory 顺序；只持久化各子结果。
+                # 各子结果独立持久化，最终汇总仍使用计划顺序。
                 for execution in sorted(done, key=lambda value: active[value].id):
                     item = active.pop(execution)
                     result = execution.result()
@@ -496,7 +482,6 @@ class DelegationCoordinator:
             )
         outputs, artifacts, metrics, sources, warnings = {}, [], {}, {}, []
         by_tool: dict[str, set[str]] = {}
-        delta = WorkingMemoryDelta(source_run_id=child.id)
         successful = 0
         partial = False
         for call, _, value in self.store.list_tool_calls(child.id):
@@ -505,10 +490,6 @@ class DelegationCoordinator:
             if value.error:
                 error = value.error
             if value.status not in {ToolStatus.SUCCESS, ToolStatus.PARTIAL_SUCCESS}:
-                clean = value.model_copy(update={"datasets": [], "artifacts": []})
-                delta = self.updater.merge_delta(
-                    delta, self.updater.build_delta_from_tool_result(clean, run_id=child.id)
-                )
                 continue
             successful += 1
             partial = partial or value.status is ToolStatus.PARTIAL_SUCCESS
@@ -517,7 +498,7 @@ class DelegationCoordinator:
                 if call.name in self.loop.registry.names()
                 else None
             )
-            verified_ids, verified_artifacts = [], []
+            verified_ids = []
             for identifier in value.datasets:
                 dataset = self.store.get_dataset_for_user(identifier, user_id)
                 if dataset is None:
@@ -539,7 +520,6 @@ class DelegationCoordinator:
                     )
                     status, execution_status = AgentResultStatus.FAILED, TaskStatus.FAILED
                 else:
-                    verified_artifacts.append(identifier)
                     if identifier not in artifacts:
                         artifacts.append(identifier)
             if (
@@ -552,12 +532,6 @@ class DelegationCoordinator:
                     message="必要 Dataset 输出没有登记到当前子 Run。",
                 )
                 status, execution_status = AgentResultStatus.FAILED, TaskStatus.FAILED
-            clean = value.model_copy(
-                update={"datasets": verified_ids, "artifacts": verified_artifacts}
-            )
-            delta = self.updater.merge_delta(
-                delta, self.updater.build_delta_from_tool_result(clean, run_id=child.id)
-            )
             for key, scalar in _metrics(value.output).items():
                 metric_key = f"{call.id}.{key}"
                 metrics[metric_key] = scalar
@@ -587,18 +561,6 @@ class DelegationCoordinator:
         refs.extend(outputs[name] for name in sorted(outputs) if name not in used)
         if status is AgentResultStatus.SUCCESS and partial:
             status, execution_status = AgentResultStatus.PARTIAL, TaskStatus.PARTIAL
-        if (
-            execution_status is TaskStatus.WAITING
-            and result
-            and result.needs_input
-            and result.needs_input.get("question")
-        ):
-            delta = self.updater.merge_delta(
-                delta,
-                self.updater.build_unresolved_question_delta(
-                    [result.needs_input["question"]], run_id=child.id
-                ),
-            )
         return SubAgentResult(
             subtask_id=item.id,
             run_id=child.id,
@@ -611,7 +573,6 @@ class DelegationCoordinator:
             warnings=list(dict.fromkeys(warnings)),
             error=error,
             needs_input=result.needs_input if result else None,
-            memory_delta=delta,
             summary=result.summary if result else None,
         )
 
@@ -750,18 +711,13 @@ class DelegationCoordinator:
             outcome = self._aggregate(state, plan, results).model_copy(
                 update={"status": AgentResultStatus.CANCELLED}
             )
-            memory = self.updater.load_or_create(state["task_id"])
-            merged = self.updater.merge_deltas(
-                memory, [item.memory_delta for item in results.values()]
-            )
-            state.update(completed=True, merged=True, result=outcome.model_dump(mode="json"))
-            self.store.save_delegation(state, memory=merged)
+            state.update(completed=True, result=outcome.model_dump(mode="json"))
+            self.store.save_delegation(state)
 
     @staticmethod
     def _observation(call_id, result: DelegationResult) -> ToolResult:
         payload = result.model_dump(mode="json")
         for item in payload["subtasks"]:
-            item.pop("memory_delta")
             item.pop("metric_sources")
             item["metrics"] = dict(list(item["metrics"].items())[:8])
             item["warnings"] = [text[:200] for text in item["warnings"][:4]]

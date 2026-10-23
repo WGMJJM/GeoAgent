@@ -421,38 +421,6 @@ class Run(StrictModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class WorkingMemoryItem(StrictModel):
-    """工作记忆中的轻量引用，不保存完整工具输出。"""
-
-    kind: str
-    reference_id: str | None = None
-    summary: str
-    source_run_id: str | None = None
-
-
-class PendingQuestion(StrictModel):
-    """与具体等待 Run 关联的待回答问题。"""
-
-    id: str = Field(default_factory=lambda: new_id("question"))
-    content: str
-    source_run_id: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-
-
-class WorkingMemory(StrictModel):
-    """以 Task 为作用域的结构化工作状态。"""
-
-    task_id: str
-    conversation_id: str | None = None
-    active_dataset_ids: list[str] = Field(default_factory=list)
-    active_artifact_ids: list[str] = Field(default_factory=list)
-    constraints: list[str] = Field(default_factory=list)
-    intermediate_results: list[WorkingMemoryItem] = Field(default_factory=list)
-    unresolved_questions: list[str] = Field(default_factory=list)
-    pending_questions: list[PendingQuestion] = Field(default_factory=list)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-
 class ApprovalRequest(StrictModel):
     """绑定到单个用户、Run 和精确 Tool 参数的一次性审批。"""
 
@@ -473,16 +441,6 @@ class ApprovalRequest(StrictModel):
     consumed_at: datetime | None = None
     continuation_run_id: str | None = None
     decision_note: str | None = None
-
-
-class WorkingMemoryDelta(StrictModel):
-    """SubAgent 本轮执行产生的局部工作状态变化，不直接持久化。"""
-
-    added_dataset_ids: list[str] = Field(default_factory=list)
-    added_artifact_ids: list[str] = Field(default_factory=list)
-    intermediate_results: list[WorkingMemoryItem] = Field(default_factory=list)
-    unresolved_questions: list[str] = Field(default_factory=list)
-    source_run_id: str | None = None
 
 
 class UpstreamDatasetBinding(StrictModel):
@@ -545,7 +503,6 @@ class SubAgentResult(StrictModel):
     warnings: list[str] = Field(default_factory=list)
     error: ToolError | None = None
     needs_input: dict[str, Any] | None = None
-    memory_delta: WorkingMemoryDelta = Field(default_factory=WorkingMemoryDelta)
     summary: str | None = None
 
 
