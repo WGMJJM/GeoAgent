@@ -76,3 +76,9 @@ class ModelAdapter(ABC):
 
     async def close(self) -> None:
         return None
+
+
+def effective_input_budget(input_limit: int, adapter: ModelAdapter, output_tokens: int) -> int:
+    """输入上限独立配置；仅对明确声明的总窗口扣除本次输出预留。"""
+    window = getattr(getattr(adapter, "config", None), "context_window_tokens", None)
+    return min(input_limit, max(0, window - output_tokens)) if window is not None else input_limit

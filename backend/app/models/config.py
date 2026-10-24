@@ -16,6 +16,7 @@ class ModelConfig(BaseModel):
     api_key: str | None = None
     use_system_certificates: bool = False
     model: str | None = None
+    context_window_tokens: int | None = Field(default=None, ge=1)
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     timeout_seconds: int = Field(default=90, ge=1)
     temperature: float = Field(default=0.1, ge=0, le=2)
@@ -43,6 +44,7 @@ class ModelProfile(BaseModel):
     api_key: str | None = None
     use_system_certificates: bool = False
     model: str = Field(min_length=1)
+    context_window_tokens: int | None = Field(default=None, ge=1)
     tokenizer_file: Path | None = None
     timeout_seconds: int = Field(default=90, ge=1)
     temperature: float = Field(default=0.1, ge=0, le=2)
@@ -69,6 +71,7 @@ class ModelProfile(BaseModel):
             api_key=self.api_key,
             use_system_certificates=self.use_system_certificates,
             model=self.model,
+            context_window_tokens=self.context_window_tokens,
             tokenizer_file=self.tokenizer_file or tokenizer_file,
             timeout_seconds=self.timeout_seconds,
             temperature=self.temperature,
