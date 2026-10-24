@@ -55,3 +55,8 @@ coverage/
 htmlcov/
 .coverage
 .coverage.*
+
+# Share the context compaction regression suite across development machines.
+!/backend/tests/
+/backend/tests/*
+!/backend/tests/test_context_compaction.py
