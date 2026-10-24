@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Iterable
@@ -39,7 +40,7 @@ from app.execution.tools import (
     ToolRegistry,
     validate_arguments,
 )
-from app.models import ModelAdapter, ModelRequest, ModelResponse
+from app.models import ModelAdapter, ModelRequest, ModelResponse, effective_input_budget
 from app.observability import EventType, TraceRecorder
 from app.run.checkpoints import RunCheckpointCodec
 from app.run.lifecycle import persist_result, run_status_for_result
@@ -58,12 +59,13 @@ from .context import (
     ANSWER_PREFIX,
     LEGACY_REPLY_FEEDBACK_PREFIX,
     ContextBuilder,
+    active_tool_references,
     compact_model_input,
     model_input_tokens,
-    narrow_model_input,
     prepare_model_messages,
     tool_visibility,
     tool_visibility_message,
+    unread_tool_result_ids,
 )
 from .delegation import DELEGATE_TOOL
 from .skills import add_skill_content, parse_skill_request, skill_messages
@@ -247,9 +249,6 @@ class AgentLoop:
                 ),
             )
 
-        if resume_from is None and not run.parent_run_id:
-            await self._precompact_oversized_history(request, run, model)
-
         messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
         if resume_from is None:
@@ -262,6 +261,11 @@ class AgentLoop:
                     if item.get("role") == "user" and item.get("content") == run.metadata.get("original_request")
                 ]
                 history_count = matches[-1] if matches else 0
+        start_message_id = run.metadata.get("original_request_message_id")
+        if resume_from is not None and not run.parent_run_id and isinstance(start_message_id, str):
+            messages, history_count = self._refresh_conversation_prefix(
+                messages, request, run, history_count, start_message_id
+            )
         if run.metadata.get("conversation_history_count") != history_count:
             run = run.model_copy(update={"metadata": {**run.metadata, "conversation_history_count": history_count}})
             self.store.save_run(run)
@@ -284,13 +288,15 @@ class AgentLoop:
             used_names = set()
         compacted_ids = set(resume_from.state.get("compacted_tool_call_ids", [])) if resume_from else set()
         summarized_ids = set(resume_from.state.get("summarized_tool_call_ids", [])) if resume_from else set()
+        context_compaction = dict(resume_from.state.get("context_compaction", {})) if resume_from else {}
+        consumed_read_ids = set(context_compaction.get("consumed_read_ids", []))
         pending_approvals = self._pending_approvals(resume_from)
         tool_call_count = run.tool_call_count
         saved_pending = resume_from.state.get("pending_tool_calls", []) if resume_from else []
         resume_pending = [tuple(item) for item in saved_pending if isinstance(item, list) and len(item) == 6]
         resume_answer = resume_from.state.get("pending_answer") if resume_from else None
         saved_recovery = resume_from.state.get("recovery") or {} if resume_from else {}
-        resume_model = bool(resume_from and (resume_from.phase == "model_pending" or
+        resume_model = bool(resume_from and (resume_from.phase in {"model_pending", "context_compacting", "context_compacted"} or
                             saved_recovery.get("scope") == "model" and
                             str(saved_recovery.get("operation_id", "")).startswith("model:")))
         empty_response_retries = resume_from.state.get("empty_response_retries", 0) if resume_from else 0
@@ -353,40 +359,53 @@ class AgentLoop:
             try:
                 previous_compacted_ids = set(compacted_ids)
                 previous_summarized_ids = set(summarized_ids)
-                stored_result_ids = self.store.list_tool_result_ids(current.id)
+                can_read_results = not current.parent_run_id and any(
+                    item["function"]["name"] == "conversation.read_tool_result" for item in model_tools
+                )
+                stored_result_ids = self.store.list_tool_result_ids(current.id) if can_read_results else set()
+                input_budget = effective_input_budget(self.settings.model_input_tokens, model, self.settings.max_tokens)
+                active_references = self._active_tool_references(messages, pending_approvals, request)
+                view_options = {
+                    "run_id": current.id,
+                    "compacted_ids": compacted_ids,
+                    "summarized_ids": summarized_ids,
+                    "preview_tokens": self.settings.tool_result_preview_tokens,
+                    "stored_result_ids": stored_result_ids,
+                    "count_tokens": model.count_tokens,
+                    "protected_recent_batches": self.settings.protected_recent_tool_batches,
+                    "consumed_read_ids": consumed_read_ids,
+                    "active_references": active_references,
+                }
                 model_messages = compact_model_input(
-                    model_messages,
-                    run_id=current.id,
-                    compacted_ids=compacted_ids,
-                    summarized_ids=summarized_ids,
-                    preview_tokens=self.settings.tool_result_preview_tokens,
-                    emergency_fraction=self.settings.tool_result_emergency_fraction,
-                    stored_result_ids=stored_result_ids,
-                    count_tokens=model.count_tokens,
+                    model_messages, **view_options,
                 )
                 if not resume_pending and not restoring_answer:
                     history_changed = False
-                    soft_limit = int(
-                        self.settings.model_input_tokens * self.settings.context_compaction_trigger_ratio
-                    )
+                    soft_limit = int(input_budget * self.settings.context_compaction_trigger_ratio)
+                    target_tokens = int(input_budget * self.settings.context_compaction_target_ratio)
                     input_tokens_before_compaction = model_input_tokens(model_messages, model_tools, model.count_tokens)
-                    if input_tokens_before_compaction >= soft_limit:
-                        model_messages = compact_model_input(
-                            prepare_model_messages(messages, model_tools, model_cards, capabilities),
-                            run_id=current.id,
-                            compacted_ids=compacted_ids,
-                            summarized_ids=summarized_ids,
-                            preview_tokens=self.settings.tool_result_preview_tokens,
-                            emergency_fraction=self.settings.tool_result_emergency_fraction,
-                            emergency=True,
-                            collapse_compacted=False,
-                            stored_result_ids=stored_result_ids,
-                            count_tokens=model.count_tokens,
-                        )
-                        compacted_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
+                    protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
+                    fingerprint = hashlib.sha256(json.dumps(
+                        {"protocol": protocol[history_count:], "stored_results": sorted(stored_result_ids)},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8")).hexdigest()
+                    pending_compaction = (
+                        context_compaction.get("last_attempt_fingerprint") == fingerprint
+                        and context_compaction.get("tool_batch_applied") is False
+                    )
+                    if pending_compaction or (input_tokens_before_compaction >= soft_limit and context_compaction.get("last_attempt_fingerprint") != fingerprint):
+                        if not pending_compaction:
+                            # 摘要 await 前保存意图；只有尚未完成单批的事件可以断点续做。
+                            context_compaction.update(last_attempt_fingerprint=fingerprint, tool_batch_applied=False)
+                            self._save_checkpoint(
+                                request, current, messages, cursor_id, "context_compacting", activated_names,
+                                pending_approvals, discovered_names=discovered_names, used_names=used_names,
+                                compacted_ids=compacted_ids, summarized_ids=summarized_ids,
+                                context_compaction=context_compaction,
+                            )
                         start_message_id = current.metadata.get("original_request_message_id")
                         if not current.parent_run_id and isinstance(start_message_id, str):
-                            while compacted_tokens >= soft_limit:
+                            while True:
                                 memory_before = self.context.conversation_memory.get(
                                     request.conversation_id, request.user_id
                                 ) if request.user_id else None
@@ -413,13 +432,7 @@ class AgentLoop:
                                 self.store.save_run(current)
                                 model_messages = compact_model_input(
                                     prepare_model_messages(messages, model_tools, model_cards, capabilities),
-                                    run_id=current.id,
-                                    compacted_ids=compacted_ids,
-                                    summarized_ids=summarized_ids,
-                                    preview_tokens=self.settings.tool_result_preview_tokens,
-                                    emergency_fraction=self.settings.tool_result_emergency_fraction,
-                                    stored_result_ids=stored_result_ids,
-                                    count_tokens=model.count_tokens,
+                                    **view_options,
                                 )
                                 compacted_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
                                 logger.info(
@@ -433,71 +446,28 @@ class AgentLoop:
                                     cursor_before,
                                     cursor_after,
                                 )
-                    if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
+                        # 历史阶段结束后只调用一次批量压缩；内部冻结候选，最多 ceil(N * 20%)。
                         model_messages = compact_model_input(
                             prepare_model_messages(messages, model_tools, model_cards, capabilities),
-                            run_id=current.id,
-                            compacted_ids=compacted_ids,
-                            summarized_ids=summarized_ids,
-                            preview_tokens=self.settings.tool_result_preview_tokens,
-                            emergency_fraction=self.settings.tool_result_emergency_fraction,
-                            emergency=True,
-                            stored_result_ids=stored_result_ids,
-                            count_tokens=model.count_tokens,
+                            compact=True, batch_ratio=self.settings.tool_compaction_batch_ratio,
+                            definitions=model_tools, target_tokens=target_tokens, **view_options,
                         )
-                        compacted_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
-                        start_message_id = current.metadata.get("original_request_message_id")
-                        if compacted_tokens > self.settings.model_input_tokens and isinstance(start_message_id, str):
-                            changed = await self.context.conversation_memory.compact_history_before(
-                                request,
-                                model,
-                                start_message_id,
-                                recent_tokens=self.settings.summary_recent_tokens,
-                                all_pending=True,
-                            )
-                            if changed:
-                                messages, history_count = self._refresh_conversation_prefix(
-                                    messages, request, current, history_count, start_message_id
-                                )
-                                history_changed = True
-                                current = current.model_copy(update={
-                                    "metadata": {**current.metadata, "conversation_history_count": history_count}
-                                })
-                                self.store.save_run(current)
-                                model_messages = compact_model_input(
-                                    prepare_model_messages(messages, model_tools, model_cards, capabilities),
-                                    run_id=current.id,
-                                    compacted_ids=compacted_ids,
-                                    summarized_ids=summarized_ids,
-                                    preview_tokens=self.settings.tool_result_preview_tokens,
-                                    emergency_fraction=self.settings.tool_result_emergency_fraction,
-                                    emergency=True,
-                                    stored_result_ids=stored_result_ids,
-                                    count_tokens=model.count_tokens,
-                                )
-                    if history_changed or compacted_ids != previous_compacted_ids or summarized_ids != previous_summarized_ids:
+                        context_compaction["tool_batch_applied"] = True
+                    if history_changed or compacted_ids != previous_compacted_ids or summarized_ids != previous_summarized_ids or context_compaction:
                         self._save_checkpoint(
                             request, current, messages, cursor_id, "context_compacted", activated_names,
                             pending_approvals, discovered_names=discovered_names, used_names=used_names,
                             compacted_ids=compacted_ids, summarized_ids=summarized_ids,
-                        )
-                    if model_input_tokens(model_messages, model_tools, model.count_tokens) > self.settings.model_input_tokens:
-                        model_messages = narrow_model_input(
-                            model_messages,
-                            model_tools,
-                            input_budget_tokens=self.settings.model_input_tokens,
-                            recent_messages=self.settings.emergency_recent_messages,
-                            recent_results=self.settings.emergency_recent_tool_results,
-                            count_tokens=model.count_tokens,
+                            context_compaction=context_compaction,
                         )
                     local_input_tokens = model_input_tokens(model_messages, model_tools, model.count_tokens)
-                    if local_input_tokens > self.settings.model_input_tokens:
+                    if local_input_tokens > input_budget:
                         return await self._finish(
                             current, request=request,
                             result=AgentResult(
                                 agent_id=current.agent_id,
                                 status=AgentResultStatus.BLOCKED,
-                                summary="本轮输入经精简后仍超过模型上下文预算，未继续调用模型；当前请求及本轮明确回读的原文未被截断。",
+                                summary="本轮输入经安全摘要和单批压缩后仍超过模型上下文预算，未继续调用模型；当前请求、受保护结果及工具协议未被删除。",
                                 error="BUDGET_EXCEEDED",
                                 trace_id=current.id,
                             ),
@@ -516,6 +486,13 @@ class AgentLoop:
                         current, model, model_request, local_input_tokens, on_model_delta,
                         can_stream_answer=not self._requires_completion_review(current),
                     )
+                    if fresh_reads := unread_tool_result_ids(messages, consumed_read_ids):
+                        consumed_read_ids.update(fresh_reads)
+                        context_compaction["consumed_read_ids"] = sorted(consumed_read_ids)
+                        self._save_checkpoint(
+                            request, current, messages, cursor_id, "model_response", activated_names,
+                            pending_approvals, context_compaction=context_compaction,
+                        )
                     resume_model = False
             except Exception:
                 return await self._finish(
@@ -804,6 +781,7 @@ class AgentLoop:
                                 else True
                             )
                         )
+                        cached_read = self.store.get_tool_call_record(persisted_id)
                         if current.parent_run_id:
                             result = _blocked_result(persisted_id, "SUBAGENT_HISTORY_FORBIDDEN", "子任务不能读取主会话工具结果。")
                         elif problem:
@@ -817,6 +795,8 @@ class AgentLoop:
                             or record[1] is None
                         ):
                             result = _failed_result(persisted_id, "TOOL_RESULT_NOT_FOUND", "当前会话中不存在该工具结果。")
+                        elif cached_read is not None and cached_read[0].run_id == current.id and cached_read[0].arguments == arguments and cached_read[1] is not None:
+                            result = cached_read[1]
                         else:
                             source_call, source_result = record
                             result = ToolResult(
@@ -888,7 +868,7 @@ class AgentLoop:
                                                 "arguments": arguments,
                                             }
                                             pending_approvals.append(approval)
-                    if name not in {"agent.ask_user", "tool.search", "conversation.search_history", "conversation.read_tool_result", "agent.delegate"}:
+                    if name not in {"agent.ask_user", "tool.search", "conversation.search_history", "agent.delegate"}:
                         approval_waiting = result.error is not None and result.error.code == "APPROVAL_REQUIRED" and result.error.details.get("approval_id")
                         if not approval_waiting and self.store.get_tool_call(persisted_id) is None:
                             self.store.save_tool_call(ToolCall(id=persisted_id, name=name, arguments=arguments, run_id=current.id), result)
@@ -1232,7 +1212,8 @@ class AgentLoop:
             previous = self.recovery.current(run.id) if self.recovery is not None else {}
             restoring = previous.get("scope") == "model" and str(previous.get("operation_id", "")).startswith(operation_prefix)
             run = self.store.get_run(run.id) or run
-            if input_tokens > self.settings.model_input_tokens or run.turn_count >= self.settings.max_agent_turns and not restoring:
+            review_budget = effective_input_budget(self.settings.model_input_tokens, model, self.settings.completion_review_max_tokens)
+            if input_tokens > review_budget or run.turn_count >= self.settings.max_agent_turns and not restoring:
                 raise ValueError("没有足够预算执行完整性检查，未发送模型请求。")
             run = run.model_copy(update={"turn_count": run.turn_count + (not restoring)})
             operation_id = previous["operation_id"] if restoring else f"{operation_prefix}{run.turn_count}"
@@ -1508,48 +1489,22 @@ class AgentLoop:
         self._save_checkpoint(request, run, messages, cursor_id, "approval_resolved", activated_names, [])
         return None
 
-    async def _precompact_oversized_history(self, request: AgentRequest, run: Run, model: ModelAdapter) -> None:
-        """仅当原始历史自身已超过硬输入预算时，先分批整理再构建完整消息视图。"""
-
-        if not request.user_id:
-            return
-        start_message_id = run.metadata.get("original_request_message_id")
-        if not isinstance(start_message_id, str):
-            return
-        memory = self.context.conversation_memory.get(request.conversation_id, request.user_id)
-        cursor = memory.summarized_through_message_id if memory and memory.summary else None
-        if cursor is not None and not self.store.message_exists(request.conversation_id, cursor):
-            cursor = None
-        cached_tokens = self.context.conversation_memory.estimated_history_tokens(
-            request.conversation_id, user_id=request.user_id
-        )
-        if cached_tokens <= self.settings.model_input_tokens:
-            return
-
-        source_tokens = 0
-        for page in self.store.iter_message_pages_after(request.conversation_id, cursor):
-            source_tokens += sum(model.count_tokens(message.content) for message in page)
-            if source_tokens > self.settings.model_input_tokens:
-                break
-        if source_tokens <= self.settings.model_input_tokens:
-            return
-
-        changed = await self.context.conversation_memory.compact_history_before(
-            request,
-            model,
-            start_message_id,
-            recent_tokens=self.settings.summary_recent_tokens,
-            all_pending=True,
-        )
-        logger.info(
-            "conversation_history_precompaction conversation_id=%s run_id=%s source_tokens=%s "
-            "cached_tokens=%s changed=%s",
-            request.conversation_id,
-            run.id,
-            source_tokens,
-            cached_tokens,
-            changed,
-        )
+    def _active_tool_references(self, messages, pending_approvals, request: AgentRequest) -> set[str]:
+        """仅沿已知未完成调用的参数扩展真实 Dataset 来源，不预测未来决策。"""
+        references = active_tool_references(messages, [item.get("arguments", {}) for item in pending_approvals])
+        pending = list(references)
+        visited = set()
+        while pending:
+            identifier = pending.pop()
+            if identifier in visited:
+                continue
+            visited.add(identifier)
+            dataset = self.context._dataset(identifier, request)
+            if dataset is not None:
+                references.add(dataset.path)
+                references.update(dataset.source_dataset_ids)
+                pending.extend(dataset.source_dataset_ids)
+        return references
 
     def _initial_messages(
         self,
@@ -1623,6 +1578,7 @@ class AgentLoop:
         used_names=None,
         compacted_ids=None,
         summarized_ids=None,
+        context_compaction=None,
         empty_response_retries: int | None = None,
         pending_answer: str | None = None,
     ) -> None:
@@ -1657,6 +1613,7 @@ class AgentLoop:
                     "used_tool_names": resolved_used,
                     "compacted_tool_call_ids": sorted(compacted_ids) if compacted_ids is not None else (previous.state.get("compacted_tool_call_ids", []) if previous else []),
                     "summarized_tool_call_ids": sorted(summarized_ids) if summarized_ids is not None else (previous.state.get("summarized_tool_call_ids", []) if previous else []),
+                    "context_compaction": context_compaction if context_compaction is not None else (previous.state.get("context_compaction", {}) if previous else {}),
                     "conversation_history_count": run.metadata.get("conversation_history_count", 0),
                     "pending_approvals": pending_approvals,
                     "pending_tool_calls": pending_tool_calls,

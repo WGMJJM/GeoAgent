@@ -14,7 +14,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE = PROJECT_ROOT / "backend" / ".env"
 DEFAULT_CONTEXT_COMPACTION_TRIGGER_RATIO = 0.8
 DEFAULT_SUMMARY_RECENT_TOKENS = 6400
-DEFAULT_EMERGENCY_RECENT_MESSAGES = 8
 DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT = 8
 DEFAULT_TASK_CONTEXT_LIMIT = 8
 
@@ -51,13 +50,13 @@ class Settings(BaseSettings):
     tokenizer_file: Path = DEFAULT_TOKENIZER_FILE
     model_input_tokens: int = Field(default=256000, ge=1)
     context_compaction_trigger_ratio: float = Field(default=DEFAULT_CONTEXT_COMPACTION_TRIGGER_RATIO, gt=0, le=1)
+    context_compaction_target_ratio: float = Field(default=0.20, gt=0, le=0.20)
+    tool_compaction_batch_ratio: float = Field(default=0.20, gt=0, le=0.20)
+    protected_recent_tool_batches: int = Field(default=5, ge=5)
     summary_recent_tokens: int = Field(default=DEFAULT_SUMMARY_RECENT_TOKENS, ge=1)
-    emergency_recent_messages: int = Field(default=DEFAULT_EMERGENCY_RECENT_MESSAGES, ge=1)
     tool_result_preview_tokens: int = Field(default=12800, ge=1)
-    emergency_recent_tool_results: int = Field(default=16, ge=1)
     conversation_tool_index_limit: int = Field(default=DEFAULT_CONVERSATION_TOOL_INDEX_LIMIT, ge=1)
     task_context_limit: int = Field(default=DEFAULT_TASK_CONTEXT_LIMIT, ge=1)
-    tool_result_emergency_fraction: float = Field(default=0.5, gt=0, le=1)
     tool_context_tokens: int = Field(default=25600, ge=1)
     tool_context_max_cards: int = Field(default=8, ge=1)
     tool_search_regex_results: int = Field(default=2, ge=1)

@@ -10,7 +10,7 @@ from time import perf_counter
 from typing import Any
 
 from app.core.models import ConversationMemory, ConversationMemoryEntry, Message, Run, RunStatus
-from app.models import ModelAdapter, ModelRequest
+from app.models import ModelAdapter, ModelRequest, effective_input_budget
 from app.state import StateStore
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,10 @@ class ConversationSummarizer:
         payload: dict[str, Any] | None = None
         request_messages: list[dict[str, str]] | None = None
         request_input_tokens = 0
-        input_budget = min(SUMMARY_MAX_INPUT_TOKENS, self.model_input_tokens - SUMMARY_MAX_OUTPUT_TOKENS)
+        input_budget = min(
+            SUMMARY_MAX_INPUT_TOKENS,
+            effective_input_budget(self.model_input_tokens, adapter, SUMMARY_MAX_OUTPUT_TOKENS),
+        )
         while batch_segments and input_budget > 0:
             batch = [message for segment in batch_segments for message in segment]
             verified_runs, verified_resources = self._verified_context(batch, conversation_id, user_id)
@@ -554,6 +557,8 @@ def _earliest_protected_run_start(
         run for run in runs
         if run.parent_run_id is None and run.status in _PROTECTED_RUN_STATUSES
     ]
+    active_tasks = {run.task_id for run in protected if run.task_id is not None}
+    protected.extend(run for run in runs if run.parent_run_id is None and run.task_id in active_tasks and run not in protected)
     if not protected:
         return len(messages)
     starts: list[int] = []
