@@ -53,6 +53,8 @@ def score(row: dict) -> dict:
         status, reason = "BLOCKED_USER_INPUT", "WAITING_USER"
     elif run_status == "PARTIAL_COMPLETED":
         status, reason = "PARTIAL", review.get("decision") or "PARTIAL_COMPLETED"
+    elif terminal.get("error") in {"MODEL_EMPTY_RESPONSE", "COMPLETION_REVIEW_UNAVAILABLE"}:
+        status, reason = "SYSTEM_BLOCKED", terminal["error"]
     elif failures:
         status, reason = "GIS_EXECUTION_FAILURE", "GIS_TOOL_FAILURE"
     else:

@@ -40,3 +40,13 @@ def test_task_association_block_remains_visible() -> None:
     row = _row("COMPLETED", "accept")
     row["run_metadata"]["task_association_error"] = "conflict"
     assert scorer.score(row)["status"] == "SYSTEM_BLOCKED"
+
+
+def test_recovered_tool_error_does_not_hide_final_model_failure() -> None:
+    row = _row("FAILED", None)
+    row["terminal"]["error"] = "MODEL_EMPTY_RESPONSE"
+    row["gis_tool_failures"] = [{"tool": "python.execute", "error": "PYTHON_EXECUTION_FAILED"}]
+    result = scorer.score(row)
+    assert result["status"] == "SYSTEM_BLOCKED"
+    assert result["reason"] == "MODEL_EMPTY_RESPONSE"
+    assert result["gis_tool_failures"] == row["gis_tool_failures"]
