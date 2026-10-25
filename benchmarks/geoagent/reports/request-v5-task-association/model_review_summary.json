@@ -1,0 +1,19 @@
+{
+  "scoring_policy": "model_review_only_v1",
+  "created_at": "2026-10-25T17:02:51.546484+00:00",
+  "source": "reports/request-v5-task-association/evaluator_original_gis_results.jsonl",
+  "source_sha256": "5da7384d343c7fb66b0c12f1679db428944884c4ebc7624806c0e587171be858",
+  "task_count": 20,
+  "status_counts": {
+    "BLOCKED_USER_INPUT": 1,
+    "PASS": 16,
+    "GIS_EXECUTION_FAILURE": 1,
+    "SYSTEM_BLOCKED": 1,
+    "PARTIAL": 1
+  },
+  "model_review_passes": 16,
+  "model_review_pass_rate": 0.8,
+  "interpretation": "Model-reviewed completion rate, not independently verified GIS correctness.",
+  "program_validator_used": false,
+  "original_records_preserved": true
+}
