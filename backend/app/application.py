@@ -216,7 +216,9 @@ class Application:
             self.model_adapters[profile.id] = adapter
 
         if profiles:
-            selected = next((item for item in profiles if item.default), profiles[0])
+            selected = self.model_profiles.get(self.settings.default_model_profile or "")
+            if selected is None:
+                selected = next((item for item in profiles if item.default), profiles[0])
             self.default_model_profile = selected.id
             self.model_adapter = self.model_adapters[selected.id]
 

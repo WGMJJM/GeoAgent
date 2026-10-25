@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     embedding_concurrency: int = Field(default=10, ge=1)
     model_profiles: str | None = None
     additional_model_profiles: str | None = None
+    default_model_profile: str | None = "juapi-gpt-6-luna"
     model_reasoning_config: str | None = None
     auth_cookie_name: str = "geoagent_session"
     auth_cookie_secure: bool = False
