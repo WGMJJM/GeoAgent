@@ -40,6 +40,7 @@ from app.execution.tools import (
     ToolRegistry,
     validate_arguments,
 )
+from app.memory.user_memory import REMEMBER_TOOL, UserMemoryService
 from app.models import ModelAdapter, ModelRequest, ModelResponse, effective_input_budget
 from app.observability import EventType, TraceRecorder
 from app.run.checkpoints import RunCheckpointCodec
@@ -164,9 +165,11 @@ class AgentLoop:
         self.services_factory = services_factory
         self.metrics = metrics
         self.recovery = recovery
+        self.user_memory = context_services.get("user_memory") or UserMemoryService(store, model_input_tokens=settings.model_input_tokens)
         self.context = ContextBuilder(
             store,
             profile_service=context_services.get("profile"),
+            user_memory=self.user_memory,
             conversation_memory=context_services["conversation_memory"],
             recent_tool_results=settings.conversation_tool_index_limit,
             task_context_limit=settings.task_context_limit,
@@ -249,7 +252,7 @@ class AgentLoop:
                 ),
             )
 
-        messages, cursor_id = self._initial_messages(request, resume_from, run, continuation)
+        messages, cursor_id = self._initial_messages(request, resume_from, run, continuation, count_tokens=model.count_tokens)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
         if resume_from is None:
             history_count = len(protocol) - 1
@@ -264,7 +267,7 @@ class AgentLoop:
         start_message_id = run.metadata.get("original_request_message_id")
         if resume_from is not None and not run.parent_run_id and isinstance(start_message_id, str):
             messages, history_count = self._refresh_conversation_prefix(
-                messages, request, run, history_count, start_message_id
+                messages, request, run, history_count, start_message_id, count_tokens=model.count_tokens,
             )
         if run.metadata.get("conversation_history_count") != history_count:
             run = run.model_copy(update={"metadata": {**run.metadata, "conversation_history_count": history_count}})
@@ -404,6 +407,11 @@ class AgentLoop:
                                 context_compaction=context_compaction,
                             )
                         start_message_id = current.metadata.get("original_request_message_id")
+                        if not current.parent_run_id:
+                            await self.user_memory.update(
+                                request, current, model, event_id=f"compaction:{current.id}:{fingerprint}", mode="compaction",
+                            )
+                            current = self.store.get_run(current.id) or current
                         if not current.parent_run_id and isinstance(start_message_id, str):
                             while True:
                                 memory_before = self.context.conversation_memory.get(
@@ -423,7 +431,7 @@ class AgentLoop:
                                 if not changed or cursor_after == cursor_before:
                                     break
                                 messages, history_count = self._refresh_conversation_prefix(
-                                    messages, request, current, history_count, start_message_id
+                                    messages, request, current, history_count, start_message_id, count_tokens=model.count_tokens,
                                 )
                                 history_changed = True
                                 current = current.model_copy(update={
@@ -648,7 +656,7 @@ class AgentLoop:
 
                     if not within_budget:
                         pass
-                    elif current.metadata.get("task_association_error") and name not in {"agent.ask_user", "conversation.search_history", "conversation.read_tool_result"}:
+                    elif current.metadata.get("task_association_error") and name not in {"agent.ask_user", "memory.remember", "conversation.search_history", "conversation.read_tool_result"}:
                         result = _blocked_result(persisted_id, "TASK_ASSOCIATION_BLOCKED", "任务关联尚未解决，请先澄清，不能执行新操作。")
                     elif mixed_delegation:
                         result = _failed_result(persisted_id, "DELEGATION_MIXED_BATCH", "agent.delegate 必须独占一个模型工具批次。")
@@ -658,6 +666,22 @@ class AgentLoop:
                             status=ToolStatus.FAILED,
                             error=ToolError(code="INVALID_TOOL_ARGUMENTS", message=decode_error),
                         )
+                    elif name == "memory.remember":
+                        problem = validate_arguments(arguments, REMEMBER_TOOL["function"]["parameters"])
+                        if current.parent_run_id or name not in {item["function"]["name"] for item in self._tool_definitions(runtime_context)}:
+                            result = _blocked_result(persisted_id, "MEMORY_NOT_AVAILABLE", "当前运行不能更新用户长期记忆。")
+                        elif problem:
+                            result = _failed_result(persisted_id, "INVALID_TOOL_ARGUMENTS", problem)
+                        else:
+                            output = await self.user_memory.update(
+                                request, current, model,
+                                event_id=f"explicit:{persisted_id}", mode="explicit",
+                            )
+                            current = self.store.get_run(current.id) or current
+                            if output["status"] in {"updated", "unchanged"}:
+                                result = ToolResult(call_id=persisted_id, status=ToolStatus.SUCCESS, output=output)
+                            else:
+                                result = _failed_result(persisted_id, "MEMORY_UPDATE_UNCONFIRMED", output["message"])
                     elif name == "agent.delegate":
                         if current.parent_run_id:
                             result = _blocked_result(persisted_id, "SUBAGENT_DELEGATION_FORBIDDEN", "子 Agent 不能再次委派。")
@@ -1064,7 +1088,7 @@ class AgentLoop:
         for _, name, status, attempt in records:
             if status is ToolExecutionStatus.RUNNING:
                 return True
-            if name in self.registry.names() and not self.registry.get(name).metadata.requires_completion_review:
+            if name == "memory.remember" or (name in self.registry.names() and not self.registry.get(name).metadata.requires_completion_review):
                 exempt_attempts += attempt
         return run.tool_call_count > exempt_attempts
 
@@ -1319,6 +1343,8 @@ class AgentLoop:
         if context.allowed_tool_names is None:
             definitions.append(SEARCH_HISTORY_TOOL)
             definitions.append(READ_TOOL_RESULT_TOOL)
+            if "memory.write" in context.granted_scopes:
+                definitions.append(REMEMBER_TOOL)
             if self.delegation is not None:
                 definitions.append(DELEGATE_TOOL)
         available = self._available_tool_names(context, activated_names)
@@ -1512,9 +1538,10 @@ class AgentLoop:
         checkpoint: Checkpoint | None,
         run: Run,
         continuation: dict[str, object] | None,
+        *, count_tokens: Callable[[str], int] = estimate_tokens,
     ) -> tuple[list[dict[str, Any]], str | None]:
         if checkpoint is None:
-            return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
+            return self.context.build(request, run=run, count_tokens=count_tokens), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
 
         state = checkpoint.state
         saved = state.get("protocol_messages")
@@ -1525,8 +1552,8 @@ class AgentLoop:
             if isinstance(content, str) and content.strip():
                 protocol.append({"role": "user", "content": content.strip()})
         if not protocol:
-            return self.context.build(request, run=run), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
-        built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False)
+            return self.context.build(request, run=run, count_tokens=count_tokens), self.context.conversation_memory.latest_user_message_id(request.conversation_id, user_id=request.user_id)
+        built = self.context.build(request, run=run, protocol_messages=protocol, append_request=False, count_tokens=count_tokens)
         built.extend(skill_messages(state.get("skill_messages", [])))
         for feedback in state.get("protocol_feedback", []):
             content = feedback["content"]
@@ -1544,6 +1571,7 @@ class AgentLoop:
         run: Run,
         history_count: int,
         start_message_id: str,
+        *, count_tokens: Callable[[str], int] = estimate_tokens,
     ) -> tuple[list[dict[str, Any]], int]:
         """用最新摘要重组旧会话前缀，当前 Run 的原始工具协议保持不变。"""
 
@@ -1555,7 +1583,7 @@ class AgentLoop:
         if start is None:
             return messages, history_count
         history = [{"role": item.role, "content": item.content} for item in persisted[:start]]
-        prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False)
+        prefix = self.context.build(request, run=run, protocol_messages=history, append_request=False, count_tokens=count_tokens)
         protocol = [item for item in messages if item.get("role") in {"user", "assistant", "tool"}]
         feedback = [item for item in messages if item.get("role") == "system"
                     and str(item.get("content", "")).startswith((FEEDBACK_PREFIX, TASK_FEEDBACK_PREFIX))]

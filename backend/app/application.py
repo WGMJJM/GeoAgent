@@ -32,6 +32,7 @@ from app.knowledge.retrieval import KnowledgeService
 from app.memory import (
     ConversationMemoryService,
     ConversationSummarizer,
+    UserMemoryService,
     UserProfileService,
 )
 from app.models import ModelAdapter
@@ -70,6 +71,7 @@ class Application:
         self.python_executor = PythonExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
         self.shell_executor = ShellExecutor(self.workspace, timeout_seconds=self.settings.tool_timeout_seconds)
         self.profile = UserProfileService(self.store)
+        self.user_memory = UserMemoryService(self.store, model_input_tokens=self.settings.model_input_tokens)
         self.conversation_memory = ConversationMemoryService(
             self.store,
             summarizer=ConversationSummarizer(
@@ -131,6 +133,7 @@ class Application:
             self.execution_services,
             context_services={
                 "profile": self.profile,
+                "user_memory": self.user_memory,
                 "conversation_memory": self.conversation_memory,
                 "skills": self.skills,
                 "mcp": self.mcp,
