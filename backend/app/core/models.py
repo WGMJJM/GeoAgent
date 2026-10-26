@@ -569,6 +569,26 @@ class ConversationMemoryEntry(StrictModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class UserMemoryFact(StrictModel):
+    content: str = Field(min_length=1, max_length=150)
+    scope: str = Field(min_length=1, max_length=80)
+
+
+class UserMemoryEntry(UserMemoryFact):
+    id: str = Field(default_factory=lambda: new_id("umem"))
+    source_conversation_id: str
+    source_ids: list[str] = Field(min_length=1, max_length=5)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    expires_at: datetime
+
+
+class UserMemory(StrictModel):
+    user_id: str
+    version: int = Field(default=0, ge=0)
+    entries: list[UserMemoryEntry] = Field(default_factory=list, max_length=30)
+
+
 class ConversationMemory(StrictModel):
     """Conversation 作用域的结构化派生状态，不替代原始 Messages。"""
 
@@ -582,6 +602,7 @@ class ConversationMemory(StrictModel):
     summary_version: int = Field(default=0, ge=0)
     summarized_through_message_id: str | None = None
     summary_updated_at: datetime | None = None
+    user_memory_snapshot: list[UserMemoryFact] | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 

@@ -38,6 +38,8 @@ from app.core.models import (
     ToolStatus,
     TraceEvent,
     User,
+    UserMemory,
+    UserMemoryFact,
     UserProfile,
     UserSession,
     utc_now,
@@ -181,6 +183,20 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     user_id TEXT PRIMARY KEY,
     payload_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_memories (
+    user_id TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS user_memory_events (
+    user_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(user_id, event_id),
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS planning_sessions (
     id TEXT PRIMARY KEY,
@@ -491,6 +507,98 @@ class StateStore:
             row = db.execute("SELECT payload_json FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
         return self._model(UserProfile, row[0]) if row else None
 
+    def get_user_memory(self, user_id: str) -> UserMemory:
+        """清理过期条目；读取不会延长任何一条记忆的有效期。"""
+        now = utc_now()
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT payload_json FROM user_memories WHERE user_id=?", (user_id,)).fetchone()
+            memory = self._model(UserMemory, row[0]) if row else UserMemory(user_id=user_id)
+            live = [entry for entry in memory.entries if entry.expires_at > now]
+            if len(live) != len(memory.entries):
+                memory = memory.model_copy(update={"entries": live, "version": memory.version + 1})
+                self._save_user_memory(db, memory)
+            return memory
+
+    @staticmethod
+    def _save_user_memory(db: sqlite3.Connection, memory: UserMemory) -> None:
+        db.execute(
+            """INSERT INTO user_memories(user_id,version,payload_json) VALUES(?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET version=excluded.version,payload_json=excluded.payload_json""",
+            (memory.user_id, memory.version, memory.model_dump_json()),
+        )
+
+    def claim_user_memory_event(self, user_id: str, conversation_id: str, event_id: str) -> tuple[bool, dict]:
+        """先持久化调用意图；恢复时复用结果或报告中断，不重复发起模型判断。"""
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            owner = db.execute("SELECT user_id FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if owner is None or owner[0] != user_id:
+                raise PermissionError("当前用户无权更新该会话的长期记忆")
+            pending = {"status": "pending", "message": "该记忆判断已开始；恢复时不重复调用，尚不能确认保存。"}
+            inserted = db.execute(
+                """INSERT INTO user_memory_events(user_id,event_id,conversation_id,result_json,created_at)
+                VALUES(?,?,?,?,?) ON CONFLICT(user_id,event_id) DO NOTHING""",
+                (user_id, event_id, conversation_id, self._json(pending), utc_now().isoformat()),
+            ).rowcount
+            row = db.execute(
+                "SELECT result_json FROM user_memory_events WHERE user_id=? AND event_id=?", (user_id, event_id),
+            ).fetchone()
+            return bool(inserted), json.loads(row[0])
+
+    def finish_user_memory_event(
+        self, user_id: str, event_id: str, result: dict, *, memory: UserMemory | None = None,
+    ) -> dict:
+        """记忆 CAS 与事件结果在同一事务提交；冲突时保留其他聊天的写入。"""
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            event = db.execute(
+                "SELECT result_json FROM user_memory_events WHERE user_id=? AND event_id=?", (user_id, event_id),
+            ).fetchone()
+            if event is None:
+                raise KeyError(event_id)
+            previous = json.loads(event[0])
+            if previous["status"] != "pending":
+                return previous
+            if memory is not None:
+                if memory.user_id != user_id:
+                    raise ValueError("长期记忆用户不匹配")
+                row = db.execute("SELECT payload_json FROM user_memories WHERE user_id=?", (user_id,)).fetchone()
+                current = self._model(UserMemory, row[0]) if row else UserMemory(user_id=user_id)
+                if current.version != memory.version:
+                    result = {"status": "conflict", "message": "其他聊天已更新记忆，本次修改未覆盖新版本。"}
+                elif current.entries != memory.entries:
+                    self._save_user_memory(db, memory.model_copy(update={"version": current.version + 1}))
+            db.execute(
+                "UPDATE user_memory_events SET result_json=? WHERE user_id=? AND event_id=?",
+                (self._json(result), user_id, event_id),
+            )
+            return result
+
+    def snapshot_user_memory(
+        self, conversation_id: str, user_id: str, entries: list[UserMemoryFact],
+    ) -> list[UserMemoryFact]:
+        """首个请求冻结快照，包括空快照；会话摘要更新不能重新加载用户记忆。"""
+        with self.transaction() as db:
+            db.execute("BEGIN IMMEDIATE")
+            owner = db.execute("SELECT user_id FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if owner is None or owner[0] != user_id:
+                raise PermissionError("当前用户无权访问该会话")
+            row = db.execute(
+                "SELECT payload_json FROM conversation_memories WHERE conversation_id=? AND user_id=?",
+                (conversation_id, user_id),
+            ).fetchone()
+            current = self._model(ConversationMemory, row[0]) if row else ConversationMemory(conversation_id=conversation_id, user_id=user_id)
+            if current.user_memory_snapshot is not None:
+                return current.user_memory_snapshot
+            updated = current.model_copy(update={"user_memory_snapshot": entries})
+            db.execute(
+                """INSERT INTO conversation_memories(conversation_id,user_id,payload_json,updated_at) VALUES(?,?,?,?)
+                ON CONFLICT(conversation_id) DO UPDATE SET payload_json=excluded.payload_json""",
+                (conversation_id, user_id, updated.model_dump_json(), updated.updated_at.isoformat()),
+            )
+            return entries
+
     def upsert_conversation(self, conversation_id: str, title: str, timestamp: str, user_id: str | None = None) -> None:
         with self._connect() as db:
             db.execute(
@@ -706,6 +814,7 @@ class StateStore:
                         "summary_version": current.summary_version,
                         "summarized_through_message_id": current.summarized_through_message_id,
                         "summary_updated_at": current.summary_updated_at,
+                        "user_memory_snapshot": current.user_memory_snapshot,
                         "key_facts": _merge_conversation_entries(current.key_facts, memory.key_facts),
                         "decisions": _merge_conversation_entries(current.decisions, memory.decisions),
                         "important_references": _merge_conversation_entries(current.important_references, memory.important_references),

@@ -3,9 +3,11 @@
 from .conversation import ConversationMemoryService
 from .conversation_summarizer import ConversationSummarizer
 from .profile import UserProfileService
+from .user_memory import UserMemoryService
 
 __all__ = [
     "ConversationMemoryService",
     "ConversationSummarizer",
     "UserProfileService",
+    "UserMemoryService",
 ]
