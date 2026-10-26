@@ -60,3 +60,4 @@ htmlcov/
 !/backend/tests/
 /backend/tests/*
 !/backend/tests/test_context_compaction.py
+!/backend/tests/test_user_memory.py

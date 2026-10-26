@@ -16,7 +16,6 @@ from app.agent.context import (
     protected_tool_result_ids,
 )
 from app.agent.loop import AgentLoop, _tool_observation
-from app.auth.policy import ToolDiscoveryContext
 from app.config import Settings
 from app.core.models import (
     AgentRequest,
@@ -50,6 +49,7 @@ class MockModel(ModelAdapter):
         self.responses = list(responses)
         self.requests = []
         self.summary_requests = []
+        self.memory_requests = []
         self.fail_once = fail_once
 
     def count_tokens(self, value):
@@ -70,6 +70,9 @@ class MockModel(ModelAdapter):
                 "unresolved_topics": [{"content": "Check accuracy", "source_message_id": source_id}],
                 "references": [],
             }))
+        if isinstance(payload, dict) and "memory_update_mode" in payload:
+            self.memory_requests.append(request.model_copy(deep=True))
+            return ModelResponse(content='{"upserts":[],"removals":[]}')
         self.requests.append(request.model_copy(deep=True))
         if self.fail_once:
             self.fail_once = False
@@ -146,7 +149,8 @@ def checkpoint(loop, request, run, protocol):
 
 def measured_input(loop, request, run, protocol, model):
     messages = loop.context.build(request, run=run, protocol_messages=protocol, append_request=False)
-    tools, cards, _ = loop._tool_context(ToolDiscoveryContext(), [], set(), count_tokens=model.count_tokens)
+    context = loop.policy.discovery_context(authenticated_user=bool(request.user_id), services={})
+    tools, cards, _ = loop._tool_context(context, [], set(), count_tokens=model.count_tokens)
     return model_input_tokens(prepare_model_messages(messages, tools, cards), tools, model.count_tokens)
 
 
@@ -176,6 +180,7 @@ async def test_history_is_summarized_before_any_tool_compaction(store, tmp_path)
     result = await loop.run(request, prepared=prepared, resume_from=checkpoint(loop, request, run, protocol))
     assert result.status is AgentResultStatus.SUCCESS
     assert len(model.summary_requests) > 1
+    assert len(model.memory_requests) == 1
     assert not store.latest_checkpoint(run.id).state["compacted_tool_call_ids"]
     actual = model_input_tokens(model.requests[0].messages, model.requests[0].tools, model.count_tokens)
     assert actual <= loop.settings.model_input_tokens * 0.20
@@ -400,6 +405,8 @@ async def test_resume_does_not_take_another_batch_without_real_progress(store, t
 async def test_transport_retry_reuses_same_compaction_batch(store, tmp_path):
     class RetryModel(MockModel):
         async def complete(self, request):
+            if "memory_update_mode" in request.messages[-1]["content"]:
+                return await super().complete(request)
             if not self.requests:
                 self.requests.append(request.model_copy(deep=True))
                 raise ConnectionError("temporary")
